@@ -1,0 +1,23 @@
+--- a/warp_utility.h
++++ b/warp_utility.h
+@@ -101,15 +101,16 @@
+ #define WHNAT_RESET(_entry, _addr, _value) \
+ do {\
+ 	u32 cnt = 0;\
+-	warp_io_write32(_entry, _addr, _value);\
+-	while (_value != 0 && cnt < WED_POLL_MAX) {\
+-		warp_io_read32(_entry, _addr, &_value);\
++	u32 _whnat_reset_value = (_value);\
++	warp_io_write32(_entry, _addr, _whnat_reset_value);\
++	while (_whnat_reset_value != 0 && cnt < WED_POLL_MAX) {\
++		warp_io_read32(_entry, _addr, &_whnat_reset_value);\
+ 		cnt++;\
+ 	} \
+ 	if (cnt >= WED_POLL_MAX) {\
+ 		warp_dbg(WARP_DBG_ERR,\
+ 			"%s(): Reset addr = 0x%x, value = 0x%x, cnt = %d fail!\n",\
+-			__func__, _addr, _value, cnt);\
++			__func__, _addr, _whnat_reset_value, cnt);\
+ 	} \
+ } while (0)
+ 

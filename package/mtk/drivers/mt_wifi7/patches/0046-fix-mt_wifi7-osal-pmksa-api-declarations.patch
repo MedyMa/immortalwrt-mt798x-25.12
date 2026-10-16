@@ -1,0 +1,17 @@
+From: medyma <medyma@users.noreply.github.com>
+Subject: [PATCH] mt_wifi7: include the shared OSAL PMKSA declarations
+
+Use the shared PMKSA header without enabling legacy cfg80211 code.
+
+--- a/mt_wifi/sta/sta_cfg.c
++++ b/mt_wifi/sta/sta_cfg.c
+@@ -26,6 +26,9 @@
+ */
+ 
+ #include	"rt_config.h"
++#ifdef MT_WIFI_OSAL_SUPPORT
++#include <mt_osal_pmksa.h>
++#endif
+ 
+ 
+ #define BSSID_WCID_TO_REMOVE 1 /* Pat:TODO */

@@ -1,0 +1,10 @@
+--- a/regs/reg_v3_2/warp_hw.c
++++ b/regs/reg_v3_2/warp_hw.c
+@@ -23,6 +23,7 @@
+ #include <warp_bm.h>
+ #include "wed_hw.h"
+ #include "wdma_netsys.h"
++#include "wdma_hw.h"
+ #ifdef WED_RX_HW_RRO_2_0
+ #include "mcu/warp_fwdl.h"
+ #include "mcu/warp_woif.h"

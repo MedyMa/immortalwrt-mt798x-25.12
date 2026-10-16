@@ -1,0 +1,90 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] mt_wifi7: guard calls for disabled optional features
+
+Keep feature-off BPI-R4 builds linkable without providing fake stubs. MAP-only DFS handling
+and WAPP responses are compiled only with their providers, and cfg80211 scan state is
+consulted only when the cfg80211 implementation is built.
+
+--- a/mt_wifi/common/scan.c
++++ b/mt_wifi/common/scan.c
+@@ -933,7 +933,12 @@
+ 	if (channel > 14) {
+ 		if ((pAd->CommonCfg.bIEEE80211H == 1) &&
+ 			RadarChannelCheck(pAd, channel) &&
+-			!(CFG80211DRV_OpsScanRunning(pAd) && pAd->ScanCtrl.SsidLen != 0))
++#ifdef RT_CFG80211_SUPPORT
++			!(CFG80211DRV_OpsScanRunning(pAd) && pAd->ScanCtrl.SsidLen != 0)
++#else
++			TRUE
++#endif
++			)
+ 			bScanPassive = TRUE;
+ 	}
+ 
+--- a/mt_wifi/common/cmm_rdm_mt.c
++++ b/mt_wifi/common/cmm_rdm_mt.c
+@@ -745,12 +745,14 @@
+ 			break;
+ 	}
+ 
++#ifdef CONFIG_MAP_SUPPORT
+ 	/* Send CAC done event if CAC requested by MAP on channel is already CAC done by PreCac*/
+ 	if ((wdev != NULL) && (pAd->CommonCfg.DfsParameter.CACMemoEn && dfs_cac_op(pAd, wdev, CAC_DONE_CHECK, Channel))) {
+ 		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_DFS, DBG_LVL_NOTICE, "\x1b[1;33m[RDM] Channel: %u has done cac \x1b[m\n", Channel);
+ 		wapp_send_cac_stop(pAd, RtmpOsGetNetIfIndex(wdev->if_dev), Channel, TRUE);
+ 		return;
+ 	}
++#endif /* CONFIG_MAP_SUPPORT */
+ 
+ #ifdef BACKGROUND_SCAN_SUPPORT
+ 
+@@ -1378,7 +1380,11 @@
+ 				pDfsParam->OutBandCh, pDfsParam->OutBandBw,
+ 				TargetCh, TargetBw);
+ 
+-	if (pDfsParam->CacCtrl == NEED_RESTART && !IS_MAP_TURNKEY_ENABLE(pAd)) {
++	if (pDfsParam->CacCtrl == NEED_RESTART
++#ifdef CONFIG_MAP_SUPPORT
++		&& !IS_MAP_TURNKEY_ENABLE(pAd)
++#endif /* CONFIG_MAP_SUPPORT */
++		) {
+ 		/*if it is DFS ch performing ZW DFS process*/
+ 		if (pDfsParam->CACMemoEn &&
+ 			dfs_cac_op(pAd, wdev, CAC_DONE_CHECK, final_ch)) {
+@@ -7728,7 +7734,9 @@
+ 		if ((pDfsParam->bDedicatedZeroWaitSupport == TRUE
+ 		&& hc_get_hw_band_idx(pAd) == pDfsParam->ZeroWaitBandidx)
+ 		&& GET_BGND_STATE(pAd, BGND_RDD_DETEC)
++#ifdef CONFIG_MAP_SUPPORT
+ 		&& !(IS_MAP_ENABLE(pAd) || IS_MAP_TURNKEY_ENABLE(pAd))
++#endif /* CONFIG_MAP_SUPPORT */
+ 		&& pDfsParam->BW160ZeroWaitSupport == FALSE) {
+ 			if (pDfsParam->bPreCacEn) {
+ 				pDfsParam->OutBandBw = wlan_operate_get_bw(wdev);
+@@ -7749,12 +7757,14 @@
+ 				DfsAdjustOpBwSetting(pAd, wdev, pDfsParam->band_bw, pDfsParam->OutBandBw);
+ 				NextBw = pDfsParam->OutBandBw;
+ 			} else {
++#ifdef CONFIG_MAP_SUPPORT
+ 				if (IS_MAP_ENABLE(pAd) || IS_MAP_TURNKEY_ENABLE(pAd)) {
+ 					if (pDfsParam->band_bw == BW_160) {
+ 						pDfsParam->MapZwFlag = TRUE;
+ 						pDfsParam->band_bw = BW_80;
+ 					}
+ 				}
++#endif /* CONFIG_MAP_SUPPORT */
+ 				DfsAdjustOpBwSetting(pAd, wdev, KeepBw, pDfsParam->band_bw);
+ 				NextBw = pDfsParam->band_bw;
+ 			}
+--- a/mt_wifi/hw_ctrl/sr_cmd.c
++++ b/mt_wifi/hw_ctrl/sr_cmd.c
+@@ -13192,7 +13192,9 @@
+ {
+ 	struct UNI_EVENT_SR_EVENT_T *prSrEvent = (struct UNI_EVENT_SR_EVENT_T *)Data;
+ 
++#ifdef WAPP_SUPPORT
+ 	wapp_send_sr_support_mode_query_rsp(pAd, prSrEvent->u4Value);
++#endif /* WAPP_SUPPORT */
+ }
+ 
+ void UniEventSRHandler(

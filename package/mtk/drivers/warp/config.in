@@ -10,6 +10,7 @@ config WARP_CONFIG_MODE
 
 config WARP_CHIPSET
 	string "WARP Driver HW Chipset"
+	default mt7988 if TARGET_mediatek_filogic_DEVICE_bananapi_bpi-r4
 	default mt7622 if TARGET_mediatek_mt7622
 	default mt7986 if TARGET_mediatek_mt7986
 	default mt7981 if TARGET_mediatek_mt7981
@@ -20,6 +21,7 @@ config WARP_CHIPSET
 
 config WARP_VERSION
 	string "WARP Driver HW Version"
+	default 3 if TARGET_mediatek_filogic_DEVICE_bananapi_bpi-r4
 	default 1 if TARGET_mediatek_mt7622
 	default 1 if TARGET_airoha_en7563
 	default 2 if TARGET_mediatek_mt7986
@@ -32,6 +34,7 @@ config WARP_VERSION
 config WED_HW_RRO_SUPPORT
 	bool "WARP Driver WED HW RRO (WO RRO) Support"
 	depends on WARP_CONFIG_MODE = 0
+	default y if TARGET_mediatek_filogic_DEVICE_bananapi_bpi-r4
 	default y if TARGET_mediatek_mt7986 || TARGET_mediatek_mt7981 || TARGET_mediatek_mt7988
 	default n
 	help
