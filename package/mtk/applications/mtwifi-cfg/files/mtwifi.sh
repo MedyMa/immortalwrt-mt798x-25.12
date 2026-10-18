@@ -16,11 +16,11 @@ detect_mtwifi() {
 				ifname="$(l1util get ${dev} main_ifname)"
 
 				idx="$(l1util get ${dev} subidx)"
-				[ $idx -eq 1 ] && dbdc_main="1" || dbdc_main="0"
+				[ "$idx" = "1" ] && dbdc_main="1" || dbdc_main="0"
 
 				band="$(l1util get ${dev} band)"
 				if [ -z "$band" ] || [ "$band" = "nil" ]; then
-					[ $idx -eq 1 ] && band="2g" || band="5g"
+					[ "$idx" = "1" ] && band="2g" || band="5g"
 				fi
 
 				if [ "$band" = "2g" ]; then
