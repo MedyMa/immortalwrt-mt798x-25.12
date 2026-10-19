@@ -1,0 +1,346 @@
+Subject: [PATCH] wifi7: validate ALL_STA TLV lengths and record counts
+
+Check the complete TLV and record payload before dispatching ALL_STA
+statistics. Validate WCIDs before lookup and size MLD deduplication
+bitmaps against the software MLD table.
+
+--- a/mt_wifi/chip/mcu/cmm_fw_uni_event.c
++++ b/mt_wifi/chip/mcu/cmm_fw_uni_event.c
+@@ -18,6 +18,7 @@
+ #include "rt_config.h"
+ #include "epcs_cmm.h"
+ #include "dot11be_eht.h"
++#include <linux/printk.h>
+ 
+ #define MAX_EVENT_FAIL_LOOP 32
+ 
+@@ -7677,6 +7678,86 @@
+ 	}
+ }
+ 
++static BOOLEAN uni_event_all_sta_tlv_validate(
++	UINT8 *pData,
++	UINT32 Length,
++	struct UNI_EVENT_ALL_STA_INFO_COMMON_T **tlv_out,
++	UINT16 *tag_out,
++	UINT16 *sta_num_out,
++	UINT32 *content_len_out)
++{
++	struct UNI_EVENT_ALL_STA_INFO_T *event;
++	struct UNI_EVENT_ALL_STA_INFO_COMMON_T *tlv;
++	UINT32 tags_len;
++	UINT16 tlv_len;
++	UINT32 fixed_len = sizeof(*event);
++
++	if (!pData || Length < fixed_len + sizeof(*tlv))
++		return FALSE;
++
++	event = (struct UNI_EVENT_ALL_STA_INFO_T *)pData;
++	tlv = (struct UNI_EVENT_ALL_STA_INFO_COMMON_T *)&event->au1TlvBuffer[0];
++	tags_len = Length - fixed_len;
++	/* u2Length includes the common TLV header, as in UNI_CMD_ALL_STA_INFO_TLV_T. */
++	tlv_len = le2cpu16(tlv->u2Length);
++	if (tlv_len < sizeof(*tlv) || tlv_len > tags_len)
++		return FALSE;
++
++	*tlv_out = tlv;
++	*tag_out = le2cpu16(tlv->u2Tag);
++	*sta_num_out = le2cpu16(tlv->u2StaNum);
++	*content_len_out = tlv_len - sizeof(*tlv);
++	return TRUE;
++}
++
++static BOOLEAN uni_event_all_sta_count_valid(UINT16 tag, UINT16 sta_num, UINT32 content_len)
++{
++	UINT32 record_size = 0;
++	UINT32 max_sta_num = 0;
++
++	switch (tag) {
++	case UNI_EVENT_ALL_STA_TX_RATE:
++		record_size = sizeof(struct UNI_EVENT_ONE_STA_TX_RATE_T);
++		max_sta_num = UNI_EVENT_ALL_STA_TX_RATE_PER_EVENT;
++		break;
++	case UNI_EVENT_ALL_STA_TX_STAT:
++		record_size = sizeof(struct UNI_EVENT_ONE_STA_TX_STAT_T);
++		max_sta_num = UNI_EVENT_ALL_STA_TX_STAT_PER_EVENT;
++		break;
++	case UNI_EVENT_ALL_STA_TXRX_ADM_STAT:
++		record_size = sizeof(struct UNI_EVENT_ONE_STA_TXRX_ADM_STAT_T);
++		max_sta_num = UNI_EVENT_ALL_STA_TXRX_ADM_STAT_PER_EVENT;
++		break;
++	case UNI_EVENT_ALL_STA_TXRX_AIR_TIME:
++		record_size = sizeof(struct UNI_EVENT_ONE_STA_TXRX_AIR_TIME_T);
++		max_sta_num = UNI_EVENT_ALL_STA_TXRX_AIR_TIME_PER_EVENT;
++		break;
++	case UNI_EVENT_ALL_STA_DATA_TX_RETRY_COUNT:
++		record_size = sizeof(struct UNI_EVENT_ONE_STA_DATA_TX_RETRY_COUNT_T);
++		max_sta_num = UNI_EVENT_ALL_STA_DATA_TX_RETRY_COUNT_PER_EVENT;
++		break;
++	case UNI_EVENT_ALL_STA_GI_MODE:
++		record_size = sizeof(struct UNI_EVENT_ONE_STA_GI_MODE_T);
++		max_sta_num = UNI_EVENT_ALL_STA_GI_MODE_PER_EVENT;
++		break;
++	case UNI_EVENT_ALL_STA_TRX_MSDU_COUNT:
++		record_size = sizeof(struct UNI_EVENT_ONE_STA_TRX_MSDU_COUNT_T);
++		max_sta_num = UNI_EVENT_ALL_STA_TRX_MSDU_COUNT_PER_EVENT;
++		break;
++	case UNI_EVENT_ALL_STA_RX_MPDU_COUNT:
++		record_size = sizeof(struct UNI_EVENT_ONE_STA_RX_MPDU_COUNT_T);
++		max_sta_num = UNI_EVENT_ALL_STA_RX_MPDU_COUNT_PER_EVENT;
++		break;
++	case UNI_EVENT_ALL_STA_TX_STAT_MODE:
++		return content_len >= sizeof(struct UNI_EVENT_ALL_STA_TX_STAT_MODE_T);
++	default:
++		return TRUE;
++	}
++
++	/* Division avoids overflowing while checking the declared record count. */
++	return record_size && sta_num <= max_sta_num && sta_num <= content_len / record_size;
++}
++
+ static VOID uni_event_parse_all_sta_tx_rate(
+ 	struct _RTMP_ADAPTER *pAd,
+ 	UINT8 *Data,
+@@ -7696,8 +7777,9 @@
+ 
+ 	prEventResult = (struct UNI_EVENT_ALL_STA_TX_RATE_T *)Data;
+ 
+-	for (Idx = 0; (VALID_UCAST_ENTRY_WCID(pAd, prEventResult->arTxRateResult[Idx].u2WlanIdx) && Idx < StaNum); Idx++) {
+-		pEntry = entry_get(pAd, prEventResult->arTxRateResult[Idx].u2WlanIdx);
++	for (Idx = 0; Idx < StaNum &&
++		VALID_UCAST_ENTRY_WCID(pAd, le2cpu16(prEventResult->arTxRateResult[Idx].u2WlanIdx)); Idx++) {
++		pEntry = entry_get(pAd, le2cpu16(prEventResult->arTxRateResult[Idx].u2WlanIdx));
+ 		if (pEntry && pEntry->wdev &&  IS_ENTRY_CLIENT(pEntry) && pEntry->Sst == SST_ASSOC) {
+ 			/*For TX rate*/
+ 			LastTxRate.word = LastRxRate.word = 0;
+@@ -7904,8 +7986,9 @@
+ 
+ 	prEventResult = (struct UNI_EVENT_ALL_STA_TXRX_ADM_STAT_T *)Data;
+ 
+-	for (Idx = 0; (VALID_UCAST_ENTRY_WCID(pAd, prEventResult->arTxRxAdmStatResult[Idx].u2WlanIdx) && Idx < StaNum); Idx++) {
+-		pEntry = entry_get(pAd, prEventResult->arTxRxAdmStatResult[Idx].u2WlanIdx);
++	for (Idx = 0; Idx < StaNum &&
++		VALID_UCAST_ENTRY_WCID(pAd, le2cpu16(prEventResult->arTxRxAdmStatResult[Idx].u2WlanIdx)); Idx++) {
++		pEntry = entry_get(pAd, le2cpu16(prEventResult->arTxRxAdmStatResult[Idx].u2WlanIdx));
+ 
+ 		if (pEntry && pEntry->wdev && (IS_ENTRY_CLIENT(pEntry) ||
+ 			IS_ENTRY_PEER_AP(pEntry) || IS_ENTRY_REPEATER(pEntry)) && pEntry->Sst == SST_ASSOC) {
+@@ -8027,8 +8110,9 @@
+ 
+ 	prEventResult = (struct UNI_EVENT_ALL_STA_TXRX_AIR_TIME_T *)Data;
+ 
+-	for (Idx = 0; (VALID_UCAST_ENTRY_WCID(pAd, prEventResult->arTxRxAirTimeResult[Idx].u2WlanIdx) && Idx < StaNum); Idx++) {
+-		pEntry = entry_get(pAd, prEventResult->arTxRxAirTimeResult[Idx].u2WlanIdx);
++	for (Idx = 0; Idx < StaNum &&
++		VALID_UCAST_ENTRY_WCID(pAd, le2cpu16(prEventResult->arTxRxAirTimeResult[Idx].u2WlanIdx)); Idx++) {
++		pEntry = entry_get(pAd, le2cpu16(prEventResult->arTxRxAirTimeResult[Idx].u2WlanIdx));
+ 		if (pEntry && pEntry->wdev &&  IS_ENTRY_CLIENT(pEntry) && pEntry->Sst == SST_ASSOC) {
+ 			for (k = 0; k < 4; k++) {
+ 				if (pEntry->TxRxTime[k][0] - pEntry->wrapArTxRxTime[k][0] > prEventResult->arTxRxAirTimeResult[Idx].au4WtblRxTime[k]/1000) {
+@@ -8070,19 +8154,21 @@
+ 
+ #ifdef DOT11_EHT_BE
+ 	unsigned long *mldsta_added  = NULL;
++
++	os_alloc_mem(pAd, (UCHAR **)&mldsta_added,
++		BITS_TO_LONGS(MLD_STA_MAX_NUM) * sizeof(unsigned long));
++
++	if (!mldsta_added)
++		return;
++
++	os_zero_mem(mldsta_added, BITS_TO_LONGS(MLD_STA_MAX_NUM) * sizeof(unsigned long));
+ #endif
+ 
+-	os_alloc_mem(pAd, (UCHAR **)&mldsta_added, (WTBL_MAX_NUM(pAd)/32+1) * sizeof(unsigned long));
+-
+-	if (!mldsta_added)
+-		return;
+-
+-	os_zero_mem(mldsta_added, (WTBL_MAX_NUM(pAd)/32+1) * sizeof(unsigned long));
+-
+ 	prEventResult = (struct UNI_EVENT_ALL_STA_TRX_MSDU_COUNT_T *)Data;
+ 
+-	for (Idx = 0; (VALID_UCAST_ENTRY_WCID(pAd, prEventResult->arTRxMsduCountResult[Idx].u2WlanIdx) && Idx < StaNum); Idx++) {
+-		pEntry = entry_get(pAd, prEventResult->arTRxMsduCountResult[Idx].u2WlanIdx);
++	for (Idx = 0; Idx < StaNum &&
++		VALID_UCAST_ENTRY_WCID(pAd, le2cpu16(prEventResult->arTRxMsduCountResult[Idx].u2WlanIdx)); Idx++) {
++		pEntry = entry_get(pAd, le2cpu16(prEventResult->arTRxMsduCountResult[Idx].u2WlanIdx));
+ 
+ 		if (pEntry && pEntry->wdev && (IS_ENTRY_CLIENT(pEntry) || IS_ENTRY_PEER_AP(pEntry)
+ 			|| IS_ENTRY_REPEATER(pEntry)) && pEntry->Sst == SST_ASSOC) {
+@@ -8119,6 +8205,10 @@
+ 					goto done;
+ 				}
+ 				mt_os_lockless_exit(os_lockless_ctx_get());
++				if (mld_sta_idx >= MLD_STA_MAX_NUM) {
++					pr_warn_ratelimited("mt_wifi: invalid ALL_STA mld_sta_idx=%u\n", mld_sta_idx);
++					continue;
++				}
+ 
+ 				if (!test_bit(mld_sta_idx, (unsigned long *)mldsta_added)) {
+ #ifdef CONFIG_AP_SUPPORT
+@@ -8245,9 +8335,11 @@
+ 		}
+ 	}
+ 
++#ifdef DOT11_EHT_BE
+ done:
+ 	if (mldsta_added)
+ 		os_free_mem(mldsta_added);
++#endif
+ 
+ 	return;
+ }
+@@ -8264,19 +8356,25 @@
+ 	UINT32 Idx, RxFailCount = 0;
+ #ifdef DOT11_EHT_BE
+ 	unsigned long *mldsta_added  = NULL;
++
++	os_alloc_mem(pAd, (UCHAR **)&mldsta_added,
++		BITS_TO_LONGS(MLD_STA_MAX_NUM) * sizeof(unsigned long));
++
++	if (!mldsta_added)
++		return;
++
++	os_zero_mem(mldsta_added, BITS_TO_LONGS(MLD_STA_MAX_NUM) * sizeof(unsigned long));
+ #endif
+ 
+-	os_alloc_mem(pAd, (UCHAR **)&mldsta_added, (WTBL_MAX_NUM(pAd)/32+1) * sizeof(unsigned long));
+-
+-	if (!mldsta_added)
+-		return;
+-
+-	os_zero_mem(mldsta_added, (WTBL_MAX_NUM(pAd)/32+1) * sizeof(unsigned long));
+-
+ 	prEventResult = (struct UNI_EVENT_ALL_STA_RX_MPDU_COUNT_T *)Data;
+ 
+ 	for (Idx = 0; Idx < StaNum; Idx++) {
+-		pEntry = entry_get(pAd, prEventResult->rRxMpduCountResult[Idx].u2WlanIdx);
++		UINT16 wcid = le2cpu16(prEventResult->rRxMpduCountResult[Idx].u2WlanIdx);
++
++		if (!VALID_UCAST_ENTRY_WCID(pAd, wcid))
++			continue;
++
++		pEntry = entry_get(pAd, wcid);
+ 
+ 		if (pEntry && pEntry->wdev && (IS_ENTRY_CLIENT(pEntry) || IS_ENTRY_PEER_AP(pEntry)
+ 			|| IS_ENTRY_REPEATER(pEntry)) && pEntry->Sst == SST_ASSOC) {
+@@ -8313,6 +8411,10 @@
+ 					goto done;
+ 				}
+ 				mt_os_lockless_exit(os_lockless_ctx_get());
++				if (mld_sta_idx >= MLD_STA_MAX_NUM) {
++					pr_warn_ratelimited("mt_wifi: invalid ALL_STA mld_sta_idx=%u\n", mld_sta_idx);
++					continue;
++				}
+ 
+ 				if (!test_bit(mld_sta_idx, (unsigned long *)mldsta_added)) {
+ #ifdef CONFIG_AP_SUPPORT
+@@ -8391,9 +8493,11 @@
+ 		}
+ 	}
+ 
++#ifdef DOT11_EHT_BE
+ done:
+ 	if (mldsta_added)
+ 		os_free_mem(mldsta_added);
++#endif
+ }
+ 
+ #if defined(TXRX_STAT_SUPPORT) || defined(TR181_SUPPORT)
+@@ -8409,8 +8513,9 @@
+ 
+ 	prEventResult = (struct UNI_EVENT_ALL_STA_DATA_TX_RETRY_COUNT_T *)Data;
+ 
+-	for (Idx = 0; (VALID_UCAST_ENTRY_WCID(pAd, prEventResult->arDataTxRetryCountResult[Idx].u2WlanIdx) && Idx < StaNum); Idx++) {
+-		pEntry = entry_get(pAd, prEventResult->arDataTxRetryCountResult[Idx].u2WlanIdx);
++	for (Idx = 0; Idx < StaNum &&
++		VALID_UCAST_ENTRY_WCID(pAd, le2cpu16(prEventResult->arDataTxRetryCountResult[Idx].u2WlanIdx)); Idx++) {
++		pEntry = entry_get(pAd, le2cpu16(prEventResult->arDataTxRetryCountResult[Idx].u2WlanIdx));
+ 
+ 		if (pEntry && pEntry->wdev && (IS_ENTRY_CLIENT(pEntry) || IS_ENTRY_PEER_AP(pEntry)) && pEntry->Sst == SST_ASSOC) {
+ 			struct UNI_EVENT_ONE_STA_DATA_TX_RETRY_COUNT_T *prDataTxRetryCountResult =
+@@ -8459,50 +8564,59 @@
+ 	UINT32 Length,
+ 	EVENT_RXD *event_rxd)
+ {
+-	struct UNI_EVENT_ALL_STA_INFO_T *event = (struct UNI_EVENT_ALL_STA_INFO_T *)pData;
+-	struct UNI_EVENT_ALL_STA_INFO_COMMON_T *tlv = (struct UNI_EVENT_ALL_STA_INFO_COMMON_T *)&(event->au1TlvBuffer[0]);
+-	struct _RTMP_ADAPTER *pAd = physical_device_get_first_mac_adapter(physical_dev);
+-	UINT32 tags_len;
+-	UINT32 fixed_len = sizeof(*event);
+-
+-	if (Length < fixed_len) {
+-		MTWF_DBG(NULL, DBG_CAT_FW, CATFW_DBGINFO, DBG_LVL_WARN,
+-			"invalid length = %d\n",
+-			Length);
+-		return;
+-	}
+-
+-	tags_len = Length - fixed_len;
+-
+-	switch (tlv->u2Tag) {
++	struct UNI_EVENT_ALL_STA_INFO_COMMON_T *tlv = NULL;
++	struct _RTMP_ADAPTER *pAd;
++	UINT16 tag, sta_num;
++	UINT32 content_len;
++
++	if (!uni_event_all_sta_tlv_validate(pData, Length, &tlv, &tag,
++					    &sta_num, &content_len)) {
++		pr_warn_ratelimited("mt_wifi: invalid ALL_STA TLV length=%u\n", Length);
++		return;
++	}
++
++	if (!uni_event_all_sta_count_valid(tag, sta_num, content_len)) {
++		pr_warn_ratelimited("mt_wifi: invalid ALL_STA tag=%u count=%u content_len=%u\n",
++			tag, sta_num, content_len);
++		return;
++	}
++
++	if (!sta_num && tag != UNI_EVENT_ALL_STA_TX_STAT_MODE)
++		return;
++
++	pAd = physical_device_get_first_mac_adapter(physical_dev);
++	if (!pAd)
++		return;
++
++	switch (tag) {
+ 	case UNI_EVENT_ALL_STA_TX_RATE:
+-		uni_event_parse_all_sta_tx_rate(pAd, &(tlv->au1AllStaContent[0]), le2cpu16(tlv->u2StaNum), (tags_len - sizeof(*tlv)));
++		uni_event_parse_all_sta_tx_rate(pAd, &(tlv->au1AllStaContent[0]), sta_num, content_len);
+ 		break;
+ 
+ 	case UNI_EVENT_ALL_STA_TX_STAT:
+-		uni_event_parse_all_sta_tx_stat(pAd, &(tlv->au1AllStaContent[0]), le2cpu16(tlv->u2StaNum), (tags_len - sizeof(*tlv)));
++		uni_event_parse_all_sta_tx_stat(pAd, &(tlv->au1AllStaContent[0]), sta_num, content_len);
+ 		break;
+ 
+ 	case UNI_EVENT_ALL_STA_TXRX_ADM_STAT:
+-		uni_event_parse_all_sta_txrx_adm_stat(pAd, &(tlv->au1AllStaContent[0]), le2cpu16(tlv->u2StaNum), (tags_len - sizeof(*tlv)));
++		uni_event_parse_all_sta_txrx_adm_stat(pAd, &(tlv->au1AllStaContent[0]), sta_num, content_len);
+ 		break;
+ 
+ 	case UNI_EVENT_ALL_STA_TXRX_AIR_TIME:
+-		uni_event_parse_all_sta_txrx_air_time(pAd, &(tlv->au1AllStaContent[0]), le2cpu16(tlv->u2StaNum), (tags_len - sizeof(*tlv)));
++		uni_event_parse_all_sta_txrx_air_time(pAd, &(tlv->au1AllStaContent[0]), sta_num, content_len);
+ 		break;
+ 
+ 	case UNI_EVENT_ALL_STA_TRX_MSDU_COUNT:
+-		uni_event_parse_all_sta_trx_msdu_count(pAd, &(tlv->au1AllStaContent[0]), le2cpu16(tlv->u2StaNum), (tags_len - sizeof(*tlv)));
++		uni_event_parse_all_sta_trx_msdu_count(pAd, &(tlv->au1AllStaContent[0]), sta_num, content_len);
+ 		break;
+ 	case UNI_EVENT_ALL_STA_RX_MPDU_COUNT:
+-		uni_event_parse_all_sta_rx_mpdu_count(pAd, &(tlv->au1AllStaContent[0]), le2cpu16(tlv->u2StaNum), (tags_len - sizeof(*tlv)));
++		uni_event_parse_all_sta_rx_mpdu_count(pAd, &(tlv->au1AllStaContent[0]), sta_num, content_len);
+ 		break;
+ 	case UNI_EVENT_ALL_STA_TX_STAT_MODE:
+-		uni_event_parse_all_sta_tx_stat_mode(pAd, &(tlv->au1AllStaContent[0]), le2cpu16(tlv->u2StaNum), (tags_len - sizeof(*tlv)));
++		uni_event_parse_all_sta_tx_stat_mode(pAd, &(tlv->au1AllStaContent[0]), sta_num, content_len);
+ 		break;
+ #if defined(TXRX_STAT_SUPPORT) || defined(TR181_SUPPORT)
+ 	case UNI_EVENT_ALL_STA_DATA_TX_RETRY_COUNT:
+-		uni_event_parse_all_sta_data_tx_retry_count(pAd, &(tlv->au1AllStaContent[0]), le2cpu16(tlv->u2StaNum), (tags_len - sizeof(*tlv)));
++		uni_event_parse_all_sta_data_tx_retry_count(pAd, &(tlv->au1AllStaContent[0]), sta_num, content_len);
+ 		break;
+ #endif /* TXRX_STAT_SUPPORT */
+ 
