@@ -1140,7 +1140,11 @@ drv_mtwifi_setup() {
 	for_each_interface sta mtwifi_vif_sta_set_data
 
 	# 1. lua 生成 .dat + MTK 侧配置（含 hairpin_mode 和 WPS iface 映射）
-	json_dump | /sbin/mtwifi_cfg setup
+	if ! json_dump | /sbin/mtwifi_cfg setup; then
+		wireless_setup_failed "MTWIFI_CFG_SETUP_FAILED"
+		lock -u "$LOCK_FILE"
+		return 1
+	fi
 
 	# 2. 准备公共变量
 	phy="$(l1util get $dev main_ifname)"
