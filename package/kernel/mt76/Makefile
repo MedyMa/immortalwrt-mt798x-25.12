@@ -350,13 +350,13 @@ endef
 define KernelPackage/mt7996-firmware
   $(KernelPackage/mt76-default)
   TITLE:=MediaTek MT7996 firmware
-  DEPENDS+=+kmod-mt7996e +kmod-mt7996-firmware-common
+  DEPENDS+=+kmod-mt7996e +kmod-mt7996-firmware-common @!PACKAGE_kmod-mt_wifi7
 endef
 
 define KernelPackage/mt7996-233-firmware
   $(KernelPackage/mt76-default)
   TITLE:=MediaTek MT7996 firmware (2+3+3 antenna variant)
-  DEPENDS+=+kmod-mt7996e +kmod-mt7996-firmware-common
+  DEPENDS+=+kmod-mt7996e +kmod-mt7996-firmware-common @!PACKAGE_kmod-mt_wifi7
 endef
 
 define KernelPackage/mt7925-firmware
