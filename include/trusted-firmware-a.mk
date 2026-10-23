@@ -46,6 +46,8 @@ define Trusted-Firmware-A/Init
 endef
 
 TARGET_DEP = TARGET_$(BUILD_TARGET)$(if $(BUILD_SUBTARGET),_$(BUILD_SUBTARGET))
+TARGET_DEP_COMPAT = $(if $(and $(BUILD_SUBTARGET),$(filter-out $(BUILD_SUBTARGET),$(SUBTARGET))),TARGET_$(BUILD_TARGET)_$(SUBTARGET))
+TARGET_DEP_EXPR = $(if $(TARGET_DEP_COMPAT),($(TARGET_DEP)||$(TARGET_DEP_COMPAT)),$(TARGET_DEP))
 
 define Build/Trusted-Firmware-A/Target
   $(eval $(call Trusted-Firmware-A/Init,$(1)))
@@ -60,7 +62,7 @@ define Build/Trusted-Firmware-A/Target
     DEPENDS:=@!IN_SDK $(DEPENDS)
     HIDDEN:=$(HIDDEN)
     ifneq ($(BUILD_TARGET),)
-      DEPENDS += @$(TARGET_DEP)
+      DEPENDS += @$(TARGET_DEP_EXPR)
       ifneq ($(BUILD_DEVICES),)
         DEFAULT := y if ($(TARGET_DEP)_Default \
 		$(patsubst %,|| $(TARGET_DEP)_DEVICE_%,$(BUILD_DEVICES)) \
