@@ -69,7 +69,9 @@ define U-Boot/Init
 endef
 
 TARGET_DEP = TARGET_$(BUILD_TARGET)$(if $(BUILD_SUBTARGET),_$(BUILD_SUBTARGET))
-TARGET_DEP_COMPAT = $(if $(and $(BUILD_SUBTARGET),$(findstring $(BUILD_SUBTARGET),$(TARGETID))),TARGET_$(subst /,_,$(TARGETID)))
+# Package metadata is scanned with DUMP=1 before a subtarget is selected.
+# Only the derived MediaTek A73 subtarget shares the Filogic bootloaders.
+TARGET_DEP_COMPAT = $(if $(filter mediatek/filogic,$(BUILD_TARGET)/$(BUILD_SUBTARGET)),TARGET_mediatek_filogic_a73)
 TARGET_DEP_EXPR = $(if $(TARGET_DEP_COMPAT),($(TARGET_DEP)||$(TARGET_DEP_COMPAT)),$(TARGET_DEP))
 
 UBOOT_MAKE_FLAGS = \
