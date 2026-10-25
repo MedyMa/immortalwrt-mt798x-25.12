@@ -103,8 +103,10 @@ define Build/U-Boot/Target
       DEPENDS += @$(TARGET_DEP_EXPR)
       ifneq ($(BUILD_DEVICES),)
         DEFAULT := y if ($(TARGET_DEP)_Default \
-		$(patsubst %,|| $(TARGET_DEP)_DEVICE_%,$(BUILD_DEVICES)) \
-		$(patsubst %,|| $(patsubst TARGET_%,TARGET_DEVICE_%,$(TARGET_DEP))_DEVICE_%,$(BUILD_DEVICES)))
+		$(if $(TARGET_DEP_COMPAT),|| $(TARGET_DEP_COMPAT)_Default) \
+		$(foreach dep,$(TARGET_DEP) $(TARGET_DEP_COMPAT), \
+			$(patsubst %,|| $(dep)_DEVICE_%,$(BUILD_DEVICES)) \
+			$(patsubst %,|| $(patsubst TARGET_%,TARGET_DEVICE_%,$(dep))_DEVICE_%,$(BUILD_DEVICES))))
       endif
     endif
     $(if $(DEFAULT),DEFAULT:=$(DEFAULT))
