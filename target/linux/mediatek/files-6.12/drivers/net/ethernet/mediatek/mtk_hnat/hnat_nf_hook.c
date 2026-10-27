@@ -2499,9 +2499,9 @@ hnat_skip_fill_inner:
 	if (entry_hnat_is_bound(foe))
 		return 0;
 
-	spin_lock(&hnat_priv->entry_lock);
+	spin_lock_bh(&hnat_priv->entry_lock);
 	hnat_foe_entry_commit(foe, &entry, BIND);
-	spin_unlock(&hnat_priv->entry_lock);
+	spin_unlock_bh(&hnat_priv->entry_lock);
 
 	if (debug_level >= 7)
 		entry_detail(skb_hnat_ppe(skb), skb_hnat_entry(skb));
