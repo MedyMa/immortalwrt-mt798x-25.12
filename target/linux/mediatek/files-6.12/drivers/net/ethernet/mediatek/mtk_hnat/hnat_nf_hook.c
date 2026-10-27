@@ -3353,8 +3353,7 @@ hnat_entry_bind:
 			return NF_ACCEPT;
 	}
 
-	if (!spin_trylock_bh(&hnat_priv->entry_lock))
-		return -1;
+	spin_lock_bh(&hnat_priv->entry_lock);
 	/* Final check if the entry is not in UNBIND state,
 	 * we should not modify it right now.
 	 */
@@ -4434,7 +4433,7 @@ static unsigned int mtk_hnat_nf_post_routing(
 
 	if (skb_hnat_entry(skb) >= hnat_priv->foe_etry_num ||
 	    skb_hnat_ppe(skb) >= CFG_PPE_NUM)
-		return -1;
+		return 0;
 
 	entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
 
