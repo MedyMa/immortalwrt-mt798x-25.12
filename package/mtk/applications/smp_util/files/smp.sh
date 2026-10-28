@@ -738,19 +738,19 @@ get_wifi_if_name()
 			wifi_if3s=`l1dat zone2if dev3`
 			;;
 		esac
-	
+
 		wifi1=`echo $wifi_if1s | awk '{print $1}'`
 		wifi1_prefix=`echo $wifi_if1s | awk '{print $2}'`
 		wifi1_apcli=`echo $wifi_if1s | awk '{print $3}'`
 		wifi1_wds=`echo $wifi_if1s | awk '{print $4}'`
 		wifi1_mesh=`echo $wifi_if1s | awk '{print $5}'`
-	
+
 		wifi2=`echo $wifi_if2s | awk '{print $1}'`
 		wifi2_prefix=`echo $wifi_if2s | awk '{print $2}'`
 		wifi2_apcli=`echo $wifi_if2s | awk '{print $3}'`
 		wifi2_wds=`echo $wifi_if2s | awk '{print $4}'`
 		wifi2_mesh=`echo $wifi_if2s | awk '{print $5}'`
-	
+
 		wifi3=`echo $wifi_if3s | awk '{print $1}'`
 		wifi3_prefix=`echo $wifi_if3s | awk '{print $2}'`
 		wifi3_apcli=`echo $wifi_if3s | awk '{print $3}'`
@@ -881,13 +881,14 @@ setup_model()
 
 get_virtual_irq()
 {
-	PHY_POS=`expr $NUM_OF_CPU + 3` #physical irq # position in /proc/interrups may vary with the number of CPU up
+	# physical irq # position in /proc/interrups may vary with the number of CPU up
+	PHY_POS=`expr $NUM_OF_CPU + 3`
 	target_phy_irq=$1
-	cat /proc/interrupts | sed 's/:/ /g'| awk '$1 ~ /^[0-9]+$/' | while read line 
+	cat /proc/interrupts | sed 's/:/ /g'| awk '$1 ~ /^[0-9]+$/' | while read line
 	do
 		set -- $line
 		phy_irq=$(eval "echo \$$PHY_POS")
-		if [ $phy_irq == $target_phy_irq ]; then 
+		if [ $phy_irq == $target_phy_irq ]; then
 			echo $1
 			return
 		fi
@@ -898,6 +899,7 @@ get_virtual_irq()
 disable_gro_fraglist()
 {
 	for iface in /sys/class/net/*; do
+		[ -d "$iface" ] || continue
 		iface=$(basename "$iface")
 		if ethtool -k "$iface" | grep -q "rx-gro-list"; then
 			ethtool -K "$iface" rx-gro-list off
