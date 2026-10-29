@@ -126,6 +126,7 @@ struct npu_tnl_info {
 	u32 tnl_idx;
 	u32 status;
 	u32 flag; /* bit: enum npu_tnl_info_flag */
+	bool pce_ready;
 } __aligned(16);
 
 /*

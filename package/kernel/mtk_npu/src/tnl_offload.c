@@ -181,6 +181,7 @@ static inline void tnl_info_sta_init(struct npu_tnl_info *tnl_info)
 
 	spin_lock_irqsave(&tnl_info->lock, flag);
 
+	tnl_info->pce_ready = false;
 	tnl_info_sta_init_no_tnl_lock(tnl_info);
 
 	spin_unlock_irqrestore(&tnl_info->lock, flag);
@@ -798,13 +799,17 @@ static int mtk_npu_tnl_sync_param_delete(bool skip_pce,
 	struct npu_tnl_params tnl_params;
 	int ret;
 
-	if (!skip_pce) {
+	if (!skip_pce && tnl_info->pce_ready) {
 		ret = mtk_npu_tnl_info_dipfilter_tear_down(tnl_info);
 		if (ret) {
 			NPU_ERR("tnl sync dipfitler tear down failed: %d\n",
 				 ret);
 			return ret;
 		}
+		/* This tunnel no longer owns a DIP-filter reference, even if
+		 * the following firmware deletion fails.
+		 */
+		tnl_info->pce_ready = false;
 	}
 
 	memcpy(&tnl_params, &tnl_info->tnl_params, sizeof(struct npu_tnl_params));
@@ -825,6 +830,7 @@ static int mtk_npu_tnl_sync_param_delete(bool skip_pce,
 		mtk_npu_tnl_info_tcls_invalidate(tnl_info);
 	}
 
+	tnl_info->pce_ready = false;
 	mtk_npu_tnl_info_free(tnl_info);
 
 	return ret;
@@ -896,6 +902,7 @@ static int mtk_npu_tnl_sync_param_update(struct npu_tnl_info *tnl_info,
 			/* TODO: should undo parameter sync */
 			return ret;
 		}
+		tnl_info->pce_ready = true;
 	}
 
 	return ret;
@@ -961,8 +968,9 @@ static void mtk_npu_tnl_sync_queue_proc(void)
 			goto next;
 		}
 
-		is_decap = (!(tnl_info->tnl_params.flag & TNL_DECAP_ENABLE)
-			    && tnl_info_decap_is_enable(tnl_info));
+		is_decap = (!tnl_info->pce_ready &&
+			    !(tnl_info->tnl_params.flag & TNL_DECAP_ENABLE) &&
+			    tnl_info_decap_is_enable(tnl_info));
 
 		tnl_status = tnl_info->status;
 		memcpy(&tnl_info->tnl_params, &tnl_info->cache,
@@ -1162,7 +1170,8 @@ static void mtk_npu_tnl_offload_pce_clean_up(void)
 	spin_lock_irqsave(&npu_tnl.tbl_lock, flag);
 
 	hash_for_each(npu_tnl.ht, bkt, tnl_info, hlist) {
-		mtk_npu_tnl_info_dipfilter_tear_down(tnl_info);
+		if (tnl_info->pce_ready)
+			mtk_npu_tnl_info_dipfilter_tear_down(tnl_info);
 
 		mtk_npu_tnl_info_cls_tear_down(tnl_info);
 	}
