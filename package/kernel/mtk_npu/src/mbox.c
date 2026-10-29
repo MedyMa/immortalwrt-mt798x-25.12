@@ -272,26 +272,9 @@ static inline int __mbox_send_msg_no_wait_irq(struct mailbox_dev *mdev,
 	while (mbox_read(mbox_reg->cmd_set_reg)) {
 		if (mbox_send_msg_chk_timeout(start)) {
 			NPU_NOTICE("mbox occupied too long\n");
-			NPU_NOTICE("cmd set reg (0x%x): 0x%x\n",
-				   mbox_reg->cmd_set_reg,
-				   mbox_read(mbox_reg->cmd_set_reg));
-			NPU_NOTICE("msg1 reg (0x%x): 0x%x\n",
-				   mbox_reg->msg_reg,
-				   mbox_read(mbox_reg->msg_reg));
-			NPU_NOTICE("msg2 reg (0x%x): 0x%x\n",
-				   mbox_reg->msg_reg,
-				   mbox_read(mbox_reg->msg_reg + 0x4));
-			NPU_NOTICE("msg3 reg (0x%x): 0x%x\n",
-				   mbox_reg->msg_reg,
-				   mbox_read(mbox_reg->msg_reg + 0x8));
-			NPU_NOTICE("msg4 reg (0x%x): 0x%x\n",
-				   mbox_reg->msg_reg,
-				   mbox_read(mbox_reg->msg_reg + 0xC));
-			NPU_NOTICE("msg5 reg (0x%x): 0x%x\n",
-				   mbox_reg->msg_reg,
-				   mbox_read(mbox_reg->msg_reg + 0x10));
-			WARN_ON(1);
+			return -ETIMEDOUT;
 		}
+		cpu_relax();
 	}
 
 	/* write msg */
@@ -368,12 +351,18 @@ int mbox_send_msg(struct mailbox_dev *mdev, struct mailbox_msg *msg, void *priv,
 	start = ktime_get();
 
 	/* wait for cmd clear */
-	while (mbox_read(mbox_reg.cmd_set_reg) & BIT(mdev->cmd_id))
-		mbox_send_msg_chk_timeout(start);
+	while (mbox_read(mbox_reg.cmd_set_reg) & BIT(mdev->cmd_id)) {
+		if (mbox_send_msg_chk_timeout(start)) {
+			ret = -ETIMEDOUT;
+			goto out;
+		}
+		cpu_relax();
+	}
 
 	/* execute return handler and clear message */
 	mbox_post_send(mbox_reg.msg_reg, msg, priv, ret_handler);
 
+out:
 	spin_unlock_irqrestore(&mbox.core[MBOX_SEND][mdev->core].lock, flag);
 
 	return ret;

@@ -3901,7 +3901,9 @@ int mtk_hnat_eth_hook_tx(struct sk_buff *skb, struct net_device *dev)
 
 int mtk_sw_nat_hook_rx(struct sk_buff *skb)
 {
-	if (!IS_SPACE_AVAILABLE_HEAD(skb) || !FROM_WED(skb)) {
+	if (!IS_SPACE_AVAILABLE_HEAD(skb))
+		return NF_ACCEPT;
+	if (!FROM_WED(skb)) {
 		skb_hnat_magic_tag(skb) = 0;
 		return NF_ACCEPT;
 	}
