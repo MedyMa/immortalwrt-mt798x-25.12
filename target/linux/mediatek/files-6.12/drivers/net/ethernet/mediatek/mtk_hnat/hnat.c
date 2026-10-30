@@ -1287,21 +1287,29 @@ static int hnat_start(u32 ppe_id)
 		hnat_priv->foe_table_cpu[ppe_id] = dma_alloc_coherent(
 				hnat_priv->dev, foe_table_sz,
 				&hnat_priv->foe_table_dev[ppe_id], GFP_KERNEL);
-		if (hnat_priv->foe_table_cpu[ppe_id]) {
-			foe_flow_sz = (hnat_priv->foe_etry_num / 4) * sizeof(struct hlist_head);
-			/* Allocate the foe_flow table for wifi tx binding flow */
-			hnat_priv->foe_flow[ppe_id] = devm_kzalloc(hnat_priv->dev, foe_flow_sz,
-								   GFP_KERNEL);
-			/* If the memory allocation fails, free the memory allocated before */
-			if (!hnat_priv->foe_flow[ppe_id]) {
-				dma_free_coherent(hnat_priv->dev, foe_table_sz,
-						  hnat_priv->foe_table_cpu[ppe_id],
-						  hnat_priv->foe_table_dev[ppe_id]);
-				hnat_priv->foe_table_cpu[ppe_id] = NULL;
-			} else {
-				break;
-			}
+
+		if (!hnat_priv->foe_table_cpu[ppe_id])
+			continue;
+
+		foe_flow_sz = (hnat_priv->foe_etry_num / 4) * sizeof(struct hlist_head);
+		/* Allocate the foe_flow table for wifi tx binding flow */
+		hnat_priv->foe_flow[ppe_id] = devm_kzalloc(hnat_priv->dev, foe_flow_sz,
+							   GFP_KERNEL);
+		if (!hnat_priv->foe_flow[ppe_id]) {
+			/*
+			 * Retrying with a halved entry count cannot help a small
+			 * kzalloc succeed, and foe_etry_num is shared by every
+			 * PPE, so shrinking it here would also corrupt the table
+			 * size of PPEs that already came up.
+			 */
+			dma_free_coherent(hnat_priv->dev, foe_table_sz,
+					  hnat_priv->foe_table_cpu[ppe_id],
+					  hnat_priv->foe_table_dev[ppe_id]);
+			hnat_priv->foe_table_cpu[ppe_id] = NULL;
+			return -ENOMEM;
 		}
+
+		break;
 	}
 
 	if (!hnat_priv->foe_table_cpu[ppe_id] || !hnat_priv->foe_flow[ppe_id])
