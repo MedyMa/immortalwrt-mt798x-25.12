@@ -1314,9 +1314,6 @@ static int hnat_start(u32 ppe_id)
 		}
 
 		break;
-		}
-
-		break;
 	}
 
 	if (!hnat_priv->foe_table_cpu[ppe_id] || !hnat_priv->foe_flow[ppe_id])
