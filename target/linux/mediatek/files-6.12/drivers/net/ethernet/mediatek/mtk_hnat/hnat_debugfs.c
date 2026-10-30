@@ -772,10 +772,14 @@ void __entry_delete(struct foe_entry *entry)
 	if (!entry)
 		return;
 
+	/* Keep owner generations synchronized with every software invalidation. */
+	hnat_account_invalidate_entry(h, entry);
+
 	entry->bfib1.state = INVALID;
 	entry->bfib1.time_stamp = foe_timestamp(h, false);
 	dma_wmb();
 }
+EXPORT_SYMBOL_GPL(__entry_delete);
 
 int entry_delete(u32 ppe_id, int index)
 {
@@ -1116,6 +1120,7 @@ static int set_hash_simple_mode(int mode)
 		"IPv4 source IP[15:0]", "IPv6 source IP[15:0]", "Destination port[15:0]",
 		"IPv4 destination IP[15:0]", "IPv6 destination IP[15:0]" };
 	unsigned int foe_table_sz, foe_acct_tb_sz, ppe_id, i;
+	bool account_paused[MAX_PPE_NUM] = { false };
 
 	if (mode < 0 || mode > 6) {
 		pr_info("Invalid hash simple mode %d\n", mode);
@@ -1124,6 +1129,8 @@ static int set_hash_simple_mode(int mode)
 			pr_info("		%d	%s\n", i, hash_simple_mode[i]);
 		return -EINVAL;
 	}
+
+	hnat_account_admin_lock();
 
 	foe_table_sz = hnat_priv->foe_etry_num * sizeof(struct foe_entry);
 	foe_acct_tb_sz = hnat_priv->foe_etry_num * sizeof(struct hnat_accounting);
@@ -1134,6 +1141,10 @@ static int set_hash_simple_mode(int mode)
 	set_gmac_ppe_fwd(NR_GMAC3_PORT, 0);
 
 	for (ppe_id = 0; ppe_id < CFG_PPE_NUM; ppe_id++) {
+		if (hnat_account_enabled(hnat_priv)) {
+			hnat_account_reset_table(hnat_priv, ppe_id);
+			account_paused[ppe_id] = true;
+		}
 		cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_TB_CFG,
 			     HASH_DBG, mode);
 
@@ -1142,8 +1153,10 @@ static int set_hash_simple_mode(int mode)
 		if (hnat_priv->data->version == MTK_HNAT_V1_1)
 			exclude_boundary_entry(hnat_priv->foe_table_cpu[ppe_id]);
 
-		if (hnat_priv->data->per_flow_accounting)
+		if (hnat_priv->data->per_flow_accounting && !account_paused[ppe_id])
 			memset(hnat_priv->acct[ppe_id], 0, foe_acct_tb_sz);
+		if (account_paused[ppe_id])
+			hnat_account_resume(hnat_priv, ppe_id);
 	}
 
 	/* clear HWNAT cache */
@@ -1152,6 +1165,7 @@ static int set_hash_simple_mode(int mode)
 	set_gmac_ppe_fwd(NR_GMAC1_PORT, 1);
 	set_gmac_ppe_fwd(NR_GMAC2_PORT, 1);
 	set_gmac_ppe_fwd(NR_GMAC3_PORT, 1);
+	hnat_account_admin_unlock();
 
 	pr_info("Hash simple mode enabled, set to %s mode\n", hash_simple_mode[mode]);
 
@@ -1258,8 +1272,8 @@ out_unlock:
 	rcu_read_unlock();
 }
 
-static void hnat_vif_acct_update(struct mtk_hnat *h, u32 ppe_id,
-				 u32 index, u64 bytes, u64 packets)
+void hnat_vif_acct_update(struct mtk_hnat *h, u32 ppe_id,
+			  u32 index, u64 bytes, u64 packets)
 {
 	struct rtnl_link_stats64 rx_stats = { .rx_packets = packets,
 					      .rx_bytes = bytes };
@@ -1358,7 +1372,18 @@ static int hnat_nf_acct_update(struct mtk_hnat *h, u32 ppe_id,
 struct hnat_accounting *hnat_get_count(struct mtk_hnat *h, u32 ppe_id,
 				       u32 index, struct hnat_accounting *diff)
 {
+	struct hnat_accounting snapshot, delta;
 	u64 bytes, packets;
+
+	if (hnat_account_enabled(h)) {
+		if (hnat_account_drain(h, ppe_id, index, &snapshot, &delta))
+			return NULL;
+		if (diff)
+			*diff = delta;
+		/* Preserve 25.12's VLAN/PPP ndo_flow_offload_stats64_add path. */
+		hnat_vif_acct_update(h, ppe_id, index, delta.bytes, delta.packets);
+		return &h->acct[ppe_id][index];
+	}
 
 	if (ppe_id >= CFG_PPE_NUM)
 		return NULL;
@@ -1388,6 +1413,8 @@ struct hnat_accounting *hnat_get_count(struct mtk_hnat *h, u32 ppe_id,
 	return &h->acct[ppe_id][index];
 }
 EXPORT_SYMBOL(hnat_get_count);
+
+DEFINE_SHOW_ATTRIBUTE(hnat_account);
 
 #define PRINT_COUNT(m, acct) {if (acct) \
 		seq_printf(m, "bytes=%llu|packets=%llu|", \
@@ -4358,6 +4385,7 @@ int hnat_init_debugfs(struct mtk_hnat *h)
 	}
 
 	debugfs_create_file("all_entry", 0444, root, h, &hnat_debug_fops);
+	debugfs_create_file("accounting", 0444, root, h, &hnat_account_fops);
 	debugfs_create_file("external_interface", 0444, root, h,
 			    &hnat_ext_fops);
 	debugfs_create_file("whnat_interface", 0644, root, h,

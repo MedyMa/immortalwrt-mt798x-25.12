@@ -13,6 +13,7 @@
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/kthread.h>
+#include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/refcount.h>
 #include <linux/seq_file.h>
@@ -109,6 +110,7 @@ struct npu_cls_entry {
 };
 
 struct npu_tnl_info_ops {
+	struct module *owner;
 	int (*cls_setup)(struct npu_tnl_info *tnl_info);
 	void (*cls_destroy)(struct npu_tnl_info *tnl_info);
 };
@@ -121,7 +123,8 @@ struct npu_tnl_info {
 	struct list_head sync_node;
 	struct hlist_node hlist;
 	struct net_device *dev;
-	struct npu_tnl_info_ops *ops;
+	const struct npu_tnl_info_ops *ops;
+	struct module *ops_owner;
 	spinlock_t lock;
 	u32 tnl_idx;
 	u32 status;
@@ -221,6 +224,10 @@ static inline void tnl_info_encap_disable(struct npu_tnl_info *tnl_info)
 }
 
 void mtk_npu_tnl_info_cls_link(struct npu_tnl_info *tnl_info, struct npu_cls_entry *tcls);
+int mtk_npu_tnl_info_ops_set_no_lock(struct npu_tnl_info *tnl_info,
+				     const struct npu_tnl_info_ops *ops);
+struct net_device *mtk_npu_tnl_info_set_dev_no_lock(struct npu_tnl_info *tnl_info,
+						     struct net_device *dev);
 int mtk_npu_tnl_info_cls_entry_write(struct npu_tnl_info *tnl_info);
 void mtk_npu_tnl_info_cls_entry_free(struct npu_tnl_info *tnl_info,
 				     struct npu_tnl_params *tnl_params);

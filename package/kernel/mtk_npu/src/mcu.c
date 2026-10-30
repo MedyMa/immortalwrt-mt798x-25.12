@@ -112,6 +112,7 @@ struct mcu_ctrl {
 	bool in_recover;
 	bool netsys_fe_ser;
 	bool shuting_down;
+	bool powered;
 	bool mem_verified;
 
 	struct mailbox_msg ctrl_msg;
@@ -321,6 +322,9 @@ static int mcu_power_on(void)
 {
 	int ret = 0;
 
+	if (mcu.powered)
+		return 0;
+
 	ret = clk_prepare_enable(mcu.bus_clk);
 	if (ret) {
 		NPU_ERR("bus clk enable failed: %d\n", ret);
@@ -357,6 +361,9 @@ static int mcu_power_on(void)
 		goto err_disable_mgmt_clk;
 	}
 
+	mcu.powered = true;
+	mtk_npu_mbox_irq_enable();
+
 	return ret;
 
 err_disable_mgmt_clk:
@@ -379,6 +386,11 @@ err_disable_bus_clk:
 
 static void mcu_power_off(void)
 {
+	if (!mcu.powered)
+		return;
+
+	mtk_npu_fw_stop_default_cores();
+	mtk_npu_mbox_irq_disable();
 	pm_runtime_put_sync(npu.dev);
 
 	clk_disable_unprepare(mcu.mgmt_clk);
@@ -390,6 +402,7 @@ static void mcu_power_off(void)
 	clk_disable_unprepare(mcu.sram_clk);
 
 	clk_disable_unprepare(mcu.bus_clk);
+	mcu.powered = false;
 }
 
 static inline int mcu_state_send_cmd(struct mcu_state *state)

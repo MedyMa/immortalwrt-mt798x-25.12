@@ -16,6 +16,10 @@ PKG_BIN_SOURCE:=mt799x_20250613-415824-bin.tar.xz
 PKG_BIN_SOURCE_URL:=
 
 PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(WIFI_DRIVER_NAME)
+# Both packages unpack into the same directory, and either prepare step can
+# replace it. Apply the same source fixes on every preparation.
+PATCH_DIR:=$(TOPDIR)/package/mtk/drivers/mt_wifi7/patches
+PKG_FILE_DEPENDS+=$(PATCH_DIR)
 PKG_KCONFIG:= \
 	SUPPORT_OPENWRT \
 	CCN34_SPLIT_MAC_SUPPORT \

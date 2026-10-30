@@ -150,6 +150,7 @@ struct npu_hnat_mcast_ops {
 	int (*npu_mcast_client_insert)(struct mcast_offload_info *hnat_mcast_params);
 	int (*npu_mcast_client_delete)(struct mcast_offload_info *hnat_mcast_params);
 	int (*npu_mcast_client_update)(struct mcast_offload_info *hnat_mcast_params);
+	bool (*ready)(void);
 };
 
 #define IS_MCAST_MULTI_MODE (hnat_priv->data->mcast && mcast_mode == HNAT_MCAST_MODE_MULTI)
@@ -167,6 +168,7 @@ int hnat_mcast_disable(void);
 void hnat_mcast_ifdown_handle(int ifindex);
 int mtk_npu_hnat_mcast_ops_register(struct npu_hnat_mcast_ops *hnat_mcast_ops);
 int mtk_npu_hnat_mcast_ops_unregister(void);
+void hnat_mcast_npu_quiesce(void);
 void hnat_notify_mcast_sw_path(int group_idx);
 void hnat_notify_mcast_hw_path(int group_idx);
 int hnat_mcast_blist_handle(u8 *ip, u32 mask, bool add, bool is_ipv4);

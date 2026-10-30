@@ -46,23 +46,38 @@ static int mtk_npu_nf_hnat_device_init(void)
 	}
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "npu-base");
-	if (!res) {
-		/* for legacy NPU name, should be removed after openwrt-21.02 deprecated */
+	if (!res)
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "tops-base");
-		if (!res)
-			return -ENXIO;
+	if (!res) {
+		ret = -ENXIO;
+		goto out_device;
 	}
 
-	npu_nf_hnat.base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
-	if (!npu_nf_hnat.base)
-		return -ENOMEM;
+	npu_nf_hnat.base = ioremap(res->start, resource_size(res));
+	if (!npu_nf_hnat.base) {
+		ret = -ENOMEM;
+		goto out_device;
+	}
 
 	npu_nf_hnat.dev = &pdev->dev;
+	/* Retain the platform-device reference for the module lifetime. */
+	of_node_put(node);
+	return 0;
 
+out_device:
+	put_device(&pdev->dev);
 out:
 	of_node_put(node);
-
 	return ret;
+}
+
+static void mtk_npu_nf_hnat_device_deinit(void)
+{
+	if (npu_nf_hnat.base)
+		iounmap(npu_nf_hnat.base);
+	if (npu_nf_hnat.dev)
+		put_device(npu_nf_hnat.dev);
+	memset(&npu_nf_hnat, 0, sizeof(npu_nf_hnat));
 }
 
 static int __init mtk_npu_nf_hnat_init(void)
@@ -74,8 +89,10 @@ static int __init mtk_npu_nf_hnat_init(void)
 		return ret;
 
 	ret = mtk_npu_nf_hnat_tnl_offload_init();
-	if (ret)
+	if (ret) {
+		mtk_npu_nf_hnat_device_deinit();
 		return ret;
+	}
 
 	ret = mtk_npu_nf_hnat_net_event_init();
 	if (ret)
@@ -92,6 +109,7 @@ err_net_event_deinit:
 
 err_tnl_offload_deinit:
 	mtk_npu_nf_hnat_tnl_offload_deinit();
+	mtk_npu_nf_hnat_device_deinit();
 
 	return ret;
 }
@@ -103,6 +121,7 @@ static void __exit mtk_npu_nf_hnat_exit(void)
 	mtk_npu_nf_hnat_net_event_deinit();
 
 	mtk_npu_nf_hnat_tnl_offload_deinit();
+	mtk_npu_nf_hnat_device_deinit();
 }
 
 module_init(mtk_npu_nf_hnat_init);

@@ -35,6 +35,8 @@ struct mailbox_core {
 };
 
 struct mailbox_hw {
+	int irq;
+	bool irq_enabled;
 	struct mailbox_core core[MBOX_ACT_MAX][CORE_MAX];
 };
 
@@ -119,8 +121,10 @@ static void exec_mbox_handler(enum core_id core, struct mailbox_reg *mbox_reg)
 	struct mailbox_dev *mdev = NULL;
 	struct mailbox_msg msg = {0};
 	enum mbox_msg_cnt ret = 0;
+	unsigned long flags;
 	u32 cmd_id = 0;
 
+	spin_lock_irqsave(&mcore->lock, flags);
 	cmd_id = mbox_read(mbox_reg->msg_reg);
 
 	list_for_each_entry(mdev, &mcore->mdev_list, list) {
@@ -147,6 +151,7 @@ out:
 
 	/* clear cmd */
 	mbox_write(mbox_reg->cmd_clr_reg, 0xFFFFFFFF);
+	spin_unlock_irqrestore(&mcore->lock, flags);
 }
 
 static irqreturn_t mtk_npu_mbox_handler(int irq, void *dev_id)
@@ -195,8 +200,8 @@ static irqreturn_t mtk_npu_mbox_handler(int irq, void *dev_id)
 static int mbox_get_send_reg(struct mailbox_dev *mdev,
 			     struct mailbox_reg *mbox_reg)
 {
-	if (!mdev) {
-		NPU_NOTICE("no mdev specified!\n");
+	if (!mdev || mdev->cmd_id >= 32) {
+		NPU_NOTICE("invalid mailbox device or command\n");
 		return -EINVAL;
 	}
 
@@ -265,6 +270,8 @@ static inline int __mbox_send_msg_no_wait_irq(struct mailbox_dev *mdev,
 		NPU_NOTICE("missing some necessary parameters!\n");
 		return -EPERM;
 	}
+	if (!READ_ONCE(mbox.irq_enabled))
+		return -EHOSTDOWN;
 
 	start = ktime_get();
 
@@ -347,6 +354,8 @@ int mbox_send_msg(struct mailbox_dev *mdev, struct mailbox_msg *msg, void *priv,
 
 	/* send cmd + msg */
 	ret = __mbox_send_msg_no_wait_irq(mdev, msg, &mbox_reg);
+	if (ret)
+		goto out;
 
 	start = ktime_get();
 
@@ -372,7 +381,7 @@ EXPORT_SYMBOL(mbox_send_msg);
 static inline int mbox_ctrl_sanity_check(enum core_id core, enum mbox_act act)
 {
 	/* sanity check */
-	if (core >= CORE_MAX || act >= MBOX_ACT_MAX)
+	if ((unsigned int)core >= CORE_MAX || (unsigned int)act >= MBOX_ACT_MAX)
 		return -EINVAL;
 
 	/* mbox handler should not be register to core itself */
@@ -394,12 +403,12 @@ static void __register_mbox_dev(struct mailbox_core *mcore,
 		if (cur->cmd_id > mdev->cmd_id)
 			break;
 
-	list_add(&mdev->list, &cur->list);
+	list_add_tail(&mdev->list, &cur->list);
 
-	mcore->registered_cmd |= (0x1 << mdev->cmd_id);
+	mcore->registered_cmd |= BIT(mdev->cmd_id);
 }
 
-static void __unregister_mbox_dev(struct mailbox_core *mcore,
+static bool __unregister_mbox_dev(struct mailbox_core *mcore,
 				  struct mailbox_dev *mdev)
 {
 	struct mailbox_dev *cur = NULL;
@@ -408,18 +417,23 @@ static void __unregister_mbox_dev(struct mailbox_core *mcore,
 	/* ensure the node being deleted is existed in the list */
 	list_for_each_entry_safe(cur, next, &mcore->mdev_list, list) {
 		if (cur->cmd_id == mdev->cmd_id && cur == mdev) {
-			list_del(&mdev->list);
-			break;
+			list_del_init(&mdev->list);
+			mcore->registered_cmd &= ~BIT(mdev->cmd_id);
+			return true;
 		}
 	}
 
-	mcore->registered_cmd &= (~(0x1 << mdev->cmd_id));
+	return false;
 }
 
 int register_mbox_dev(enum mbox_act act, struct mailbox_dev *mdev)
 {
 	struct mailbox_core *mcore;
+	unsigned long flags;
 	int ret = 0;
+
+	if (!mdev || mdev->cmd_id >= 32)
+		return -EINVAL;
 
 	/* sanity check */
 	ret = mbox_ctrl_sanity_check(mdev->core, act);
@@ -429,19 +443,25 @@ int register_mbox_dev(enum mbox_act act, struct mailbox_dev *mdev)
 	mcore = &mbox.core[act][mdev->core];
 
 	/* check cmd is occupied or not */
-	if (mcore->registered_cmd & (0x1 << mdev->cmd_id))
-		return -EBUSY;
+	spin_lock_irqsave(&mcore->lock, flags);
+	if (mcore->registered_cmd & BIT(mdev->cmd_id))
+		ret = -EBUSY;
+	else
+		__register_mbox_dev(mcore, mdev);
+	spin_unlock_irqrestore(&mcore->lock, flags);
 
-	__register_mbox_dev(mcore, mdev);
-
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL(register_mbox_dev);
 
 int unregister_mbox_dev(enum mbox_act act, struct mailbox_dev *mdev)
 {
 	struct mailbox_core *mcore;
+	unsigned long flags;
 	int ret = 0;
+
+	if (!mdev || mdev->cmd_id >= 32)
+		return -EINVAL;
 
 	/* sanity check */
 	ret = mbox_ctrl_sanity_check(mdev->core, act);
@@ -451,12 +471,13 @@ int unregister_mbox_dev(enum mbox_act act, struct mailbox_dev *mdev)
 	mcore = &mbox.core[act][mdev->core];
 
 	/* check cmd need to unregister or not */
-	if (!(mcore->registered_cmd & (0x1 << mdev->cmd_id)))
-		return 0;
+	spin_lock_irqsave(&mcore->lock, flags);
+	if ((mcore->registered_cmd & BIT(mdev->cmd_id)) &&
+	    !__unregister_mbox_dev(mcore, mdev))
+		ret = -ENOENT;
+	spin_unlock_irqrestore(&mcore->lock, flags);
 
-	__unregister_mbox_dev(mcore, mdev);
-
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL(unregister_mbox_dev);
 
@@ -482,6 +503,34 @@ void mtk_npu_mbox_clear_all_cmd(void)
 	}
 }
 
+void mtk_npu_mbox_irq_enable(void)
+{
+	if (READ_ONCE(mbox.irq_enabled))
+		return;
+
+	mtk_npu_mbox_clear_all_cmd();
+	WRITE_ONCE(mbox.irq_enabled, true);
+	enable_irq(mbox.irq);
+}
+
+void mtk_npu_mbox_irq_disable(void)
+{
+	unsigned long flags;
+	u32 core;
+
+	if (!READ_ONCE(mbox.irq_enabled))
+		return;
+
+	WRITE_ONCE(mbox.irq_enabled, false);
+	disable_irq(mbox.irq);
+
+	/* Drain accepted senders before the MCU clocks are removed. */
+	for (core = 0; core < CORE_MAX; core++) {
+		spin_lock_irqsave(&mbox.core[MBOX_SEND][core].lock, flags);
+		spin_unlock_irqrestore(&mbox.core[MBOX_SEND][core].lock, flags);
+	}
+}
+
 int mtk_npu_mbox_init(struct platform_device *pdev)
 {
 	uint32_t i;
@@ -494,23 +543,29 @@ int mtk_npu_mbox_init(struct platform_device *pdev)
 		return irq;
 	}
 
-	ret = devm_request_irq(npu.dev, irq,
-			       mtk_npu_mbox_handler,
-			       IRQF_ONESHOT,
-			       pdev->name, NULL);
-	if (ret) {
-		NPU_NOTICE("request mailbox irq failed\n");
-		return ret;
-	}
-
+	/* The interrupt handler may run as soon as the IRQ is registered. */
 	for (i = 0; i < CORE_MAX; i++) {
+		mbox.core[MBOX_SEND][i].registered_cmd = 0;
+		mbox.core[MBOX_RECV][i].registered_cmd = 0;
 		INIT_LIST_HEAD(&mbox.core[MBOX_SEND][i].mdev_list);
 		INIT_LIST_HEAD(&mbox.core[MBOX_RECV][i].mdev_list);
 		spin_lock_init(&mbox.core[MBOX_SEND][i].lock);
 		spin_lock_init(&mbox.core[MBOX_RECV][i].lock);
 	}
 
+	mbox.irq = irq;
+	WRITE_ONCE(mbox.irq_enabled, false);
+
 	mtk_npu_mbox_clear_all_cmd();
+
+	ret = devm_request_irq(npu.dev, irq,
+			       mtk_npu_mbox_handler,
+			       IRQF_ONESHOT | IRQF_NO_AUTOEN,
+			       pdev->name, NULL);
+	if (ret) {
+		NPU_NOTICE("request mailbox irq failed\n");
+		return ret;
+	}
 
 	return ret;
 }

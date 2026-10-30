@@ -33,6 +33,7 @@ extern int vlan_num[MTLAN_MAXINUM];
 
 struct net_device *ppd_dev;
 struct mtk_hnat *hnat_priv;
+EXPORT_SYMBOL_GPL(hnat_priv);
 static struct socket *_hnat_roam_sock;
 static struct work_struct _hnat_roam_work;
 static struct delayed_work _hnat_flow_entry_teardown_work;
@@ -626,8 +627,10 @@ static void hnat_flow_entry_teardown_all(u32 ppe_id)
 	struct hlist_node *n;
 	int index;
 
+	if (!hnat_priv->foe_flow[ppe_id])
+		return;
 	spin_lock_bh(&hnat_priv->flow_entry_lock);
-	for (index = 0; index < DEF_ETRY_NUM / 4; index++) {
+	for (index = 0; index < hnat_priv->foe_etry_num / 4; index++) {
 		head = &hnat_priv->foe_flow[ppe_id][index];
 		hlist_for_each_entry_safe(flow_entry, n, head, list) {
 			hnat_flow_entry_delete(flow_entry);
@@ -646,7 +649,9 @@ static void hnat_flow_entry_teardown_handler(struct work_struct *work)
 
 	spin_lock_bh(&hnat_priv->flow_entry_lock);
 	for (i = 0; i < CFG_PPE_NUM; i++) {
-		for (index = 0; index < DEF_ETRY_NUM / 4; index++) {
+		if (!hnat_priv->foe_flow[i])
+			continue;
+		for (index = 0; index < hnat_priv->foe_etry_num / 4; index++) {
 			head = &hnat_priv->foe_flow[i][index];
 			hlist_for_each_entry_safe(flow_entry, n, head, list) {
 				/* If the entry has not been used for 30 seconds, teardown it. */
@@ -673,7 +678,7 @@ static void hnat_flow_entry_teardown_enable(void)
 
 static void hnat_flow_entry_teardown_disable(void)
 {
-	cancel_delayed_work(&_hnat_flow_entry_teardown_work);
+	cancel_delayed_work_sync(&_hnat_flow_entry_teardown_work);
 }
 
 static int is_cah_ctrl_request_done(u32 ppe_id)
@@ -1281,32 +1286,34 @@ static int hnat_start(u32 ppe_id)
 		return -EINVAL;
 
 	/* mapp the FOE table */
-	for (etry_num_cfg = DEF_ETRY_NUM_CFG; etry_num_cfg >= 0;
+	/* All PPEs share the table size selected by PPE0. */
+	for (etry_num_cfg = ppe_id ? hnat_priv->etry_num_cfg : DEF_ETRY_NUM_CFG;
+	     etry_num_cfg >= 0;
 	     etry_num_cfg--, hnat_priv->foe_etry_num /= 2) {
 		foe_table_sz = hnat_priv->foe_etry_num * sizeof(struct foe_entry);
 		hnat_priv->foe_table_cpu[ppe_id] = dma_alloc_coherent(
 				hnat_priv->dev, foe_table_sz,
 				&hnat_priv->foe_table_dev[ppe_id], GFP_KERNEL);
-
+		/* PPEs share the entry count chosen while starting PPE0. */
+		if (!hnat_priv->foe_table_cpu[ppe_id] && ppe_id)
+			return -ENOMEM;
 		if (!hnat_priv->foe_table_cpu[ppe_id])
 			continue;
 
 		foe_flow_sz = (hnat_priv->foe_etry_num / 4) * sizeof(struct hlist_head);
-		/* Allocate the foe_flow table for wifi tx binding flow */
+		/* Allocate the foe_flow table for wifi tx binding flow. */
 		hnat_priv->foe_flow[ppe_id] = devm_kzalloc(hnat_priv->dev, foe_flow_sz,
 							   GFP_KERNEL);
 		if (!hnat_priv->foe_flow[ppe_id]) {
-			/*
-			 * Retrying with a halved entry count cannot help a small
-			 * kzalloc succeed, and foe_etry_num is shared by every
-			 * PPE, so shrinking it here would also corrupt the table
-			 * size of PPEs that already came up.
-			 */
+			/* Retrying at a smaller FOE size cannot fix a failed flow table. */
 			dma_free_coherent(hnat_priv->dev, foe_table_sz,
 					  hnat_priv->foe_table_cpu[ppe_id],
 					  hnat_priv->foe_table_dev[ppe_id]);
 			hnat_priv->foe_table_cpu[ppe_id] = NULL;
 			return -ENOMEM;
+		}
+
+		break;
 		}
 
 		break;
@@ -1493,6 +1500,13 @@ static struct notifier_block nf_hnat_netevent_nb __read_mostly = {
 
 int hnat_enable_hook(void)
 {
+	int i;
+	int err;
+
+	hnat_account_admin_lock();
+	for (i = 0; i < CFG_PPE_NUM; i++)
+		hnat_account_resume(hnat_priv, i);
+
 	/* register hook functions used by WHNAT module.
 	 */
 	if (hnat_priv->data->whnat) {
@@ -1510,14 +1524,30 @@ int hnat_enable_hook(void)
 	}
 	eth_hook_tx = mtk_hnat_eth_hook_tx;
 
-	if (hnat_register_nf_hooks())
-		return -1;
+	err = hnat_register_nf_hooks();
+	if (err) {
+		ra_sw_nat_hook_rx = NULL;
+		ra_sw_nat_hook_tx = NULL;
+		ra_sw_nat_clear_bind_entries = NULL;
+		ppe_dev_register_hook = NULL;
+		ppe_dev_unregister_hook = NULL;
+		hnat_get_wdma_tx_port = NULL;
+		hnat_get_wdma_rx_port = NULL;
+		hnat_set_wdma_pse_port_state = NULL;
+		eth_hook_tx = NULL;
+		synchronize_net();
+		for (i = 0; i < CFG_PPE_NUM; i++)
+			hnat_account_pause(hnat_priv, i);
+		hnat_account_admin_unlock();
+		return err;
+	}
 
 	ppe_del_entry_by_mac = entry_delete_by_mac;
 	ppe_del_entry_by_ip = entry_delete_by_ip;
 	ppe_del_entry_by_bssid_wcid = entry_delete_by_bssid_wcid;
 	hook_toggle = 1;
 
+	hnat_account_admin_unlock();
 	return 0;
 }
 
@@ -1527,17 +1557,30 @@ int hnat_disable_hook(void)
 	int i, hash_index;
 	int cnt;
 
+	hnat_account_admin_lock();
 	ra_sw_nat_hook_tx = NULL;
 	ra_sw_nat_hook_rx = NULL;
 	ra_sw_nat_clear_bind_entries = NULL;
+	ppe_dev_register_hook = NULL;
+	ppe_dev_unregister_hook = NULL;
+	hnat_get_wdma_tx_port = NULL;
+	hnat_get_wdma_rx_port = NULL;
+	hnat_set_wdma_pse_port_state = NULL;
 	eth_hook_tx = NULL;
 	hnat_unregister_nf_hooks();
+	synchronize_net();
+	for (i = 0; i < CFG_PPE_NUM; i++)
+		hnat_account_pause(hnat_priv, i);
 
 	for (i = 0; i < CFG_PPE_NUM; i++) {
 		cr_set_field(hnat_priv->ppe_base[i] + PPE_TB_CFG,
 			     SMA, SMA_ONLY_FWD_CPU);
 		cnt = 0;
 		for (hash_index = 0; hash_index < hnat_priv->foe_etry_num; hash_index++) {
+			if (hnat_account_enabled(hnat_priv)) {
+				hnat_account_stop_entry(hnat_priv, i, hash_index);
+				continue;
+			}
 			entry = hnat_priv->foe_table_cpu[i] + hash_index;
 			if (entry->bfib1.state == BIND) {
 				spin_lock_bh(&hnat_priv->entry_lock);
@@ -1557,6 +1600,7 @@ int hnat_disable_hook(void)
 	ppe_del_entry_by_bssid_wcid = NULL;
 	hook_toggle = 0;
 
+	hnat_account_admin_unlock();
 	return 0;
 }
 
@@ -1564,6 +1608,8 @@ int hnat_warm_init(void)
 {
 	u32 foe_table_sz, foe_mib_tb_sz, ppe_id = 0;
 	int i;
+
+	hnat_account_admin_lock();
 
 	unregister_netevent_notifier(&nf_hnat_netevent_nb);
 	hnat_neigh_update_cleanup();
@@ -1575,7 +1621,9 @@ int hnat_warm_init(void)
 			hnat_priv->foe_etry_num * sizeof(struct foe_entry);
 		writel(hnat_priv->foe_table_dev[ppe_id],
 		       hnat_priv->ppe_base[ppe_id] + PPE_TB_BASE);
-		memset(hnat_priv->foe_table_cpu[ppe_id], 0, foe_table_sz);
+		if (!hnat_account_reset_table(hnat_priv, ppe_id))
+			memset(hnat_priv->foe_table_cpu[ppe_id], 0, foe_table_sz);
+		hnat_flow_entry_teardown_all(ppe_id);
 
 		if (hnat_priv->data->version == MTK_HNAT_V1_1)
 			exclude_boundary_entry(hnat_priv->foe_table_cpu[ppe_id]);
@@ -1590,6 +1638,7 @@ int hnat_warm_init(void)
 		}
 
 		hnat_hw_init(ppe_id);
+		hnat_account_resume(hnat_priv, ppe_id);
 	}
 
 	/* The SER will enable all the PPE ports again,
@@ -1605,6 +1654,7 @@ int hnat_warm_init(void)
 	set_gmac_ppe_fwd(NR_GMAC3_PORT, 1);
 	register_netevent_notifier(&nf_hnat_netevent_nb);
 
+	hnat_account_admin_unlock();
 	return 0;
 }
 
@@ -1835,6 +1885,10 @@ static int hnat_probe(struct platform_device *pdev)
 			goto err_out;
 	}
 
+	err = hnat_account_init(hnat_priv);
+	if (err)
+		goto err_out;
+
 	/* The PSE default enables all the PPE ports,
 	 * so we need to manually disable the unused ports.
 	 */
@@ -1886,6 +1940,7 @@ static int hnat_probe(struct platform_device *pdev)
 	return 0;
 
 err_out:
+	hnat_account_cleanup(hnat_priv);
 	for (i = 0; i < CFG_PPE_NUM; i++)
 		hnat_stop(i);
 err_out1:
@@ -1915,6 +1970,7 @@ static void hnat_remove(struct platform_device *pdev)
 	if (hnat_priv->data->mcast)
 		hnat_mcast_disable();
 
+	hnat_account_cleanup(hnat_priv);
 	for (i = 0; i < CFG_PPE_NUM; i++)
 		hnat_stop(i);
 

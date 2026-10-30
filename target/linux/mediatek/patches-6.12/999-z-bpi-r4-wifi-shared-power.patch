@@ -1,0 +1,40 @@
+Subject: [PATCH] arm64: dts: mediatek: sequence BPI-R4 shared WiFi power
+
+Use the 24.10 BE14 power sequence on the standard BPI-R4. The BE14 overlay
+in this tree only supplies EEPROM data and does not create a second rail.
+
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dts
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dts
+@@ -8,6 +8,19 @@
+ 	compatible = "bananapi,bpi-r4", "mediatek,mt7988a";
+ 	model = "Banana Pi BPI-R4 (2x SFP+)";
+ 	chassis-type = "embedded";
++
++	/* The two BE14 PCIe endpoints share this power rail. */
++	wifi_12v: regulator-wifi-12v {
++		compatible = "regulator-fixed";
++		regulator-name = "wifi";
++		regulator-min-microvolt = <12000000>;
++		regulator-max-microvolt = <12000000>;
++		gpios = <&pio 4 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		boot-off-delay-us = <10000000>;
++		startup-delay-us = <1000000>;
++		regulator-always-on;
++	};
+ 
+ 	/* SFP2 cage (LAN) */
+ 	sfp2: sfp2 {
+@@ -52,3 +65,12 @@
+ 	mtketh-ppe-num = <3>;
+ 	status = "okay";
+ };
++
++/* Keep both WiFi controllers behind the shared power sequence. */
++&pcie0 {
++	vpcie12v-supply = <&wifi_12v>;
++};
++
++&pcie1 {
++	vpcie12v-supply = <&wifi_12v>;
++};

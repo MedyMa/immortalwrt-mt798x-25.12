@@ -1,0 +1,81 @@
+Subject: [PATCH] net: phy: aquantia: preserve protocol state on MDIO errors
+
+Port the 24.10 protocol setup error handling to 6.12. Restore the saved
+control word after failures and run AN setup when no protocol override exists.
+
+--- a/drivers/net/phy/aquantia/aquantia_main.c
++++ b/drivers/net/phy/aquantia/aquantia_main.c
+@@ -281,34 +281,56 @@
+ static int aqr_config_aneg_set_prot(struct phy_device *phydev)
+ {
+ 	int if_type = phydev->interface;
+-	int i;
+-
++	int i, ret, restore_ret, saved_sc, val;
++
++	if (if_type < 0 || if_type >= ARRAY_SIZE(aquantia_syscfg))
++		return -EINVAL;
+ 	if (!aquantia_syscfg[if_type].cnt)
+-		return 0;
++		return aqr_config_aneg(phydev);
+ 
+ 	/* set PHY in low power mode so we can configure protocols */
+-	phy_write_mmd(phydev, MDIO_MMD_VEND1, AQUANTIA_VND1_GLOBAL_SC,
+-		      AQUANTIA_VND1_GLOBAL_SC_LP);
++	saved_sc = phy_read_mmd(phydev, MDIO_MMD_VEND1,
++				AQUANTIA_VND1_GLOBAL_SC);
++	if (saved_sc < 0)
++		return saved_sc;
++	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, AQUANTIA_VND1_GLOBAL_SC,
++			    saved_sc | AQUANTIA_VND1_GLOBAL_SC_LP);
++	if (ret)
++		goto restore;
+ 	mdelay(10);
+ 
+ 	/* set the default rate to enable the SI link */
+-	phy_write_mmd(phydev, MDIO_MMD_VEND1, AQUANTIA_VND1_GSTART_RATE,
+-		      aquantia_syscfg[if_type].start_rate);
++	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, AQUANTIA_VND1_GSTART_RATE,
++			    aquantia_syscfg[if_type].start_rate);
++	if (ret)
++		goto restore;
+ 
+ 	for (i = 0; i <= aquantia_syscfg[if_type].cnt; i++) {
+-		u16 reg = phy_read_mmd(phydev, MDIO_MMD_VEND1,
+-				       AQUANTIA_VND1_GSYSCFG_BASE + i);
+-		if (!reg)
++		val = phy_read_mmd(phydev, MDIO_MMD_VEND1,
++				   AQUANTIA_VND1_GSYSCFG_BASE + i);
++		if (val < 0) {
++			ret = val;
++			goto restore;
++		}
++		if (!val)
+ 			continue;
+ 
+-		phy_write_mmd(phydev, MDIO_MMD_VEND1,
+-			      AQUANTIA_VND1_GSYSCFG_BASE + i,
+-			      aquantia_syscfg[if_type].syscfg);
+-	}
+-
+-	/* wake PHY back up */
+-	phy_write_mmd(phydev, MDIO_MMD_VEND1, AQUANTIA_VND1_GLOBAL_SC, 0);
++		ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
++				    AQUANTIA_VND1_GSYSCFG_BASE + i,
++				    aquantia_syscfg[if_type].syscfg);
++		if (ret)
++			goto restore;
++	}
++
++restore:
++	/* Restore the caller's control bits even when programming failed. */
++	restore_ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
++				    AQUANTIA_VND1_GLOBAL_SC, saved_sc);
++	if (!ret)
++		ret = restore_ret;
+ 	mdelay(10);
++	if (ret)
++		return ret;
+ 
+ 	return aqr_config_aneg(phydev);
+ }

@@ -9,10 +9,13 @@
 #define _NPU_MCAST_INTERNAL_H_
 
 #include <linux/device.h>
+#include <linux/io.h>
+#include <linux/types.h>
 
 struct npu_mcast_dev {
 	struct device *dev;
 	void __iomem *base;
+	resource_size_t size;
 };
 
 extern struct npu_mcast_dev nmcast;

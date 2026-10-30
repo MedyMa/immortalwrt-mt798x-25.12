@@ -1,0 +1,58 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] wifi: invalidate stale WHNAT metadata on software RX
+
+Adapt the 24.10 software RX descriptor and headroom guards to the 25.12
+SDK. Only packets carrying a valid PPE descriptor enter the hardware path.
+
+--- a/mt_wifi/os/linux/mt_data.c
++++ b/mt_wifi/os/linux/mt_data.c
+@@ -449,6 +449,11 @@
+ 				if (RTMP_GET_PACKET_TYPE(pRxPkt)
+ 						== RX_PPE_VALID)
+ 					ra_sw_nat_hook_rx(pRxPkt);
++#ifdef WHNAT_SUPPORT
++				else
++					/* Software RX has no valid PPE descriptor. */
++					RtmpOsPktNatMagicTagInvalid(pRxPkt);
++#endif
+ 				RtmpOsPktRcvHandle(pRxPkt, napi);
+ 			}
+ 
+--- a/mt_wifi/os/linux/rt_linux.c
++++ b/mt_wifi/os/linux/rt_linux.c
+@@ -997,8 +997,21 @@
+ #ifdef CONFIG_FAST_NAT_SUPPORT
+ VOID RtmpOsPktNatMagicTag(PNDIS_PACKET pNetPkt)
+ {
+-	FOE_MAGIC_TAG(RTPKT_TO_OSPKT(pNetPkt)) = FOE_MAGIC_WLAN;
+-}
++	struct sk_buff *skb = RTPKT_TO_OSPKT(pNetPkt);
++
++	if (IS_SPACE_AVAILABLE_HEAD(skb))
++		FOE_MAGIC_TAG(skb) = FOE_MAGIC_WLAN;
++}
++
++#ifdef WHNAT_SUPPORT
++VOID RtmpOsPktNatMagicTagInvalid(PNDIS_PACKET pNetPkt)
++{
++	struct sk_buff *skb = RTPKT_TO_OSPKT(pNetPkt);
++
++	if (IS_SPACE_AVAILABLE_HEAD(skb))
++		FOE_TAG_PROTECT(skb) = 0;
++}
++#endif
+ #endif /*CONFIG_FAST_NAT_SUPPORT*/
+ 
+ inline int OS_TEST_BIT(int bit, ULONG *flags)
+--- a/mt_wifi/include/rt_os_util.h
++++ b/mt_wifi/include/rt_os_util.h
+@@ -160,6 +160,9 @@
+ VOID RtmpOsPktRcvHandle(PNDIS_PACKET pNetPkt, VOID *napi);
+ #ifdef CONFIG_FAST_NAT_SUPPORT
+ VOID RtmpOsPktNatMagicTag(PNDIS_PACKET pNetPkt);
++#ifdef WHNAT_SUPPORT
++VOID RtmpOsPktNatMagicTagInvalid(PNDIS_PACKET pNetPkt);
++#endif
+ #endif /*CONFIG_FAST_NAT_SUPPORT*/
+ VOID RtmpOsPktInit(PNDIS_PACKET pNetPkt, PNET_DEV pNetDev, UCHAR *buf, USHORT len);
+ 

@@ -1048,7 +1048,9 @@ struct mcast_blist_data {
 	u32 mask;
 };
 
+struct hnat_account_ctx;
 struct mtk_hnat {
+	struct hnat_account_ctx *account;
 	struct device *dev;
 	struct mtk_eth *eth;
 	void __iomem *fe_base;
@@ -1120,6 +1122,7 @@ struct hnat_flow_entry {
 	struct hlist_node list;
 	struct foe_entry data;
 	unsigned long last_update;
+	u64 generation;
 	u16 ppe_index;
 	u16 hash;
 };
@@ -1587,11 +1590,17 @@ u32 hnat_get_ppe_hash(struct foe_entry *entry);
 int mtk_ppe_get_xlat_v4_by_v6(struct in6_addr *ipv6, u32 *ipv4);
 int mtk_ppe_get_xlat_v6_by_v4(u32 *ipv4, struct in6_addr *ipv6,
 			      struct in6_addr *prefix);
-bool hnat_flow_entry_match(struct foe_entry *entry, struct foe_entry *data);
+bool hnat_flow_entry_match(const struct foe_entry *entry, const struct foe_entry *data);
+bool hnat_flow_entry_unbind_match(const struct foe_entry *entry,
+				  const struct foe_entry *live);
 void hnat_flow_entry_delete(struct hnat_flow_entry *flow_entry);
 
 struct hnat_accounting *hnat_get_count(struct mtk_hnat *h, u32 ppe_id,
 				       u32 index, struct hnat_accounting *diff);
+void hnat_vif_acct_update(struct mtk_hnat *h, u32 ppe_id, u32 index,
+			  u64 bytes, u64 packets);
+
+#include "hnat_account.h"
 
 int hnat_mcast_foe_bind_handle(const u8 *dmac,
 			       u32 ppe_id, u32 foe_idx, struct foe_entry *entry, int ifindex);

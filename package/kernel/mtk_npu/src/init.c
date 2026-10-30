@@ -181,6 +181,7 @@ static int mtk_npu_probe(struct platform_device *pdev)
 	npu.base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
 	if (!npu.base)
 		return -ENOMEM;
+	npu.size = resource_size(res);
 
 	ret = mtk_npu_mbox_init(pdev);
 	if (ret) {
@@ -285,13 +286,13 @@ static void mtk_npu_remove(struct platform_device *pdev)
 
 	mtk_npu_netevent_unregister(pdev);
 
-	mtk_npu_mcu_tear_down(pdev);
-
 	mtk_npu_logger_deinit(pdev);
 
 	mtk_npu_misc_deinit(pdev);
 
 	mtk_npu_tnl_offload_deinit(pdev);
+
+	mtk_npu_mcu_tear_down(pdev);
 
 	mtk_npu_netsys_deinit(pdev);
 

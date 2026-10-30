@@ -298,7 +298,8 @@ int mtk_hnat_get_mib_count_by_index(unsigned short ppe_index,
 	if (!entry_hnat_is_bound(entry))
 		return HNAT_ENTRY_NOT_FOUND;
 
-	hnat_get_count(h, ppe_index, hash_index, &diff);
+	if (!hnat_get_count(h, ppe_index, hash_index, &diff))
+		return HNAT_FAIL;
 
 	*pkt_cnt = diff.packets;
 	*byte_cnt = diff.bytes;

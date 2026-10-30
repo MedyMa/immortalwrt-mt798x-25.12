@@ -26,6 +26,9 @@
 #include <net/udp.h>
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_acct.h>
+#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
+#include <net/netfilter/nf_hnat_packet_accounting.h>
+#endif
 #include <net/route.h>
 #include <net/addrconf.h>
 
@@ -280,7 +283,7 @@ int ext_if_del(struct extdev_entry *ext_entry)
 	return i;
 }
 
-bool hnat_flow_entry_match(struct foe_entry *entry, struct foe_entry *data)
+bool hnat_flow_entry_match(const struct foe_entry *entry, const struct foe_entry *data)
 {
 	int len;
 
@@ -307,6 +310,17 @@ bool hnat_flow_entry_match(struct foe_entry *entry, struct foe_entry *data)
 	}
 
 	return !memcmp(&entry->ipv4_hnapt.sip, &data->ipv4_hnapt.sip, len - 4);
+}
+
+bool hnat_flow_entry_unbind_match(const struct foe_entry *entry,
+				  const struct foe_entry *live)
+{
+	struct foe_entry snapshot = { 0 };
+
+	/* Read the hardware-updated info1 word once before comparing the key. */
+	snapshot.info_blk1 = READ_ONCE(live->info_blk1);
+	return snapshot.udib1.state == UNBIND &&
+		hnat_flow_entry_match(entry, live);
 }
 
 void hnat_flow_entry_delete(struct hnat_flow_entry *flow_entry)
@@ -1043,11 +1057,14 @@ static unsigned int do_hnat_ge_to_ext(struct sk_buff *skb, const char *func)
 
 	/*if external devices is down, invalidate related ppe entry*/
 	if (entry_hnat_is_bound(entry)) {
+		spin_lock_bh(&hnat_priv->entry_lock);
+		hnat_account_invalidate_entry(hnat_priv, entry);
 		entry->bfib1.state = INVALID;
 		if (IS_IPV4_GRP(entry))
 			entry->ipv4_hnapt.act_dp &= ~UDF_PINGPONG_IFIDX;
 		else
 			entry->ipv6_5t_route.act_dp &= ~UDF_PINGPONG_IFIDX;
+		spin_unlock_bh(&hnat_priv->entry_lock);
 
 		/* clear HWNAT cache */
 		hnat_cache_clr(skb_hnat_ppe(skb));
@@ -1438,11 +1455,59 @@ static void mtk_hnat_update_acct_ifindex(struct sk_buff *skb,
 }
 
 static unsigned int
+mtk_hnat_nf_conntrack(void *priv, struct sk_buff *skb,
+		     const struct nf_hook_state *state)
+{
+	if (!skb)
+		return NF_DROP;
+
+	if (IS_SPACE_AVAILABLE_HEAD(skb) && !skb_hnat_alg(skb) &&
+	    is_magic_tag_valid(skb) && skb_mac_header_was_set(skb) &&
+	    skb_hnat_is_hashed(skb) && !(skb->mark & HNAT_EXCEPTION_BIT) &&
+	    skb_hnat_reason(skb) == HIT_BIND_KEEPALIVE_DUP_OLD_HDR &&
+	    hnat_priv->data->per_flow_accounting && hnat_priv->nf_stat_en) {
+		struct nf_conn *ct;
+		struct hnat_accounting diff;
+		enum ip_conntrack_info ctinfo;
+
+		ct = nf_ct_get(skb, &ctinfo);
+		if (ct) {
+			if (hnat_account_enabled(hnat_priv)) {
+				hnat_account_publish_delta(hnat_priv,
+						skb_hnat_ppe(skb),
+						skb_hnat_entry(skb), skb);
+			} else {
+				hnat_get_count(hnat_priv, skb_hnat_ppe(skb),
+					       skb_hnat_entry(skb), &diff);
+			}
+		}
+	}
+
+#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
+	/* A synthetic packet without an accepted hardware snapshot contributes zero. */
+	if (hnat_account_enabled(hnat_priv))
+		nf_hnat_packet_accounting_finish_zero(skb);
+#endif
+	return NF_ACCEPT;
+}
+
+static void mtk_hnat_account_mark_keepalive(struct sk_buff *skb)
+{
+#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
+	if (hnat_account_enabled(hnat_priv) && IS_SPACE_AVAILABLE_HEAD(skb) &&
+	    is_magic_tag_valid(skb) &&
+	    skb_hnat_reason(skb) == HIT_BIND_KEEPALIVE_DUP_OLD_HDR)
+		nf_hnat_packet_accounting_mark(skb);
+#endif
+}
+
+static unsigned int
 mtk_hnat_ipv6_nf_pre_routing(void *priv, struct sk_buff *skb,
 			     const struct nf_hook_state *state)
 {
 	if (!skb)
 		goto drop;
+	mtk_hnat_account_mark_keepalive(skb);
 
 	if (!IS_WHNAT(state->in) && IS_EXT(state->in)) {
 		if (unlikely(skb_shinfo(skb)->frag_list))
@@ -1571,6 +1636,7 @@ mtk_hnat_ipv4_nf_pre_routing(void *priv, struct sk_buff *skb,
 
 	if (!skb)
 		goto drop;
+	mtk_hnat_account_mark_keepalive(skb);
 		
 	if (!IS_WHNAT(state->in) && IS_EXT(state->in)) {
 		if (unlikely(skb_shinfo(skb)->frag_list))
@@ -2230,6 +2296,38 @@ static int hnat_foe_entry_commit(struct foe_entry *foe,
 	return 0;
 }
 
+static bool hnat_accounted_foe_commit(struct sk_buff *skb,
+				      struct foe_entry *foe,
+				      struct foe_entry *entry,
+				      u32 ppe, u32 slot,
+				      bool confirm, u64 generation)
+{
+	bool accepted = false;
+
+	if (!hnat_account_enabled(hnat_priv)) {
+		hnat_foe_entry_commit(foe, entry, BIND);
+		return true;
+	}
+
+	entry->bfib1.time_stamp = foe_timestamp(hnat_priv, false);
+	entry->bfib1.state = BIND;
+	if (!hnat_account_commit(hnat_priv, ppe, slot, skb, entry,
+				 false, confirm, generation, &accepted))
+		return false;
+
+	return accepted;
+}
+
+/* Match the 6.12 Ethernet queue map for marks in PPPQ mode. */
+static u32 hnat_queue_mark(const struct sk_buff *skb)
+{
+	u32 mark = skb->mark & MTK_QDMA_QUEUE_MASK;
+
+	if (IS_PPPQ_MODE && mark >= MTK_QDMA_NUM_QUEUES)
+		return 0;
+	return mark;
+}
+
 int hnat_bind_crypto_entry(struct sk_buff *skb, const struct net_device *dev, int fill_inner_info)
 {
 	struct net_device *master_dev;
@@ -2479,8 +2577,8 @@ hnat_skip_fill_inner:
 		entry.ipv6_5t_route.pppoe_id = hw_path.pppoe_sid;
 	}
 
-	if (IS_HQOS_MODE || (skb->mark & MTK_QDMA_QUEUE_MASK) >= MAX_PPPQ_QUEUE_NUM)
-		qid = skb->mark & (MTK_QDMA_QUEUE_MASK);
+	if (IS_HQOS_MODE || hnat_queue_mark(skb) >= MAX_PPPQ_QUEUE_NUM)
+		qid = hnat_queue_mark(skb);
 	else if (IS_PPPQ_MODE && IS_PPPQ_PATH(dev, skb))
 		qid = ((port_id >= 0) ? MTK_GMAC_ID_MAX + port_id : mac->id) & MTK_QDMA_QUEUE_MASK;
 	else
@@ -2500,13 +2598,19 @@ hnat_skip_fill_inner:
 		return 0;
 
 	spin_lock_bh(&hnat_priv->entry_lock);
-	hnat_foe_entry_commit(foe, &entry, BIND);
+	if (!hnat_accounted_foe_commit(skb, foe, &entry,
+				       skb_hnat_ppe(skb), skb_hnat_entry(skb),
+				       false, 0)) {
+		spin_unlock_bh(&hnat_priv->entry_lock);
+		return -1;
+	}
 	spin_unlock_bh(&hnat_priv->entry_lock);
 
 	if (debug_level >= 7)
 		entry_detail(skb_hnat_ppe(skb), skb_hnat_entry(skb));
 
 	if (hnat_priv->data->per_flow_accounting &&
+	    !hnat_account_enabled(hnat_priv) &&
 	    skb_hnat_entry(skb) < hnat_priv->foe_etry_num &&
 	    skb_hnat_ppe(skb) < CFG_PPE_NUM)
 		memset(&hnat_priv->acct[skb_hnat_ppe(skb)][skb_hnat_entry(skb)],
@@ -2554,6 +2658,46 @@ bool hnat_mcast_chk_blist(struct foe_entry *entry)
 	return false;
 }
 
+/* Classify a header-only TCP packet without changing skb offsets. */
+static bool hnat_tcp_no_payload(const struct sk_buff *skb, u16 h_proto,
+				u16 h_offset)
+{
+	struct iphdr iph_buf, *iph;
+	struct ipv6hdr ip6h_buf, *ip6h;
+	struct tcphdr tcp_buf, *tcp;
+	int offset = skb_network_offset(skb);
+	u32 len, l3_len, l4_len;
+
+	if (offset < 0 || (unsigned int)offset > skb->len ||
+	    h_offset > skb->len - (unsigned int)offset || skb->encapsulation)
+		return false;
+	offset += h_offset;
+	if (h_proto == ETH_P_IP) {
+		iph = skb_header_pointer(skb, offset, sizeof(iph_buf), &iph_buf);
+		if (!iph || iph->version != 4 || iph->ihl < 5 ||
+		    iph->protocol != IPPROTO_TCP || ip_is_fragment(iph))
+			return false;
+		l3_len = iph->ihl * 4;
+		len = ntohs(iph->tot_len);
+	} else if (h_proto == ETH_P_IPV6) {
+		ip6h = skb_header_pointer(skb, offset, sizeof(ip6h_buf), &ip6h_buf);
+		if (!ip6h || ip6h->version != 6 || ip6h->nexthdr != IPPROTO_TCP)
+			return false;
+		l3_len = sizeof(ip6h_buf);
+		len = l3_len + ntohs(ip6h->payload_len);
+	} else {
+		return false;
+	}
+	if (len > skb->len - (unsigned int)offset ||
+	    len < l3_len + sizeof(tcp_buf))
+		return false;
+	tcp = skb_header_pointer(skb, offset + l3_len, sizeof(tcp_buf), &tcp_buf);
+	if (!tcp || tcp->doff < 5)
+		return false;
+	l4_len = tcp->doff * 4;
+	return len == l3_len + l4_len;
+}
+
 static int skb_to_hnat_info(struct sk_buff *skb,
 			    const struct net_device *dev,
 			    struct foe_entry *foe,
@@ -2563,7 +2707,6 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 	struct foe_entry entry = { 0 };
 	struct hnat_flow_entry *flow_entry;
 	struct mtk_mac *mac;
-	struct tcphdr *tcph;
 	struct iphdr *iph;
 	struct ipv6hdr *ip6h;
 	struct tcpudphdr _ports;
@@ -2575,12 +2718,13 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 	int port_id = 0;
 	int mape = 0;
 	int ret;
-	u32 payload_len = 0;
 	u32 qid = 0;
 	u16 h_offset = 0;
 	u16 h_proto = 0;
 	u8  dscp = 0;
 	struct ethhdr *eth;
+	u64 account_generation = 0;
+	bool account_handled, account_accepted = false;
 
 	/*do not bind multicast if PPE mcast not enable*/
 	if (!mcast_hook_toggle && is_multicast_ether_addr(hw_path->eth_dest))
@@ -3125,8 +3269,8 @@ hnat_entry_bind:
 		return -1;
 	}
 
-	if (IS_HQOS_MODE || (skb->mark & MTK_QDMA_QUEUE_MASK) >= MAX_PPPQ_QUEUE_NUM)
-		qid = skb->mark & (MTK_QDMA_QUEUE_MASK);
+	if (IS_HQOS_MODE || hnat_queue_mark(skb) >= MAX_PPPQ_QUEUE_NUM)
+		qid = hnat_queue_mark(skb);
 	else if (IS_PPPQ_MODE && IS_PPPQ_PATH(dev, skb))
 		qid = ((port_id >= 0) ? MTK_GMAC_ID_MAX + port_id : mac->id) & MTK_QDMA_QUEUE_MASK;
 	else
@@ -3135,28 +3279,14 @@ hnat_entry_bind:
 	if ((IS_HQOS_MODE) && (dscp!=0) && (hnat_priv->dscp_en))
 		qid = (dscp >> 2) & (MTK_QDMA_QUEUE_MASK);
 
-	if (IS_PPPQ_MODE && IS_PPPQ_PATH(dev, skb) && port_id >= 0) {
-		if (h_proto == ETH_P_IP) {
-			iph = (struct iphdr *)(skb_network_header(skb) + h_offset);
-			if (iph->protocol == IPPROTO_TCP) {
-				tcph = (struct tcphdr *)((u8 *)iph + iph->ihl * 4);
-				payload_len = be16_to_cpu(iph->tot_len) -
-					      iph->ihl * 4 - __tcp_hdrlen(tcph);
-				/* Dispatch ACK packets to high priority queue */
-				if (payload_len == 0)
-					qid += MAX_SWITCH_PORT_NUM;
-			}
-		} else if (h_proto == ETH_P_IPV6) {
-			ip6h = (struct ipv6hdr *)(skb_network_header(skb) + h_offset);
-			if (ip6h->nexthdr == NEXTHDR_TCP) {
-				tcph = (struct tcphdr *)((u8 *)ip6h + sizeof(struct ipv6hdr));
-				payload_len = be16_to_cpu(ip6h->payload_len) - __tcp_hdrlen(tcph);
-				/* Dispatch ACK packets to high priority queue */
-				if (payload_len == 0)
-					qid += MAX_SWITCH_PORT_NUM;
-			}
-		}
-	}
+	/* A mark-selected or HQoS queue is already a complete QID. Only
+	 * apply the ACK offset to the automatically selected DSA queue.
+	 */
+	if (!IS_HQOS_MODE && IS_PPPQ_MODE && IS_PPPQ_PATH(dev, skb) &&
+	    port_id >= 0 &&
+	    hnat_queue_mark(skb) < MAX_PPPQ_QUEUE_NUM &&
+	    hnat_tcp_no_payload(skb, h_proto, h_offset))
+		qid += MAX_SWITCH_PORT_NUM;
 
 	if (IS_IPV4_GRP(&entry)) {
 		entry.ipv4_hnapt.iblk2.dp = gmac & 0xf;
@@ -3314,6 +3444,21 @@ hnat_entry_bind:
 		if (IS_BOND(dev) && (entry.bfib1.vlan_layer || entry.bfib1.vpm))
 			return -1;
 
+		if (hnat_account_enabled(hnat_priv)) {
+			account_handled = hnat_account_commit(hnat_priv,
+					skb_hnat_ppe(skb), skb_hnat_entry(skb),
+					skb, &entry, true, false, 0,
+					&account_accepted);
+			if (!account_handled || !account_accepted ||
+			    !hnat_account_generation_snapshot(hnat_priv,
+					skb_hnat_ppe(skb), skb_hnat_entry(skb),
+					&account_generation)) {
+				hnat_account_invalidate(hnat_priv, skb_hnat_ppe(skb),
+						 skb_hnat_entry(skb));
+				return -1;
+			}
+		}
+
 		spin_lock_bh(&hnat_priv->flow_entry_lock);
 
 		flow_entry = hnat_flow_entry_search(&entry,
@@ -3333,6 +3478,7 @@ hnat_entry_bind:
 		}
 		memcpy(&flow_entry->data, &entry, sizeof(entry));
 		flow_entry->last_update = jiffies;
+		flow_entry->generation = account_generation;
 
 		/* We must ensure all info has been updated */
 		wmb();
@@ -3361,7 +3507,12 @@ hnat_entry_bind:
 		spin_unlock_bh(&hnat_priv->entry_lock);
 		return -1;
 	}
-	hnat_foe_entry_commit(foe, &entry, BIND);
+	if (!hnat_accounted_foe_commit(skb, foe, &entry,
+				       skb_hnat_ppe(skb), skb_hnat_entry(skb),
+				       false, 0)) {
+		spin_unlock_bh(&hnat_priv->entry_lock);
+		return -1;
+	}
 	spin_unlock_bh(&hnat_priv->entry_lock);
 
 	if (debug_level >= 7)
@@ -3370,8 +3521,11 @@ hnat_entry_bind:
 	if (hnat_bind_callback && IS_HNAT_API_SUPPORTED(&entry))
 		hnat_trigger_callback(hnat_bind_callback, skb);
 
-	/* reset statistic for this entry */
+	/* Legacy builds keep the original per-slot reset. The owner commit
+	 * already advanced the accounting generation and reset its ledger.
+	 */
 	if (hnat_priv->data->per_flow_accounting &&
+	    !hnat_account_enabled(hnat_priv) &&
 	    skb_hnat_entry(skb) < hnat_priv->foe_etry_num &&
 	    skb_hnat_ppe(skb) < CFG_PPE_NUM) {
 		memset(&hnat_priv->acct[skb_hnat_ppe(skb)][skb_hnat_entry(skb)],
@@ -3392,16 +3546,20 @@ int mtk_sw_nat_hook_tx(struct sk_buff *skb, int gmac_no)
 	struct ethhdr *eth;
 	struct nf_conn *ct;
 	enum ip_conntrack_info ctinfo;
+	u64 flow_generation = 0;
 	u16 h_proto, h_offset = 0;
 
-	if (!skb_hnat_is_hashed(skb) || skb_hnat_ppe(skb) >= CFG_PPE_NUM)
+	/* All descriptor fields live in headroom; validate it before reading any
+	 * of them and validate the table index before taking an entry pointer.
+	 */
+	if (!is_magic_tag_valid(skb) || skb_hnat_alg(skb) ||
+	    !is_hnat_info_filled(skb) || !skb_hnat_is_hashed(skb) ||
+	    skb_hnat_ppe(skb) >= CFG_PPE_NUM ||
+	    skb_hnat_entry(skb) >= hnat_priv->foe_etry_num ||
+	    !hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)])
 		return NF_ACCEPT;
 
 	hw_entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
-
-	if (skb_hnat_alg(skb) || !is_hnat_info_filled(skb) ||
-	    !is_magic_tag_valid(skb) || !IS_SPACE_AVAILABLE_HEAD(skb))
-		return NF_ACCEPT;
 
 	if (debug_level >= 7)
 		trace_printk(
@@ -3436,6 +3594,7 @@ int mtk_sw_nat_hook_tx(struct sk_buff *skb, int gmac_no)
 	}
 
 	memcpy(&entry, &flow_entry->data, sizeof(entry));
+	flow_generation = flow_entry->generation;
 	hnat_flow_entry_delete(flow_entry);
 	spin_unlock_bh(&hnat_priv->flow_entry_lock);
 
@@ -3720,7 +3879,12 @@ int mtk_sw_nat_hook_tx(struct sk_buff *skb, int gmac_no)
 		spin_unlock_bh(&hnat_priv->entry_lock);
 		return NF_ACCEPT;
 	}
-	hnat_foe_entry_commit(hw_entry, &entry, BIND);
+	if (!hnat_accounted_foe_commit(skb, hw_entry, &entry,
+				       skb_hnat_ppe(skb), skb_hnat_entry(skb),
+				       true, flow_generation)) {
+		spin_unlock_bh(&hnat_priv->entry_lock);
+		return NF_ACCEPT;
+	}
 	spin_unlock_bh(&hnat_priv->entry_lock);
 
 	if (debug_level >= 7)
@@ -3729,8 +3893,9 @@ int mtk_sw_nat_hook_tx(struct sk_buff *skb, int gmac_no)
 	if (hnat_bind_callback && IS_HNAT_API_SUPPORTED(&entry))
 		hnat_trigger_callback(hnat_bind_callback, skb);
 
-	/* reset statistic for this entry */
-	if (hnat_priv->data->per_flow_accounting) {
+	/* account_commit() owns this reset when owner accounting is enabled. */
+	if (hnat_priv->data->per_flow_accounting &&
+	    !hnat_account_enabled(hnat_priv)) {
 		memset(&hnat_priv->acct[skb_hnat_ppe(skb)][skb_hnat_entry(skb)],
 			0, sizeof(struct hnat_accounting));
 		ct = nf_ct_get(skb, &ctinfo);
@@ -3762,6 +3927,7 @@ int mtk_hnat_eth_hook_tx(struct sk_buff *skb, struct net_device *dev)
 	struct nf_conn *ct;
 	struct dsa_port *dp;
 	enum ip_conntrack_info ctinfo;
+	u64 flow_generation = 0;
 	int gmac = NR_DISCARD;
 	u16 dsa_tag;
 	const u8 *dsa_ptr;
@@ -3801,6 +3967,7 @@ int mtk_hnat_eth_hook_tx(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	memcpy(&entry, &flow_entry->data, sizeof(entry));
+	flow_generation = flow_entry->generation;
 	hnat_flow_entry_delete(flow_entry);
 
 	spin_unlock_bh(&hnat_priv->flow_entry_lock);
@@ -3873,22 +4040,18 @@ int mtk_hnat_eth_hook_tx(struct sk_buff *skb, struct net_device *dev)
 		return NF_ACCEPT;
 	}
 
-	/* Before entry enter BIND state, write other fields first,
-	 * prevent racing with hardware accesses.
-	 */
-	memcpy(&hw_entry->data, &entry.data,
-			PPE_ENTRY_SIZE - sizeof(hw_entry->info_blk1));
-	/* We must ensure all info has been updated before set to hw */
-	wmb();
-	/* After other fields have been written, write info1 to BIND the entry */
-	hw_entry->bfib1 = entry.bfib1;
-	/* We must ensure the info has been updated */
-	wmb();
+	if (!hnat_accounted_foe_commit(skb, hw_entry, &entry,
+				       skb_hnat_ppe(skb), skb_hnat_entry(skb),
+				       true, flow_generation)) {
+		spin_unlock_bh(&hnat_priv->entry_lock);
+		return NF_ACCEPT;
+	}
 
 	spin_unlock_bh(&hnat_priv->entry_lock);
 
 	/* reset statistic for this entry */
-	if (hnat_priv->data->per_flow_accounting) {
+	if (hnat_priv->data->per_flow_accounting &&
+	    !hnat_account_enabled(hnat_priv)) {
 		memset(&hnat_priv->acct[skb_hnat_ppe(skb)][skb_hnat_entry(skb)],
 			0, sizeof(struct hnat_accounting));
 		ct = nf_ct_get(skb, &ctinfo);
@@ -4527,7 +4690,12 @@ static unsigned int mtk_hnat_nf_post_routing(
 			/* save output iface index for virtual device counter update */
 			mtk_hnat_update_acct_ifindex(skb, false);
 
-			hnat_get_count(hnat_priv, skb_hnat_ppe(skb), skb_hnat_entry(skb), NULL);
+			if (hnat_account_enabled(hnat_priv))
+				hnat_account_publish_delta(hnat_priv, skb_hnat_ppe(skb),
+							   skb_hnat_entry(skb), skb);
+			else
+				hnat_get_count(hnat_priv, skb_hnat_ppe(skb),
+						skb_hnat_entry(skb), NULL);
 		}
 
 		if (fn && !mtk_hnat_accel_type(skb))
@@ -4843,6 +5011,18 @@ static unsigned int mtk_hnat_br_nf_forward(void *priv,
 }
 
 static struct nf_hook_ops mtk_hnat_nf_ops[] __read_mostly = {
+	{
+		.hook = mtk_hnat_nf_conntrack,
+		.pf = NFPROTO_IPV4,
+		.hooknum = NF_INET_PRE_ROUTING,
+		.priority = NF_IP_PRI_MANGLE - 1,
+	},
+	{
+		.hook = mtk_hnat_nf_conntrack,
+		.pf = NFPROTO_IPV6,
+		.hooknum = NF_INET_PRE_ROUTING,
+		.priority = NF_IP_PRI_MANGLE - 1,
+	},
 	{
 		.hook = mtk_hnat_ipv4_nf_pre_routing,
 		.pf = NFPROTO_IPV4,

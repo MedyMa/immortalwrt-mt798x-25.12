@@ -407,11 +407,14 @@ static ssize_t mcast_enable_store(struct device *dev, struct device_attribute *a
 				  const char *buf, size_t count)
 {
 	u32 val;
+	int ret;
 
 	if (kstrtou32(buf, 10, &val))
 		return -EINVAL;
 
-	mtk_npu_mcast_enable(val);
+	ret = mtk_npu_mcast_enable(val);
+	if (ret)
+		return ret;
 
 	return count;
 }

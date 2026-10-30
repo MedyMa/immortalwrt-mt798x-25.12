@@ -14,6 +14,7 @@
 #include <linux/kthread.h>
 #include <linux/list.h>
 #include <linux/lockdep.h>
+#include <linux/netdevice.h>
 #include <linux/string.h>
 
 #include <pce/cdrt.h>
@@ -23,6 +24,7 @@
 #include <pce/pce.h>
 
 #include "npu/internal.h"
+#include "npu/firmware.h"
 #include "npu/mbox.h"
 #include "npu/mcu.h"
 #include "npu/netsys.h"
@@ -53,6 +55,7 @@ struct npu_tnl {
 	struct list_head *tnl_sync_pending;
 	struct list_head *tnl_sync_submit;
 	struct npu_tnl_info *tnl_infos;
+	bool stopping;
 
 	struct npu_tnl_offload_ops *ops;
 
@@ -251,6 +254,40 @@ void mtk_npu_tnl_info_cls_link(struct npu_tnl_info *tnl_info, struct npu_cls_ent
 }
 EXPORT_SYMBOL(mtk_npu_tnl_info_cls_link);
 
+int mtk_npu_tnl_info_ops_set_no_lock(struct npu_tnl_info *tnl_info,
+				     const struct npu_tnl_info_ops *ops)
+{
+	struct module *owner = ops ? ops->owner : NULL;
+
+	lockdep_assert_held(&tnl_info->lock);
+	if (tnl_info->ops == ops)
+		return 0;
+
+	tnl_info->ops = ops;
+	tnl_info->ops_owner = owner;
+
+	return 0;
+}
+EXPORT_SYMBOL(mtk_npu_tnl_info_ops_set_no_lock);
+
+struct net_device *mtk_npu_tnl_info_set_dev_no_lock(struct npu_tnl_info *tnl_info,
+						     struct net_device *dev)
+{
+	struct net_device *old_dev;
+
+	lockdep_assert_held(&tnl_info->lock);
+	if (tnl_info->dev == dev)
+		return NULL;
+
+	if (dev)
+		dev_hold(dev);
+	old_dev = tnl_info->dev;
+	tnl_info->dev = dev;
+
+	return old_dev;
+}
+EXPORT_SYMBOL(mtk_npu_tnl_info_set_dev_no_lock);
+
 /* unprepare tcls without modifying pce module */
 void mtk_npu_tnl_info_tcls_invalidate(struct npu_tnl_info *tnl_info)
 {
@@ -361,7 +398,26 @@ EXPORT_SYMBOL(mtk_npu_tnl_info_cls_entry_alloc);
 
 static int mtk_npu_tnl_info_cls_tear_down(struct npu_tnl_info *tnl_info)
 {
-	tnl_info->ops->cls_destroy(tnl_info);
+	const struct npu_tnl_info_ops *ops;
+	struct module *owner;
+	unsigned long flags;
+	bool owner_ref = false;
+
+	spin_lock_irqsave(&tnl_info->lock, flags);
+	ops = tnl_info->ops;
+	owner = tnl_info->ops_owner;
+	if (owner) {
+		owner_ref = try_module_get(owner);
+		/* Module exit flushes its own tunnels while the text is still live. */
+		if (!owner_ref && READ_ONCE(owner->state) != MODULE_STATE_GOING)
+			ops = NULL;
+	}
+	spin_unlock_irqrestore(&tnl_info->lock, flags);
+
+	if (ops && ops->cls_destroy)
+		ops->cls_destroy(tnl_info);
+	if (owner_ref)
+		module_put(owner);
 
 	mtk_npu_tnl_info_cls_entry_free(tnl_info, &tnl_info->tnl_params);
 
@@ -370,13 +426,29 @@ static int mtk_npu_tnl_info_cls_tear_down(struct npu_tnl_info *tnl_info)
 
 static int mtk_npu_tnl_info_cls_setup(struct npu_tnl_info *tnl_info)
 {
-	if (tnl_info->tcls && tnl_info->tcls->updated)
+	const struct npu_tnl_info_ops *ops;
+	struct module *owner;
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&tnl_info->lock, flags);
+	if (tnl_info->tcls && tnl_info->tcls->updated) {
+		spin_unlock_irqrestore(&tnl_info->lock, flags);
 		return 0;
+	}
+	ops = tnl_info->ops;
+	owner = tnl_info->ops_owner;
+	if (owner && !try_module_get(owner))
+		ops = NULL;
+	spin_unlock_irqrestore(&tnl_info->lock, flags);
 
-	if (!tnl_info->ops)
+	if (!ops)
 		return -ENODEV;
+	ret = ops->cls_setup ? ops->cls_setup(tnl_info) : -ENODEV;
+	if (owner)
+		module_put(owner);
 
-	return tnl_info->ops->cls_setup(tnl_info);
+	return ret;
 }
 
 static int mtk_npu_tnl_info_dipfilter_tear_down(struct npu_tnl_info *tnl_info)
@@ -569,6 +641,9 @@ mtk_npu_tnl_info_alloc_no_lock(struct npu_tnl_type *tnl_type)
 	tnl_info = &npu_tnl.tnl_infos[tnl_idx];
 	memset(&tnl_info->tnl_params, 0, sizeof(struct npu_tnl_params));
 	memset(&tnl_info->cache, 0, sizeof(struct npu_tnl_params));
+	tnl_info->dev = NULL;
+	tnl_info->ops = NULL;
+	tnl_info->ops_owner = NULL;
 
 	/* TODO: maybe spin_lock_bh() is enough? */
 	spin_lock_irqsave(&tnl_info->lock, flag);
@@ -599,8 +674,10 @@ struct npu_tnl_info *mtk_npu_tnl_info_alloc(struct npu_tnl_type *tnl_type)
 	unsigned long flag = 0;
 
 	spin_lock_irqsave(&npu_tnl.tbl_lock, flag);
-
-	tnl_info = mtk_npu_tnl_info_alloc_no_lock(tnl_type);
+	if (READ_ONCE(npu_tnl.stopping))
+		tnl_info = ERR_PTR(-ESHUTDOWN);
+	else
+		tnl_info = mtk_npu_tnl_info_alloc_no_lock(tnl_type);
 
 	spin_unlock_irqrestore(&npu_tnl.tbl_lock, flag);
 
@@ -617,6 +694,11 @@ static void mtk_npu_tnl_info_free_no_lock(struct npu_tnl_info *tnl_info)
 	lockdep_assert_held(&tnl_info->lock);
 
 	hash_del(&tnl_info->hlist);
+	if (tnl_info->dev)
+		tnl_info->dev = NULL;
+	if (tnl_info->ops_owner)
+		tnl_info->ops_owner = NULL;
+	tnl_info->ops = NULL;
 
 	tnl_info_sta_uninit_no_tnl_lock(tnl_info);
 
@@ -625,17 +707,22 @@ static void mtk_npu_tnl_info_free_no_lock(struct npu_tnl_info *tnl_info)
 
 static void mtk_npu_tnl_info_free(struct npu_tnl_info *tnl_info)
 {
+	struct net_device *dev;
 	unsigned long flag = 0;
 
 	spin_lock_irqsave(&npu_tnl.tbl_lock, flag);
 
 	spin_lock(&tnl_info->lock);
 
+	dev = tnl_info->dev;
 	mtk_npu_tnl_info_free_no_lock(tnl_info);
 
 	spin_unlock(&tnl_info->lock);
 
 	spin_unlock_irqrestore(&npu_tnl.tbl_lock, flag);
+
+	if (dev)
+		dev_put(dev);
 }
 
 void mtk_npu_tnl_info_backup_all(void)
@@ -647,13 +734,9 @@ void mtk_npu_tnl_info_backup_all(void)
 	spin_lock_irqsave(&npu_tnl.tbl_lock, flag);
 
 	hash_for_each(npu_tnl.ht, bkt, tnl_info, hlist) {
-		/* clear all tunnel's synced parameters, but preserve cache */
-		memset(&tnl_info->tnl_params, 0, sizeof(struct npu_tnl_params));
-		/*
-		 * make tnl_info status to TNL_INIT state
-		 * so that it can be added to NPU again
-		 */
 		spin_lock(&tnl_info->lock);
+		/* clear synced parameters, preserve the tunnel cache for restore */
+		memset(&tnl_info->tnl_params, 0, sizeof(struct npu_tnl_params));
 
 		tnl_info_sta_init_no_tnl_lock(tnl_info);
 		list_del_init(&tnl_info->sync_node);
@@ -726,6 +809,10 @@ int mtk_npu_tnl_offload(struct npu_tnl_input *tnl_input,
 
 	/* prepare tnl_info */
 	spin_lock_irqsave(&npu_tnl.tbl_lock, flag);
+	if (READ_ONCE(npu_tnl.stopping)) {
+		ret = -ESHUTDOWN;
+		goto err_out;
+	}
 
 	tnl_info = mtk_npu_tnl_info_find_no_lock(tnl_type, tnl_params);
 	if (IS_ERR(tnl_info) && PTR_ERR(tnl_info) != -ENODEV) {
@@ -1102,15 +1189,14 @@ static struct notifier_block mtk_npu_cls_nb = {
 int mtk_npu_tnl_offload_init(struct platform_device *pdev)
 {
 	struct npu_tnl_info *tnl_info;
-	int i = 0;
+	int ret;
+	int i;
+
+	(void)pdev;
 
 	hash_init(npu_tnl.ht);
-
-	mtk_pce_register_cls_notifier(&mtk_npu_cls_nb);
-
-	npu_tnl.tnl_infos = devm_kzalloc(&pdev->dev,
-				sizeof(struct npu_tnl_info) * CONFIG_NPU_TNL_NUM,
-				GFP_KERNEL);
+	npu_tnl.tnl_infos = kcalloc(CONFIG_NPU_TNL_NUM,
+				   sizeof(*npu_tnl.tnl_infos), GFP_KERNEL);
 	if (!npu_tnl.tnl_infos)
 		return -ENOMEM;
 
@@ -1123,21 +1209,36 @@ int mtk_npu_tnl_offload_init(struct platform_device *pdev)
 		spin_lock_init(&tnl_info->lock);
 	}
 
+	npu_tnl.tnl_sync_submit = &tnl_sync_q1;
+	npu_tnl.tnl_sync_pending = &tnl_sync_q2;
+	INIT_LIST_HEAD(npu_tnl.tnl_sync_submit);
+	INIT_LIST_HEAD(npu_tnl.tnl_sync_pending);
+	spin_lock_init(&npu_tnl.tnl_sync_lock);
+	spin_lock_init(&npu_tnl.tbl_lock);
 	init_waitqueue_head(&npu_tnl.tnl_sync_wait);
+	WRITE_ONCE(npu_tnl.stopping, false);
+
+	ret = mtk_pce_register_cls_notifier(&mtk_npu_cls_nb);
+	if (ret)
+		goto err_free;
 
 	npu_tnl.tnl_sync_thread = kthread_run(tnl_sync_task, NULL,
 					       "tnl sync param task");
 	if (IS_ERR(npu_tnl.tnl_sync_thread)) {
 		NPU_ERR("tnl sync thread create failed\n");
-		return -ENOMEM;
+		ret = PTR_ERR(npu_tnl.tnl_sync_thread);
+		npu_tnl.tnl_sync_thread = NULL;
+		goto err_notifier;
 	}
 
-	npu_tnl.tnl_sync_submit = &tnl_sync_q1;
-	npu_tnl.tnl_sync_pending = &tnl_sync_q2;
-	spin_lock_init(&npu_tnl.tnl_sync_lock);
-	spin_lock_init(&npu_tnl.tbl_lock);
-
 	return 0;
+
+err_notifier:
+	mtk_pce_unregister_cls_notifier(&mtk_npu_cls_nb);
+err_free:
+	kfree(npu_tnl.tnl_infos);
+	npu_tnl.tnl_infos = NULL;
+	return ret;
 }
 
 int mtk_npu_tnl_offload_post_init(struct platform_device *pdev)
@@ -1155,8 +1256,13 @@ int mtk_npu_tnl_offload_post_init(struct platform_device *pdev)
 		return ret;
 	}
 
-	/* TODO: adjust based on platform */
-	npu_tnl.tbl_addr = cmd.ret[0] - 0x09100000;
+	ret = mtk_npu_fw_offset(cmd.ret[0],
+				 sizeof(struct npu_tnl_params) * CONFIG_NPU_TNL_NUM,
+				 &npu_tnl.tbl_addr);
+	if (ret) {
+		NPU_NOTICE("Invalid tunnel table address: %d\n", ret);
+		return ret;
+	}
 
 	return 0;
 }
@@ -1164,28 +1270,37 @@ int mtk_npu_tnl_offload_post_init(struct platform_device *pdev)
 static void mtk_npu_tnl_offload_pce_clean_up(void)
 {
 	struct npu_tnl_info *tnl_info;
-	unsigned long flag;
-	u32 bkt;
+	int i;
 
-	spin_lock_irqsave(&npu_tnl.tbl_lock, flag);
+	for (i = 0; i < CONFIG_NPU_TNL_NUM; i++) {
+		tnl_info = &npu_tnl.tnl_infos[i];
+		if (!test_bit(i, npu_tnl.tnl_used))
+			continue;
 
-	hash_for_each(npu_tnl.ht, bkt, tnl_info, hlist) {
-		if (tnl_info->pce_ready)
+		if (tnl_info->pce_ready) {
 			mtk_npu_tnl_info_dipfilter_tear_down(tnl_info);
-
-		mtk_npu_tnl_info_cls_tear_down(tnl_info);
+			tnl_info->pce_ready = false;
+		}
+		if (tnl_info->tcls)
+			mtk_npu_tnl_info_cls_tear_down(tnl_info);
+		mtk_npu_tnl_info_free(tnl_info);
 	}
-
-	spin_unlock_irqrestore(&npu_tnl.tbl_lock, flag);
 }
 
 void mtk_npu_tnl_offload_deinit(struct platform_device *pdev)
 {
-	kthread_stop(npu_tnl.tnl_sync_thread);
+	(void)pdev;
 
-	mtk_npu_tnl_offload_pce_clean_up();
+	WRITE_ONCE(npu_tnl.stopping, true);
+	if (npu_tnl.tnl_sync_thread) {
+		kthread_stop(npu_tnl.tnl_sync_thread);
+		npu_tnl.tnl_sync_thread = NULL;
+	}
 
 	mtk_pce_unregister_cls_notifier(&mtk_npu_cls_nb);
+	mtk_npu_tnl_offload_pce_clean_up();
+	kfree(npu_tnl.tnl_infos);
+	npu_tnl.tnl_infos = NULL;
 }
 
 u32 mtk_npu_tnl_type_get_offload_num(void)
@@ -1290,17 +1405,18 @@ void mtk_npu_tnl_type_unregister(struct npu_tnl_type *tnl_type)
 
 bool mtk_npu_tnl_is_encrypted_offloadable(struct sk_buff *skb)
 {
-	return (npu_tnl.ops &&
-		npu_tnl.ops->tnl_is_encrypted_offloadable &&
-		npu_tnl.ops->tnl_is_encrypted_offloadable(skb));
+	const struct npu_tnl_offload_ops *ops = READ_ONCE(npu_tnl.ops);
+
+	return ops && ops->tnl_is_encrypted_offloadable &&
+	       ops->tnl_is_encrypted_offloadable(skb);
 }
 
 int mtk_npu_tnl_offload_ops_register(struct npu_tnl_offload_ops *ops)
 {
-	if (npu_tnl.ops)
+	if (READ_ONCE(npu_tnl.ops))
 		return -EBUSY;
 
-	npu_tnl.ops = ops;
+	WRITE_ONCE(npu_tnl.ops, ops);
 
 	return 0;
 }
@@ -1308,10 +1424,11 @@ EXPORT_SYMBOL(mtk_npu_tnl_offload_ops_register);
 
 void mtk_npu_tnl_offload_ops_unregister(struct npu_tnl_offload_ops *ops)
 {
-	if (npu_tnl.ops != ops)
+	if (READ_ONCE(npu_tnl.ops) != ops)
 		return;
 
-	npu_tnl.ops = NULL;
+	WRITE_ONCE(npu_tnl.ops, NULL);
+	synchronize_net();
 }
 EXPORT_SYMBOL(mtk_npu_tnl_offload_ops_unregister);
 

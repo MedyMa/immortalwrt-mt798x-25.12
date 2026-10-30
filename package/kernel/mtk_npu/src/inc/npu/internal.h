@@ -15,6 +15,7 @@
 struct npu {
 	struct device *dev;
 	void __iomem *base;
+	resource_size_t size;
 };
 
 extern struct npu npu;

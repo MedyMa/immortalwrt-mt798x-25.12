@@ -190,7 +190,13 @@ void mtk_npu_mcast_qos_enable(bool en);
 bool mtk_npu_mcast_tid_is_enabled(void);
 void mtk_npu_mcast_tid_enable(bool en);
 bool mtk_npu_mcast_is_enabled(void);
-void mtk_npu_mcast_enable(bool en);
+int mtk_npu_mcast_enable(bool en);
+int mtk_npu_mcast_set_enabled(bool en);
+bool mtk_npu_mcast_live(void);
+int mtk_npu_mcast_resume(void);
+void mtk_npu_mcast_pause(void);
+int mtk_npu_mcast_publish(void);
+void mtk_npu_mcast_unpublish(void);
 int mtk_npu_mcast_mac_saddr_get(u8 *mac);
 void mtk_npu_mcast_mac_saddr_set(u8 *mac);
 
@@ -327,7 +333,36 @@ static inline bool mtk_npu_mcast_is_enabled(void)
 	return false;
 }
 
-static inline void mtk_npu_mcast_enable(bool en)
+static inline int mtk_npu_mcast_enable(bool en)
+{
+	return 0;
+}
+
+static inline int mtk_npu_mcast_set_enabled(bool en)
+{
+	return 0;
+}
+
+static inline bool mtk_npu_mcast_live(void)
+{
+	return false;
+}
+
+static inline int mtk_npu_mcast_resume(void)
+{
+	return 0;
+}
+
+static inline void mtk_npu_mcast_pause(void)
+{
+}
+
+static inline int mtk_npu_mcast_publish(void)
+{
+	return 0;
+}
+
+static inline void mtk_npu_mcast_unpublish(void)
 {
 }
 

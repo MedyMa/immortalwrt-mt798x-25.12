@@ -1,0 +1,15 @@
+Subject: [PATCH] net: sfp: drain diagnostic work at shutdown
+
+After stopping GPIO interrupts and state-machine workers, drain the hwmon
+worker and release its registration before shutdown completes.
+
+--- a/drivers/net/phy/sfp.c
++++ b/drivers/net/phy/sfp.c
+@@ -3327,6 +3327,7 @@ static void sfp_shutdown(struct platform_device *pdev)
+ 
+ 	cancel_delayed_work_sync(&sfp->poll);
+ 	cancel_delayed_work_sync(&sfp->timeout);
++	sfp_hwmon_remove(sfp);
+ }
+ 
+ static struct platform_driver sfp_driver = {

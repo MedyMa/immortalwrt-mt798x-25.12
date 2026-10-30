@@ -15,7 +15,7 @@
 static int debugfs_tnl_info_cls_setup(struct npu_tnl_info *tnl_info);
 static void debugfs_tnl_info_cls_destroy(struct npu_tnl_info *tnl_info);
 
-static struct npu_tnl_info_ops debugfs_tnl_info_ops = {
+static const struct npu_tnl_info_ops debugfs_tnl_info_ops = {
 	.cls_setup = debugfs_tnl_info_cls_setup,
 	.cls_destroy = debugfs_tnl_info_cls_destroy,
 };
@@ -110,7 +110,13 @@ static int npu_tnl_add_new_tnl(const char *buf)
 	if (IS_ERR(tnl_info))
 		return -ENOMEM;
 
-	tnl_info->ops = &debugfs_tnl_info_ops;
+	spin_lock_bh(&tnl_info->lock);
+	ret = mtk_npu_tnl_info_ops_set_no_lock(tnl_info, &debugfs_tnl_info_ops);
+	spin_unlock_bh(&tnl_info->lock);
+	if (ret) {
+		mtk_npu_tnl_info_delete(tnl_info);
+		return ret;
+	}
 
 	tnl_info->flag |= TNL_INFO_DEBUG;
 	memcpy(&tnl_info->cache, &tnl_params, sizeof(struct npu_tnl_params));

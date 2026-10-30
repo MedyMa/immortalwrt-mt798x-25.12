@@ -7,10 +7,12 @@
 
 #include <linux/err.h>
 #include <linux/module.h>
+#include <linux/netdevice.h>
 
 #include <net/flow_offload.h>
 #include <net/netfilter/nf_flow_table.h>
 #include <mtk_eth_soc.h>
+#include <mtk_ppe.h>
 
 #include <pce/cls.h>
 #include <pce/netsys.h>
@@ -135,7 +137,8 @@ static void mtk_npu_flow_tnl_info_cls_destroy(struct npu_tnl_info *tnl_info)
 	}
 }
 
-static struct npu_tnl_info_ops flow_tnl_info_ops = {
+static const struct npu_tnl_info_ops flow_tnl_info_ops = {
+	.owner = THIS_MODULE,
 	.cls_setup = mtk_npu_flow_tnl_info_cls_setup,
 	.cls_destroy = mtk_npu_flow_tnl_info_cls_destroy,
 };
@@ -168,14 +171,24 @@ static int mtk_npu_flow_tnl_info_setup(struct npu_tnl_input *tnl_input,
 				       struct npu_tnl_params *tnl_params)
 {
 	u32 *entry = tnl_input->flow.entry;
+	struct net_device *old_dev;
 	bool has_diff = false;
+	int ret;
 
 	if (unlikely(!tnl_info || !tnl_params))
 		return -EPERM;
 
 	spin_lock(&tnl_info->lock);
+	if (tnl_info->status & TNL_STA_UPDATING) {
+		spin_unlock(&tnl_info->lock);
+		return -EAGAIN;
+	}
 
-	tnl_info->ops = &flow_tnl_info_ops;
+	ret = mtk_npu_tnl_info_ops_set_no_lock(tnl_info, &flow_tnl_info_ops);
+	if (ret) {
+		spin_unlock(&tnl_info->lock);
+		return ret;
+	}
 
 	mtk_npu_flow_tnl_info_preserve(tnl_type, &tnl_info->cache, tnl_params);
 
@@ -189,7 +202,8 @@ static int mtk_npu_flow_tnl_info_setup(struct npu_tnl_input *tnl_input,
 	}
 
 	/* path->dev is accessed through const pointer, but net_device itself is not const */
-	tnl_info->dev = (struct net_device *)tnl_input->flow.path->dev;
+	old_dev = mtk_npu_tnl_info_set_dev_no_lock(tnl_info,
+						   (struct net_device *)tnl_input->flow.path->dev);
 	tnl_info->cache.params.mtu = tnl_input->flow.path->dev->mtu;
 	*entry = tnl_info->tnl_idx + __NPU_TUNNEL_TYPE_MAX;
 	if (!tnl_info_decap_is_enable(tnl_info) || !tnl_info_encap_is_enable(tnl_info)) {
@@ -202,6 +216,8 @@ static int mtk_npu_flow_tnl_info_setup(struct npu_tnl_input *tnl_input,
 		mtk_npu_tnl_info_submit_no_tnl_lock(tnl_info);
 
 	spin_unlock(&tnl_info->lock);
+	if (old_dev)
+		dev_put(old_dev);
 
 	return 0;
 }
@@ -262,9 +278,17 @@ static int mtk_npu_flow_tnl_offload(const struct net_device_path *path, u32 *ent
 	return mtk_npu_tnl_offload(&tnl_input, tnl_type, &tnl_params, mtk_npu_flow_tnl_info_setup);
 }
 
-/* TODO: clear ppe entry with flowblock */
 void mtk_npu_tnl_info_flush_all_ppe_tnl(void)
 {
+	struct mtk_eth *eth = mtk_npu_netsys_get_eth();
+	u32 i;
+
+	if (!eth)
+		return;
+
+	for (i = 0; i < CONFIG_NPU_TNL_NUM; i++)
+		mtk_flow_offload_teardown_by_tnl(eth, MTK_FOE_NPU_DEL,
+						 i + __NPU_TUNNEL_TYPE_MAX);
 }
 
 static struct net_device *mtk_npu_flow_get_tnl_dev(u8 npu_crsn)
@@ -312,27 +336,51 @@ static struct mcu_state_notifier mcu_init_notifier = {
 
 int mtk_npu_flow_tnl_offload_init(void)
 {
-	mtk_npu_mcu_state_notifier_register(MCU_STATE_TYPE_NETSTOP, &mcu_netstop_notifier);
-
-	mtk_npu_mcu_state_notifier_register(MCU_STATE_TYPE_INIT, &mcu_init_notifier);
+	int ret;
 
 	mtk_npu_gretap_init();
-
 	mtk_npu_l2tpv2_init();
-
 	mtk_npu_pptp_init();
-
 	mtk_npu_vxlan_init();
 
-	mtk_flow_tnl_offloadable = mtk_npu_flow_tnl_offloadable;
-	mtk_flow_tnl_offload = mtk_npu_flow_tnl_offload;
-	mtk_get_tnl_dev = mtk_npu_flow_get_tnl_dev;
+	ret = mtk_npu_mcu_state_notifier_register(MCU_STATE_TYPE_NETSTOP,
+						  &mcu_netstop_notifier);
+	if (ret)
+		goto err_protocols;
+	ret = mtk_npu_mcu_state_notifier_register(MCU_STATE_TYPE_INIT,
+						  &mcu_init_notifier);
+	if (ret) {
+		mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_NETSTOP,
+						      &mcu_netstop_notifier);
+		goto err_protocols;
+	}
+
+	WRITE_ONCE(mtk_flow_tnl_offloadable, mtk_npu_flow_tnl_offloadable);
+	WRITE_ONCE(mtk_flow_tnl_offload, mtk_npu_flow_tnl_offload);
+	WRITE_ONCE(mtk_get_tnl_dev, mtk_npu_flow_get_tnl_dev);
 
 	return 0;
+
+err_protocols:
+	mtk_npu_vxlan_deinit();
+	mtk_npu_pptp_deinit();
+	mtk_npu_l2tpv2_deinit();
+	mtk_npu_gretap_deinit();
+	return ret;
 }
 
 void mtk_npu_flow_tnl_offload_deinit(void)
 {
+	WRITE_ONCE(mtk_flow_tnl_offloadable, NULL);
+	WRITE_ONCE(mtk_flow_tnl_offload, NULL);
+	WRITE_ONCE(mtk_get_tnl_dev, NULL);
+	synchronize_net();
+
+	mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_INIT, &mcu_init_notifier);
+	mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_NETSTOP, &mcu_netstop_notifier);
+
+	mtk_npu_tnl_info_flush_all_ppe_tnl();
+
 	mtk_npu_gretap_deinit();
 
 	mtk_npu_l2tpv2_deinit();
@@ -341,13 +389,4 @@ void mtk_npu_flow_tnl_offload_deinit(void)
 
 	mtk_npu_vxlan_deinit();
 
-	mtk_flow_tnl_offloadable = NULL;
-	mtk_flow_tnl_offload = NULL;
-	mtk_get_tnl_dev = NULL;
-
-	mtk_npu_tnl_info_flush_all_ppe_tnl();
-
-	mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_NETSTOP, &mcu_netstop_notifier);
-
-	mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_INIT, &mcu_init_notifier);
 }

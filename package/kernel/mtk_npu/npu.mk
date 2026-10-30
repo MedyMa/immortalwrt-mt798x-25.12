@@ -54,7 +54,7 @@ define KernelPackage/npu
   KCONFIG:=
   DEFAULT:=n
   DEPENDS:= \
-	@(TARGET_mediatek_filogic||TARGET_mediatek_mt7988) \
+	@(TARGET_mediatek_filogic||TARGET_mediatek_filogic_a73||TARGET_mediatek_mt7988) \
 	+kmod-pce \
 	+@KERNEL_RELAY \
 	+@MTK_NPU

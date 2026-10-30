@@ -9,6 +9,9 @@
 #include <linux/err.h>
 #include <linux/etherdevice.h>
 #include <linux/in.h>
+#include <linux/mutex.h>
+#include <linux/module.h>
+#include <linux/rcupdate.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
 #include <net/ipv6.h>
@@ -16,6 +19,8 @@
 #include <mtk_hnat/hnat_mcast.h>
 
 #include "npu/netsys.h"
+#include "npu/mcu.h"
+#include "npu/firmware.h"
 #include "npu/mbox.h"
 #include "npu/net-core.h"
 
@@ -49,10 +54,18 @@ struct npu_mcast {
 	} bss;
 
 	u32 statistic_ofs;
+	bool online;
+	bool enabled;
+	bool restoring;
 };
 
 static struct npu_mcast mcast;
 static struct npu_mcast_statistic mcast_statistic;
+
+static bool mtk_npu_mcast_ranges_overlap(u32 a, size_t alen, u32 b, size_t blen)
+{
+	return (u64)a < (u64)b + blen && (u64)b < (u64)a + alen;
+}
 
 static const char * const mcast_dest_name[] = {
 	[NPU_MCAST_DEST_SWITCH] = "Switch",
@@ -69,15 +82,37 @@ static const char * const vlan_policy_name[] = {
 	[NPU_MCAST_VLAN_ALLOW] = "Allow",
 };
 
-static struct npu_wifi_mcast_ops *wifi_mcast_ops;
+static struct npu_wifi_mcast_ops __rcu *wifi_mcast_ops;
+static DEFINE_MUTEX(wifi_mcast_ops_lock);
+
+bool mtk_npu_mcast_live(void)
+{
+	return READ_ONCE(mcast.online) && READ_ONCE(mcast.enabled) &&
+	       mtk_npu_mcu_alive();
+}
+
+static bool mtk_npu_mcast_online(void)
+{
+	return READ_ONCE(mcast.online) && mtk_npu_mcu_alive();
+}
 
 int mtk_npu_wifi_mcast_ops_register(struct npu_wifi_mcast_ops *ops)
 {
-	if (wifi_mcast_ops) {
+	int ret = 0;
+
+	if (!ops)
+		return -EINVAL;
+
+	mutex_lock(&wifi_mcast_ops_lock);
+	if (rcu_access_pointer(wifi_mcast_ops)) {
 		NPU_NOTICE("wi-fi ops already registered\n");
-		return -EBUSY;
+		ret = -EBUSY;
+	} else {
+		rcu_assign_pointer(wifi_mcast_ops, ops);
 	}
-	wifi_mcast_ops = ops;
+	mutex_unlock(&wifi_mcast_ops_lock);
+	if (ret)
+		return ret;
 
 	NPU_DBG("wi-fi ops registered successfully\n");
 	return 0;
@@ -86,11 +121,19 @@ EXPORT_SYMBOL(mtk_npu_wifi_mcast_ops_register);
 
 int mtk_npu_wifi_mcast_ops_unregister(struct npu_wifi_mcast_ops *ops)
 {
-	if (wifi_mcast_ops != ops) {
+	int ret = 0;
+
+	mutex_lock(&wifi_mcast_ops_lock);
+	if (rcu_access_pointer(wifi_mcast_ops) != ops) {
 		NPU_NOTICE("wi-fi ops not expected\n");
-		return -EINVAL;
+		ret = -EINVAL;
+	} else {
+		rcu_assign_pointer(wifi_mcast_ops, NULL);
+		synchronize_rcu();
 	}
-	wifi_mcast_ops = NULL;
+	mutex_unlock(&wifi_mcast_ops_lock);
+	if (ret)
+		return ret;
 
 	NPU_DBG("wi-fi ops unregistered\n");
 	return 0;
@@ -99,16 +142,26 @@ EXPORT_SYMBOL(mtk_npu_wifi_mcast_ops_unregister);
 
 static void mtk_npu_mcast_notify_sw_path(int group_idx)
 {
-	if (wifi_mcast_ops && wifi_mcast_ops->notify_mcast_sw_path)
-		wifi_mcast_ops->notify_mcast_sw_path(group_idx);
+	struct npu_wifi_mcast_ops *ops;
+
+	rcu_read_lock();
+	ops = rcu_dereference(wifi_mcast_ops);
+	if (ops && ops->notify_mcast_sw_path)
+		ops->notify_mcast_sw_path(group_idx);
+	rcu_read_unlock();
 
 	hnat_notify_mcast_sw_path(group_idx);
 }
 
 static void mtk_npu_mcast_notify_hw_path(int group_idx)
 {
-	if (wifi_mcast_ops && wifi_mcast_ops->notify_mcast_hw_path)
-		wifi_mcast_ops->notify_mcast_hw_path(group_idx);
+	struct npu_wifi_mcast_ops *ops;
+
+	rcu_read_lock();
+	ops = rcu_dereference(wifi_mcast_ops);
+	if (ops && ops->notify_mcast_hw_path)
+		ops->notify_mcast_hw_path(group_idx);
+	rcu_read_unlock();
 
 	hnat_notify_mcast_hw_path(group_idx);
 }
@@ -432,6 +485,10 @@ int mtk_npu_mcast_grp_insert(struct npu_mcast_addr *src,
 		return -EPERM;
 
 	spin_lock_irqsave(&mcast.grp.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	grp = mtk_npu_mcast_grp_alloc();
 	if (IS_ERR(grp)) {
@@ -465,6 +522,9 @@ static int mtk_npu_mcast_grp_fw_write(struct npu_mcast_grp *grp)
 	};
 	struct npu_mcast_grp_params *p = &grp->params;
 	u32 i;
+
+	if (!READ_ONCE(mcast.online) && !READ_ONCE(mcast.restoring))
+		return -EAGAIN;
 
 	for (i = 0; i < sizeof(struct npu_mcast_grp_params); i += 4) {
 		writel(*(u32 *)((uintptr_t)p + i),
@@ -514,6 +574,10 @@ int mtk_npu_mcast_grp_delete_by_idx(u8 idx)
 		return -EINVAL;
 
 	spin_lock_irqsave(&mcast.grp.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	if (!test_bit(idx, mcast.grp.used)) {
 		ret = -EINVAL;
@@ -531,10 +595,14 @@ unlock:
 int mtk_npu_mcast_grp_delete_all(void)
 {
 	unsigned long flags;
-	int ret;
+	int ret = 0;
 	u32 i;
 
 	spin_lock_irqsave(&mcast.grp.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		spin_unlock_irqrestore(&mcast.grp.lock, flags);
+		return -EAGAIN;
+	}
 
 	for_each_set_bit(i, mcast.grp.used, NPU_MCAST_TBL_IDX_MAX)
 		ret = mtk_npu_mcast_grp_delete_by_idx_no_lock(i);
@@ -572,6 +640,10 @@ int mtk_npu_mcast_grp_update_by_idx(u32 idx,
 		return -EPERM;
 
 	spin_lock_irqsave(&mcast.grp.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	if (!test_bit(idx, mcast.grp.used)) {
 		ret = -ENOENT;
@@ -749,6 +821,10 @@ int mtk_npu_mcast_client_insert_by_grp_idx(int gidx, struct npu_mcast_client_par
 		return -EINVAL;
 
 	spin_lock_irqsave(&mcast.grp.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	if (!test_bit(gidx, mcast.grp.used)) {
 		ret = -ENOENT;
@@ -789,6 +865,10 @@ int mtk_npu_mcast_client_insert(struct npu_mcast_addr *src,
 		return -EPERM;
 
 	spin_lock_irqsave(&mcast.grp.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	grp = mtk_npu_mcast_grp_find(src, dst, type);
 	if (!grp) {
@@ -928,6 +1008,10 @@ int mtk_npu_mcast_client_delete_by_idx(int gidx, int cidx)
 		return -EINVAL;
 
 	spin_lock_irqsave(&mcast.grp.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	if (!test_bit(gidx, mcast.grp.used)) {
 		NPU_NOTICE("multicast group not found\n");
@@ -969,6 +1053,10 @@ int mtk_npu_mcast_client_delete(struct npu_mcast_addr *src,
 		return -EPERM;
 
 	spin_lock_irqsave(&mcast.grp.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	grp = mtk_npu_mcast_grp_find(src, dst, type);
 	if (!grp) {
@@ -1042,6 +1130,10 @@ int mtk_npu_mcast_client_update_by_idx(int gidx, int cidx,
 		return -EINVAL;
 
 	spin_lock_irqsave(&mcast.grp.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	if (!test_bit(gidx, mcast.grp.used)) {
 		ret = -ENOENT;
@@ -1089,6 +1181,10 @@ int mtk_npu_mcast_client_update(struct npu_mcast_addr *src,
 		return -EPERM;
 
 	spin_lock_irqsave(&mcast.grp.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	grp = mtk_npu_mcast_grp_find(src, dst, type);
 	if (!grp) {
@@ -1232,6 +1328,19 @@ static int mtk_npu_mcast_client_insert_hnat(struct mcast_offload_info *hnat_mcas
 	mtk_npu_mcast_hnat_params_convert(&c, &src, &dst, &type, hnat_mcast_params);
 
 	ret = mtk_npu_mcast_client_insert(&src, &dst, type, &c);
+	if (ret == -EEXIST) {
+		struct npu_mcast_grp *grp;
+		unsigned long flags;
+
+		/* A reset/quiesce may flush HNAT while preserving the NPU shadow. */
+		spin_lock_irqsave(&mcast.grp.lock, flags);
+		grp = mtk_npu_mcast_grp_find(&src, &dst, type);
+		if (grp && mtk_npu_mcast_client_find(grp, &c)) {
+			c.grp_idx = grp->id;
+			ret = 0;
+		}
+		spin_unlock_irqrestore(&mcast.grp.lock, flags);
+	}
 	if (!ret)
 		hnat_mcast_params->npu_grp_idx = c.grp_idx;
 
@@ -1328,6 +1437,8 @@ static int mtk_npu_mcast_bss_params_submit(struct npu_mcast_bss_params *bss)
 
 	if (unlikely(!bss))
 		return -EINVAL;
+	if (!READ_ONCE(mcast.online) && !READ_ONCE(mcast.restoring))
+		return -EAGAIN;
 
 	for (i = 0; i < sizeof(*bss); i += 4) {
 		writel(*(u32 *)((uintptr_t)bss + i),
@@ -1436,7 +1547,7 @@ int mtk_npu_mcast_bss_params_insert(struct npu_mcast_bss_params *nbss)
 		return -EINVAL;
 
 	spin_lock_irqsave(&mcast.bss.lock, flags);
-	ret = __mtk_npu_mcast_bss_params_insert(nbss);
+	ret = mtk_npu_mcast_online() ? __mtk_npu_mcast_bss_params_insert(nbss) : -EAGAIN;
 	spin_unlock_irqrestore(&mcast.bss.lock, flags);
 
 	return ret;
@@ -1469,6 +1580,10 @@ int mtk_npu_mcast_bss_params_delete_by_idx(u8 idx)
 	int ret;
 
 	spin_lock_irqsave(&mcast.bss.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	if (!test_bit(idx, mcast.bss.used)) {
 		ret = -ENOENT;
@@ -1495,6 +1610,10 @@ int mtk_npu_mcast_bss_params_delete(struct npu_mcast_bss_params *nbss)
 		return -EINVAL;
 
 	spin_lock_irqsave(&mcast.bss.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 	bss = mtk_npu_mcast_bss_params_find_by_bssid(nbss->bssid);
 	if (!bss) {
 		NPU_NOTICE("bss id: %u not found in npu multicast table\n", nbss->bssid);
@@ -1543,6 +1662,10 @@ int mtk_npu_mcast_bss_params_update_by_idx(u8 idx,
 		return -EINVAL;
 
 	spin_lock_irqsave(&mcast.bss.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 
 	if (!test_bit(idx, mcast.bss.used)) {
 		ret = -ENOENT;
@@ -1570,6 +1693,10 @@ int mtk_npu_mcast_bss_params_update(struct npu_mcast_bss_params *new)
 		return -EINVAL;
 
 	spin_lock_irqsave(&mcast.bss.lock, flags);
+	if (!mtk_npu_mcast_online()) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 	old = mtk_npu_mcast_bss_params_find_by_bssid(new->bssid);
 	if (!old) {
 		NPU_NOTICE("bssid[%u] not found in npu multicast table\n", new->bssid);
@@ -1595,6 +1722,9 @@ bool mtk_npu_mcast_qos_is_enabled(void)
 	};
 	int ret;
 
+	if (!mtk_npu_mcast_online())
+		return false;
+
 	ret = mtk_npu_net_send_cmd_mgmt(&cmd);
 	if (ret || cmd.return_cnt != 1)
 		return false;
@@ -1611,6 +1741,8 @@ void mtk_npu_mcast_qos_enable(bool en)
 		.arg[1] = en,
 	};
 
+	if (!mtk_npu_mcast_online())
+		return;
 	mtk_npu_net_send_cmd_all_no_wait(&cmd);
 }
 
@@ -1622,6 +1754,9 @@ bool mtk_npu_mcast_tid_is_enabled(void)
 		.arg[0] = NPU_MCAST_NET_CMD_GET_TID_EN,
 	};
 	int ret;
+
+	if (!mtk_npu_mcast_online())
+		return false;
 
 	ret = mtk_npu_net_send_cmd_mgmt(&cmd);
 	if (ret || cmd.return_cnt != 1)
@@ -1639,6 +1774,8 @@ void mtk_npu_mcast_tid_enable(bool en)
 		.arg[1] = en,
 	};
 
+	if (!mtk_npu_mcast_online())
+		return;
 	mtk_npu_net_send_cmd_all_no_wait(&cmd);
 }
 
@@ -1651,23 +1788,14 @@ bool mtk_npu_mcast_is_enabled(void)
 	};
 	int ret;
 
+	if (!mtk_npu_mcast_online())
+		return false;
+
 	ret = mtk_npu_net_send_cmd_mgmt(&cmd);
 	if (ret || cmd.return_cnt != 1)
 		return false;
 
 	return cmd.ret[0];
-}
-
-void mtk_npu_mcast_enable(bool en)
-{
-	struct net_cmd cmd = {
-		.type = NPU_NET_CMD_TYPE_MCAST,
-		.sub_type = NPU_MCAST_NET_CMD_SET,
-		.arg[0] = NPU_MCAST_NET_CMD_SET_EN,
-		.arg[1] = en,
-	};
-
-	mtk_npu_net_send_cmd_all_no_wait(&cmd);
 }
 
 static void mtk_npu_mcast_mac_saddr_encode(struct net_cmd *cmd, u8 *mac)
@@ -1698,6 +1826,11 @@ int mtk_npu_mcast_mac_saddr_get(u8 *mac)
 	};
 	int ret;
 
+	if (!mac)
+		return -EINVAL;
+	if (!mtk_npu_mcast_online())
+		return -EAGAIN;
+
 	ret = mtk_npu_net_send_cmd_mgmt(&cmd);
 	if (ret)
 		return ret;
@@ -1716,6 +1849,9 @@ void mtk_npu_mcast_mac_saddr_set(u8 *mac)
 		.sub_type = NPU_MCAST_NET_CMD_SET_MAC_SADDR,
 	};
 
+	if (!mac || !mtk_npu_mcast_online())
+		return;
+
 	mtk_npu_mcast_mac_saddr_encode(&cmd, mac);
 
 	mtk_npu_net_send_cmd_all_no_wait(&cmd);
@@ -1729,6 +1865,8 @@ void mtk_npu_mcast_statistic_clear(void)
 		.arg[0] = NPU_MCAST_NET_CMD_STATISTIC_CLEAR,
 	};
 
+	if (!mtk_npu_mcast_online())
+		return;
 	mtk_npu_net_send_cmd_mgmt(&cmd);
 }
 EXPORT_SYMBOL(mtk_npu_mcast_statistic_clear);
@@ -1741,7 +1879,8 @@ void mtk_npu_mcast_statistic_client_clear(u8 gidx, u8 cidx)
 		.arg[0] = NPU_MCAST_NET_CMD_STATISTIC_CLIENT_CLEAR,
 	};
 
-	if (gidx >= NPU_MCAST_TBL_IDX_MAX || cidx >= NPU_MCAST_CLIENT_MAX)
+	if (!mtk_npu_mcast_online() || gidx >= NPU_MCAST_TBL_IDX_MAX ||
+	    cidx >= NPU_MCAST_CLIENT_MAX)
 		return;
 
 	cmd.arg[1] = (gidx << 16) | cidx;
@@ -1759,6 +1898,9 @@ bool mtk_npu_mcast_statistic_is_enabled(void)
 	};
 	int ret;
 
+	if (!mtk_npu_mcast_online())
+		return false;
+
 	ret = mtk_npu_net_send_cmd_mgmt(&cmd);
 	if (ret || cmd.return_cnt != 1)
 		return false;
@@ -1775,6 +1917,8 @@ void mtk_npu_mcast_statistic_enable(bool en)
 		.arg[1] = en,
 	};
 
+	if (!mtk_npu_mcast_online())
+		return;
 	mtk_npu_net_send_cmd_mgmt(&cmd);
 }
 EXPORT_SYMBOL(mtk_npu_mcast_statistic_enable);
@@ -1784,7 +1928,7 @@ struct npu_mcast_statistic *mtk_npu_mcast_statistic_read(void)
 	struct npu_mcast_statistic *p = &mcast_statistic;
 	u32 i;
 
-	if (mcast.statistic_ofs == 0)
+	if (!mtk_npu_mcast_online() || mcast.statistic_ofs == 0)
 		return NULL;
 
 	for (i = 0; i < sizeof(struct npu_mcast_statistic); i += 4)
@@ -1800,7 +1944,7 @@ u16 mtk_npu_mcast_statistic_client_read(u8 gidx, u8 cidx)
 	unsigned long flags;
 	u16 pkt_cnt = 0;
 
-	if (mcast.statistic_ofs == 0)
+	if (!mtk_npu_mcast_online() || mcast.statistic_ofs == 0)
 		return 0;
 
 	if (gidx >= NPU_MCAST_TBL_IDX_MAX || cidx >= NPU_MCAST_CLIENT_MAX)
@@ -1854,13 +1998,21 @@ static int mtk_npu_mcast_tbl_ofs_init(void)
 	ret = mtk_npu_net_send_cmd_mgmt(&cmd);
 	if (ret || cmd.return_cnt != 1)
 		return -EINVAL;
-	mcast.grp.tbl_ofs = cmd.ret[0] - 0x09100000; /* TODO */
+	ret = mtk_npu_fw_offset(cmd.ret[0],
+				 sizeof(struct npu_mcast_grp_params) * NPU_MCAST_TBL_IDX_MAX,
+				 &mcast.grp.tbl_ofs);
+	if (ret)
+		return ret;
 
 	cmd.arg[0] = NPU_MCAST_NET_CMD_BSS_PARAMS_BASE_ADDR_GET,
 	ret = mtk_npu_net_send_cmd_mgmt(&cmd);
 	if (ret || cmd.return_cnt != 1)
 		return -EINVAL;
-	mcast.bss.tbl_ofs = cmd.ret[0] - 0x09100000; /* TODO */
+	ret = mtk_npu_fw_offset(cmd.ret[0],
+				 sizeof(struct npu_mcast_bss_params) * NPU_MCAST_BSS_TBL_IDX_MAX,
+				 &mcast.bss.tbl_ofs);
+	if (ret)
+		return ret;
 
 	return 0;
 }
@@ -1878,20 +2030,103 @@ static int mtk_npu_mcast_statistic_init(void)
 
 	if (ret || cmd.return_cnt != 1)
 		return -EINVAL;
-	mcast.statistic_ofs = cmd.ret[0] - 0x09100000; /* TODO */
+	ret = mtk_npu_fw_offset(cmd.ret[0], sizeof(struct npu_mcast_statistic),
+				 &mcast.statistic_ofs);
+	if (ret)
+		return ret;
 
 	return 0;
+}
+
+static int mtk_npu_mcast_restore(void)
+{
+	struct net_cmd cmd = {
+		.type = NPU_NET_CMD_TYPE_MCAST,
+		.sub_type = NPU_MCAST_NET_CMD_PARAMS,
+	};
+	unsigned long grp_flags, bss_flags;
+	u32 i;
+	int ret;
+
+	if (!mtk_npu_mcu_alive())
+		return -EAGAIN;
+
+	ret = mtk_npu_mcast_tbl_ofs_init();
+	if (ret)
+		return ret;
+	ret = mtk_npu_mcast_statistic_init();
+	if (ret)
+		return ret;
+	if (mtk_npu_mcast_ranges_overlap(mcast.grp.tbl_ofs,
+					 sizeof(struct npu_mcast_grp_params) * NPU_MCAST_TBL_IDX_MAX,
+					 mcast.bss.tbl_ofs,
+					 sizeof(struct npu_mcast_bss_params) * NPU_MCAST_BSS_TBL_IDX_MAX) ||
+	    mtk_npu_mcast_ranges_overlap(mcast.grp.tbl_ofs,
+					 sizeof(struct npu_mcast_grp_params) * NPU_MCAST_TBL_IDX_MAX,
+					 mcast.statistic_ofs,
+					 sizeof(struct npu_mcast_statistic)) ||
+	    mtk_npu_mcast_ranges_overlap(mcast.bss.tbl_ofs,
+					 sizeof(struct npu_mcast_bss_params) * NPU_MCAST_BSS_TBL_IDX_MAX,
+					 mcast.statistic_ofs,
+					 sizeof(struct npu_mcast_statistic)))
+		return -ERANGE;
+
+	/* Block host updates until the firmware tables match the retained shadow. */
+	spin_lock_irqsave(&mcast.grp.lock, grp_flags);
+	spin_lock_irqsave(&mcast.bss.lock, bss_flags);
+	WRITE_ONCE(mcast.online, false);
+	WRITE_ONCE(mcast.restoring, true);
+	memset_io(nmcast.base + mcast.grp.tbl_ofs, 0,
+		  sizeof(struct npu_mcast_grp_params) * NPU_MCAST_TBL_IDX_MAX);
+	memset_io(nmcast.base + mcast.bss.tbl_ofs, 0,
+		  sizeof(struct npu_mcast_bss_params) * NPU_MCAST_BSS_TBL_IDX_MAX);
+	wmb();
+
+	for (i = 0; i < NPU_MCAST_TBL_IDX_MAX; i++) {
+		ret = mtk_npu_mcast_grp_fw_write(&mcast.grp.tbls[i]);
+		if (ret)
+			goto unlock;
+	}
+	for (i = 0; i < NPU_MCAST_BSS_TBL_IDX_MAX; i++) {
+		ret = mtk_npu_mcast_bss_params_submit(&mcast.bss.tbls[i]);
+		if (ret)
+			goto unlock;
+	}
+
+	cmd.sub_type = NPU_MCAST_NET_CMD_SET;
+	cmd.arg[0] = NPU_MCAST_NET_CMD_SET_EN;
+	cmd.arg[1] = READ_ONCE(mcast.enabled);
+	ret = mtk_npu_net_send_cmd_all_no_wait(&cmd);
+	if (!ret)
+		WRITE_ONCE(mcast.online, true);
+
+unlock:
+	WRITE_ONCE(mcast.restoring, false);
+	spin_unlock_irqrestore(&mcast.bss.lock, bss_flags);
+	spin_unlock_irqrestore(&mcast.grp.lock, grp_flags);
+	return ret;
+}
+
+int mtk_npu_mcast_set_enabled(bool en)
+{
+	WRITE_ONCE(mcast.enabled, en);
+	return mtk_npu_mcast_restore();
+}
+
+static bool mtk_npu_mcast_npu_ready(void)
+{
+	return mtk_npu_mcast_live();
 }
 
 static struct npu_hnat_mcast_ops hnat_mcast_ops = {
 	.npu_mcast_client_insert = mtk_npu_mcast_client_insert_hnat,
 	.npu_mcast_client_delete = mtk_npu_mcast_client_delete_hnat,
 	.npu_mcast_client_update = mtk_npu_mcast_client_update_hnat,
+	.ready = mtk_npu_mcast_npu_ready,
 };
 
 int mtk_npu_mcast_init(void)
 {
-	int ret;
 	u32 i;
 
 	spin_lock_init(&mcast.grp.lock);
@@ -1905,34 +2140,75 @@ int mtk_npu_mcast_init(void)
 	for (i = 0; i < NPU_MCAST_BSS_TBL_IDX_MAX; i++)
 		mcast.bss.tbls[i].id = i;
 
-	ret = mtk_npu_mcast_tbl_ofs_init();
-	if (ret) {
-		NPU_NOTICE("multicast table offset acquisition failed: %d\n", ret);
-		return ret;
-	}
+	WRITE_ONCE(mcast.online, false);
+	WRITE_ONCE(mcast.enabled, true);
+	return 0;
+}
 
-	ret = mtk_npu_hnat_mcast_ops_register(&hnat_mcast_ops);
-	if (ret) {
-		NPU_NOTICE("failed to register hnat callback: %d\n", ret);
-		return ret;
-	}
+void mtk_npu_mcast_pause(void)
+{
+	unsigned long grp_flags, bss_flags;
 
-	ret = mtk_npu_mcast_statistic_init();
-	if (ret) {
-		NPU_NOTICE("multicast statistic init failed: %d\n", ret);
-		return ret;
-	}
+	WRITE_ONCE(mcast.online, false);
+	/* Drain concurrent table updates before the NPU stops accessing SRAM. */
+	spin_lock_irqsave(&mcast.grp.lock, grp_flags);
+	spin_lock_irqsave(&mcast.bss.lock, bss_flags);
+	spin_unlock_irqrestore(&mcast.bss.lock, bss_flags);
+	spin_unlock_irqrestore(&mcast.grp.lock, grp_flags);
+	hnat_mcast_npu_quiesce();
+}
 
-	mtk_npu_mcast_enable(true);
+int mtk_npu_mcast_publish(void)
+{
+	return mtk_npu_hnat_mcast_ops_register(&hnat_mcast_ops);
+}
 
-	return ret;
+void mtk_npu_mcast_unpublish(void)
+{
+	mtk_npu_hnat_mcast_ops_unregister();
+}
+
+int mtk_npu_mcast_resume(void)
+{
+	return mtk_npu_mcast_restore();
 }
 
 void mtk_npu_mcast_deinit(void)
 {
-	mtk_npu_mcast_enable(false);
+	struct npu_mcast_client *client, *tmp;
+	struct net_cmd cmd = {
+		.type = NPU_NET_CMD_TYPE_MCAST,
+		.sub_type = NPU_MCAST_NET_CMD_SET,
+		.arg[0] = NPU_MCAST_NET_CMD_SET_EN,
+		.arg[1] = 0,
+	};
+	unsigned long flags;
+	u32 i;
 
-	mtk_npu_hnat_mcast_ops_unregister();
+	WRITE_ONCE(mcast.online, false);
+	if (mtk_npu_mcu_alive())
+		mtk_npu_net_send_cmd_all_no_wait(&cmd);
+	WRITE_ONCE(mcast.enabled, false);
 
-	mtk_npu_mcast_grp_delete_all();
+	spin_lock_irqsave(&mcast.grp.lock, flags);
+	for (i = 0; i < NPU_MCAST_TBL_IDX_MAX; i++) {
+		struct npu_mcast_grp *grp = &mcast.grp.tbls[i];
+
+		list_for_each_entry_safe(client, tmp, &grp->excess_clients, node) {
+			list_del(&client->node);
+			kfree(client->params);
+			kfree(client);
+		}
+		memset(&grp->params, 0, sizeof(grp->params));
+	}
+	bitmap_zero(mcast.grp.used, NPU_MCAST_TBL_IDX_MAX);
+	spin_unlock_irqrestore(&mcast.grp.lock, flags);
+
+	spin_lock_irqsave(&mcast.bss.lock, flags);
+	memset(mcast.bss.tbls, 0, sizeof(mcast.bss.tbls));
+	bitmap_zero(mcast.bss.used, NPU_MCAST_BSS_TBL_IDX_MAX);
+	spin_unlock_irqrestore(&mcast.bss.lock, flags);
+	mcast.grp.tbl_ofs = 0;
+	mcast.bss.tbl_ofs = 0;
+	mcast.statistic_ofs = 0;
 }

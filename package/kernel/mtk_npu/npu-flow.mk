@@ -22,6 +22,7 @@ define KernelPackage/npu-flow
   DEPENDS:= \
 	kmod-npu \
 	kmod-nft-offload \
+	+kmod-ipsec \
 	+@MTK_NPU_FLOW
 endef
 

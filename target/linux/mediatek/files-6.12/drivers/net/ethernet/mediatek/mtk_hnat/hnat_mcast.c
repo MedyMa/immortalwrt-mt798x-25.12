@@ -8,10 +8,57 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/if_bridge.h>
+#include <linux/mutex.h>
+#include <linux/rcupdate.h>
 #include "hnat.h"
 #include <net/dsa.h>
 
-struct npu_hnat_mcast_ops *hnat_mc_ops;
+static struct npu_hnat_mcast_ops __rcu *hnat_mc_ops;
+static DEFINE_MUTEX(hnat_mc_ops_lock);
+
+static bool hnat_mcast_npu_available(void)
+{
+	struct npu_hnat_mcast_ops *ops;
+	bool ready = false;
+
+	rcu_read_lock();
+	ops = rcu_dereference(hnat_mc_ops);
+	if (ops)
+		ready = !ops->ready || ops->ready();
+	rcu_read_unlock();
+
+	return ready;
+}
+
+static int hnat_mcast_npu_client_insert(struct mcast_offload_info *info)
+{
+	struct npu_hnat_mcast_ops *ops;
+	int ret = -EAGAIN;
+
+	rcu_read_lock();
+	ops = rcu_dereference(hnat_mc_ops);
+	if (ops && (!ops->ready || ops->ready()) &&
+	    ops->npu_mcast_client_insert)
+		ret = ops->npu_mcast_client_insert(info);
+	rcu_read_unlock();
+
+	return ret;
+}
+
+static int hnat_mcast_npu_client_delete(struct mcast_offload_info *info)
+{
+	struct npu_hnat_mcast_ops *ops;
+	int ret = -EAGAIN;
+
+	rcu_read_lock();
+	ops = rcu_dereference(hnat_mc_ops);
+	if (ops && (!ops->ready || ops->ready()) &&
+	    ops->npu_mcast_client_delete)
+		ret = ops->npu_mcast_client_delete(info);
+	rcu_read_unlock();
+
+	return ret;
+}
 
 bool (*hnat_mcast_eth_ext_link_handle)(bool up) = NULL;
 EXPORT_SYMBOL(hnat_mcast_eth_ext_link_handle);
@@ -423,7 +470,7 @@ static int hnat_mcast_npu_delete_single(struct mcast_offload_info *mc_info, int 
 {
 	int ret;
 
-	if (!hnat_mc_ops || !hnat_mc_ops->npu_mcast_client_delete)
+	if (!hnat_mcast_npu_available())
 		return 0;
 
 	if (port >= 0)
@@ -433,7 +480,7 @@ static int hnat_mcast_npu_delete_single(struct mcast_offload_info *mc_info, int 
 		pr_info("Del client dip:%pI4/%pI6c dsaport:%d is6:%d\n",
 			&mc_info->dst.ip, &mc_info->dst.ipv6,
 			mc_info->dsa_port, mc_info->is_ipv6);
-	ret = hnat_mc_ops->npu_mcast_client_delete(mc_info);
+	ret = hnat_mcast_npu_client_delete(mc_info);
 	if (ret)
 		pr_info("Del client fail ret:%d\n", ret);
 
@@ -463,7 +510,7 @@ static int hnat_mcast_npu_delete_stations(struct mcast_offload_info *mc_info,
 {
 	int ret = 0;
 
-	if (!hnat_mc_ops || !hnat_mc_ops->npu_mcast_client_delete)
+	if (!hnat_mcast_npu_available())
 		return 0;
 
 	if (is_dsa)
@@ -483,7 +530,7 @@ static int hnat_mcast_npu_add_multi(struct ppe_mcast_group *group,
 	for (port_bit = 0; port_bit < 8; port_bit++) {
 		if (stag & (1 << port_bit)) {
 			mc_info->dsa_port = port_bit;
-			ret = hnat_mc_ops->npu_mcast_client_insert(mc_info);
+			ret = hnat_mcast_npu_client_insert(mc_info);
 			if (!ret)
 				group->npu_grp_idx = mc_info->npu_grp_idx;
 			else
@@ -506,11 +553,11 @@ static int hnat_mcast_npu_add_stations(struct ppe_mcast_group *group,
 {
 	int ret = 0;
 
-	if (!hnat_mc_ops || !hnat_mc_ops->npu_mcast_client_insert)
+	if (!hnat_mcast_npu_available())
 		return 0;
 
 	if (is_dsa) {
-		ret = hnat_mc_ops->npu_mcast_client_insert(mc_info);
+		ret = hnat_mcast_npu_client_insert(mc_info);
 		/* When the IGMP-controlled Join remains active,if multicast
 		 * data transmission stops and then resumes, HNAT will notify
 		 * NPU to add the same client again. In this case, the NPU
@@ -734,7 +781,7 @@ static bool hnat_mcast_no_npu_handle(struct ppe_mcast_group *group,
 {
 	bool is_single, is_wifi_only, is_gdma_only, is_multi, is_multi_eth;
 
-	if (hnat_mc_ops)
+	if (hnat_mcast_npu_available())
 		return false;
 
 	is_single    = BMP_IS_SINGLE_PORT(pse_bmp);
@@ -837,7 +884,7 @@ static bool hnat_mcast_no_npu_teardown(struct ppe_mcast_group *group)
 	u32 pre_bmp = 0, pre_stag = 0;
 	bool pre_single, pre_wifi_only, pre_multi;
 
-	if (hnat_mc_ops)
+	if (hnat_mcast_npu_available())
 		return false;
 
 	pre_bmp	  = hnat_mcast_get_pse_tx_bmp(group, &pre_stag);
@@ -1536,20 +1583,59 @@ int hnat_mcast_disable(void)
 
 int mtk_npu_hnat_mcast_ops_register(struct npu_hnat_mcast_ops *hnat_mcast_ops)
 {
-	if (hnat_mc_ops)
-		return -EBUSY;
+	int ret = 0;
 
-	hnat_mc_ops = hnat_mcast_ops;
-	return 0;
+	if (!hnat_mcast_ops)
+		return -EINVAL;
+
+	mutex_lock(&hnat_mc_ops_lock);
+	if (rcu_access_pointer(hnat_mc_ops))
+		ret = -EBUSY;
+	else
+		rcu_assign_pointer(hnat_mc_ops, hnat_mcast_ops);
+	mutex_unlock(&hnat_mc_ops_lock);
+
+	return ret;
 }
 EXPORT_SYMBOL(mtk_npu_hnat_mcast_ops_register);
 
 int mtk_npu_hnat_mcast_ops_unregister(void)
 {
-	hnat_mc_ops = NULL;
+	mutex_lock(&hnat_mc_ops_lock);
+	rcu_assign_pointer(hnat_mc_ops, NULL);
+	synchronize_rcu();
+	mutex_unlock(&hnat_mc_ops_lock);
 	return 0;
 }
 EXPORT_SYMBOL(mtk_npu_hnat_mcast_ops_unregister);
+
+/* Reset HNAT multicast bindings before NPU state is stopped. Keep bridge MDB
+ * membership in the host list so normal learning can rebuild flows afterward.
+ */
+void hnat_mcast_npu_quiesce(void)
+{
+	struct ppe_mcast_table *pmcast;
+	struct ppe_mcast_group *group;
+
+	if (!hnat_priv || !hnat_priv->pmcast)
+		return;
+
+	pmcast = hnat_priv->pmcast;
+	write_lock_bh(&pmcast->mcast_lock);
+	list_for_each_entry(group, &pmcast->groups, list) {
+		if (group->ppe_id >= 0 && group->ppe_id < CFG_PPE_NUM &&
+		    group->foe_idx >= 0 && group->foe_idx < hnat_priv->foe_etry_num)
+			entry_delete(group->ppe_id, group->foe_idx);
+
+		hnat_mcast_mtbl_teardown(group);
+		group->psebmp = 0;
+		group->ppe_id = INVLD_IDX;
+		group->foe_idx = INVLD_IDX;
+		group->npu_grp_idx = INVLD_IDX;
+	}
+	write_unlock_bh(&pmcast->mcast_lock);
+}
+EXPORT_SYMBOL(hnat_mcast_npu_quiesce);
 
 static void hnat_mcast_update_path_from_wifi(int grp_id, bool hw_path)
 {
