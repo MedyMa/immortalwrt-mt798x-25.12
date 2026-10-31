@@ -146,6 +146,19 @@ mtwifi_check_sta() {
 	has_sta=1
 }
 
+mtwifi_resolve_phy() {
+	local ifname="$1"
+	local name
+
+	# l1profile stores netdev names, while nl80211 expects a wiphy name.
+	# Resolve the actual registration rather than assuming PCI probe order.
+	[ -n "$ifname" ] || return 1
+	[ -r "/sys/class/net/$ifname/phy80211/name" ] || return 1
+	read -r name < "/sys/class/net/$ifname/phy80211/name" || return 1
+	[ -n "$name" ] || return 1
+	printf '%s\n' "$name"
+}
+
 #
 # ---- 从 mac80211.sh 拷过来的 hostapd 配置生成函数 ----
 #
@@ -189,6 +202,12 @@ mac80211_add_he_capabilities() {
 
 mac80211_hostapd_setup_base() {
 	local phy="$1"
+	local phy_info
+
+	if ! phy_info="$(iw phy "$phy" info)"; then
+		logger -t "netifd-mtwifi" "cannot read nl80211 capabilities for $phy"
+		return 1
+	fi
 
 	json_select config
 
@@ -290,7 +309,7 @@ mac80211_hostapd_setup_base() {
 			}
 
 			ht_cap_mask=0
-			for cap in $(iw phy "$phy" info | grep -E '^\s*Capabilities:' | cut -d: -f2); do
+			for cap in $(printf '%s\n' "$phy_info" | grep -E '^\s*Capabilities:' | cut -d: -f2); do
 				ht_cap_mask="$(($ht_cap_mask | $cap))"
 			done
 
@@ -448,7 +467,7 @@ mac80211_hostapd_setup_base() {
 		set_default tx_burst 2.0
 		append base_cfg "ieee80211ac=1" "$N"
 		vht_cap=0
-		for cap in $(iw phy "$phy" info | awk -F "[()]" '/VHT Capabilities/ { print $2 }'); do
+		for cap in $(printf '%s\n' "$phy_info" | awk -F "[()]" '/VHT Capabilities/ { print $2 }'); do
 			vht_cap="$(($vht_cap | $cap))"
 		done
 
@@ -564,9 +583,9 @@ mac80211_hostapd_setup_base() {
 			he_bss_color:128 \
 			he_bss_color_enabled:1
 
-		he_phy_cap=$(iw phy "$phy" info | sed -n '/HE Iftypes: .*AP/,$p' | awk -F "[()]" '/HE PHY Capabilities/ { print $2 }' | head -1)
+		he_phy_cap=$(printf '%s\n' "$phy_info" | sed -n '/HE Iftypes: .*AP/,$p' | awk -F "[()]" '/HE PHY Capabilities/ { print $2 }' | head -1)
 		he_phy_cap=${he_phy_cap:2}
-		he_mac_cap=$(iw phy "$phy" info | sed -n '/HE Iftypes: .*AP/,$p' | awk -F "[()]" '/HE MAC Capabilities/ { print $2 }' | head -1)
+		he_mac_cap=$(printf '%s\n' "$phy_info" | sed -n '/HE Iftypes: .*AP/,$p' | awk -F "[()]" '/HE MAC Capabilities/ { print $2 }' | head -1)
 		he_mac_cap=${he_mac_cap:2}
 
 		append base_cfg "ieee80211ax=1" "$N"
@@ -781,7 +800,11 @@ mac80211_prepare_vif() {
 				type=interface
 			fi
 
-			mac80211_hostapd_setup_bss "$phy" "$ifname" "$macaddr" "$type" || return
+			if ! mac80211_hostapd_setup_bss "$wiphy" "$ifname" "$macaddr" "$type"; then
+				hostapd_setup_error=1
+				json_select ..
+				return 1
+			fi
 
 			[ -n "$hostapd_ctrl" ] || {
 				ap_ifname="${ifname}"
@@ -1134,7 +1157,7 @@ drv_mtwifi_setup() {
 	ubus -t 120 wait_for network.interface.lan
 
 	local dev="$1"
-	local phy
+	local phy wiphy
 
 	json_add_string device "$dev"
 
@@ -1198,12 +1221,24 @@ drv_mtwifi_setup() {
 
 	# 3a. AP 侧生成 hostapd 配置
 	if [ -n "$has_ap" ]; then
-		if ! mac80211_hostapd_setup_base "$phy"; then
+		if ! wiphy="$(mtwifi_resolve_phy "$phy")"; then
+			logger -t "netifd-mtwifi" "no nl80211 PHY registered for $phy"
+			wireless_setup_failed "MTWIFI_PHY_NOT_FOUND"
+			lock -u "$LOCK_FILE"
+			return 1
+		fi
+		if ! mac80211_hostapd_setup_base "$wiphy"; then
 			wireless_setup_failed "MTWIFI_HOSTAPD_CONFIG_FAILED"
 			lock -u "$LOCK_FILE"
 			return 1
 		fi
+		hostapd_setup_error=
 		for_each_interface "ap" mac80211_prepare_vif
+		if [ -n "$hostapd_setup_error" ]; then
+			wireless_setup_failed "MTWIFI_HOSTAPD_BSS_FAILED"
+			lock -u "$LOCK_FILE"
+			return 1
+		fi
 	fi
 
 	# 3b. STA 侧生成 wpa_supplicant 配置并 interface_add + 挂 scan action
