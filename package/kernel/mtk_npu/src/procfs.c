@@ -17,6 +17,84 @@
 struct proc_dir_entry *npu_proc_root;
 EXPORT_SYMBOL(npu_proc_root);
 
+/* This SDK already has bounded mailbox waits and validates all five cores. */
+static int telemetry_capabilities_show(struct seq_file *s, void *unused)
+{
+	seq_puts(s, "schema=1 mailbox_bounded=1 utilization_cores=5\n");
+	return 0;
+}
+
+static int telemetry_capabilities_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, telemetry_capabilities_show, NULL);
+}
+
+static const struct proc_ops telemetry_capabilities_ops = {
+	.proc_open = telemetry_capabilities_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
+};
+
+/* One lock per row; no FW/MIB/MMIO read. Native 25.12 has no generation
+ * sequence, so the reserved generation column is explicitly unspecified (0).
+ */
+static int tunnels_show(struct seq_file *s, void *unused)
+{
+	struct npu_tnl_info *info;
+	struct npu_tnl_params params;
+	unsigned long flags;
+	u32 i, status, ifindex;
+	bool synced;
+
+	seq_printf(s, "# schema=1 max_tunnels=%u snapshot=per_entry unit=metadata\n",
+		   (unsigned int)CONFIG_NPU_TNL_NUM);
+	seq_puts(s, "# index generation ifindex type ipproto sip sport dip dport encap decap synchronized\n");
+	for (i = 0; i < CONFIG_NPU_TNL_NUM; i++) {
+		info = mtk_npu_tnl_info_get_by_idx(i);
+		if (IS_ERR(info))
+			continue;
+		spin_lock_irqsave(&info->lock, flags);
+		status = info->status;
+		if (!info->dev || (status & (TNL_STA_UNINIT | TNL_STA_DELETING |
+					    TNL_STA_DELETING_SKIP_PCE))) {
+			spin_unlock_irqrestore(&info->lock, flags);
+			continue;
+		}
+		params = info->cache;
+		ifindex = info->dev->ifindex;
+		synced = (status & TNL_STA_UPDATED) &&
+			 !(status & (TNL_STA_UPDATING | TNL_STA_QUEUED)) &&
+			 !memcmp(&info->tnl_params, &params, sizeof(params));
+		spin_unlock_irqrestore(&info->lock, flags);
+		if (params.params.network.type != NPU_NETWORK_IP)
+			continue;
+		seq_printf(s, "%u 0 %u %u %u %pI4 %u %pI4 %u %u %u %u\n",
+			i, ifindex, params.params.tunnel.type,
+			params.params.network.ip.proto, &params.params.network.ip.sip,
+			params.params.transport.type == NPU_TRANSPORT_UDP ?
+				ntohs(params.params.transport.udp.sport) : 0,
+			&params.params.network.ip.dip,
+			params.params.transport.type == NPU_TRANSPORT_UDP ?
+				ntohs(params.params.transport.udp.dport) : 0,
+			!!(params.flag & TNL_ENCAP_ENABLE),
+			!!(params.flag & TNL_DECAP_ENABLE), synced);
+	}
+	return 0;
+}
+
+static int tunnels_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, tunnels_show, NULL);
+}
+
+static const struct proc_ops tunnels_proc_ops = {
+	.proc_open = tunnels_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
+};
+
 static int tnl_show(struct seq_file *s, void *private)
 {
 	struct npu_tnl_info *tnl_info;
@@ -85,16 +163,21 @@ int mtk_npu_procfs_init(struct platform_device *pdev)
 	if (!proc_create("tnl", S_IFREG | 0444, npu_proc_root, &tnl_proc_ops))
 		goto err_out;
 
+	if (!proc_create("tunnels", 0400, npu_proc_root, &tunnels_proc_ops) ||
+	    !proc_create("telemetry-capabilities", 0400, npu_proc_root,
+			 &telemetry_capabilities_ops))
+		goto err_out;
 	return 0;
 
 err_out:
-	remove_proc_entry("npu", NULL);
+	remove_proc_subtree("npu", NULL);
+	npu_proc_root = NULL;
 
 	return -ENOMEM;
 }
 
 void mtk_npu_procfs_deinit(struct platform_device *pdev)
 {
-	remove_proc_entry("tnl", npu_proc_root);
-	remove_proc_entry("npu", NULL);
+	remove_proc_subtree("npu", NULL);
+	npu_proc_root = NULL;
 }

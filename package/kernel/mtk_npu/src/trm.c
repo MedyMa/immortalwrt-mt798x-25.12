@@ -253,8 +253,7 @@ int mtk_trm_cpu_utilization(enum core_id core, u32 *cpu_utilization)
 	if ((unsigned int)core > CORE_MGMT || !cpu_utilization)
 		return -EINVAL;
 
-	if (!mtk_npu_mcu_alive()) {
-		NPU_ERR("mcu not alive\n");
+	if (!mtk_npu_is_ready() || !mtk_npu_mcu_alive()) {
 		return -EAGAIN;
 	}
 
@@ -273,7 +272,7 @@ int mtk_trm_cpu_utilization(enum core_id core, u32 *cpu_utilization)
 			    &result,
 			    trm_cpu_utilization_ret_handler);
 	if (ret) {
-		NPU_ERR("send CPU_UTILIZATION cmd failed(%d)\n", ret);
+		dev_warn_ratelimited(npu.dev, "send CPU_UTILIZATION cmd failed(%d)\n", ret);
 		return ret;
 	}
 

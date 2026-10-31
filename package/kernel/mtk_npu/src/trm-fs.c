@@ -35,10 +35,10 @@ static int cpu_utilization_show(struct seq_file *s, void *private)
 		ret = mtk_trm_cpu_utilization(core, &cpu_utilization);
 		if (ret) {
 			if (core <= CORE_OFFLOAD_3) {
-				NPU_ERR("fetch Core%d cpu utilization failed(%d)\n",
+				dev_warn_ratelimited(npu.dev, "fetch Core%d cpu utilization failed(%d)\n",
 					 core, ret);
 			} else {
-				NPU_ERR("fetch CoreM cpu utilization failed(%d)\n",
+				dev_warn_ratelimited(npu.dev, "fetch CoreM cpu utilization failed(%d)\n",
 					 ret);
 			}
 
@@ -153,5 +153,8 @@ int mtk_npu_trm_fs_init(void)
 void mtk_npu_trm_fs_deinit(void)
 {
 	remove_proc_entry("cpu-utilization", npu_proc_root);
-	relay_close(relay);
+	if (relay) {
+		relay_close(relay);
+		relay = NULL;
+	}
 }

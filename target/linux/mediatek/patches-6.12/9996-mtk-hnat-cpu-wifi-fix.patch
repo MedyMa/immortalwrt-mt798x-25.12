@@ -13,14 +13,14 @@ fallback.
 
 --- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
 +++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
-@@ -28,6 +28,7 @@
- #include <net/netfilter/nf_conntrack_acct.h>
+@@ -33,6 +33,7 @@
  #include <net/route.h>
  #include <net/addrconf.h>
 +#include <net/gso.h>
  
  #include "nf_hnat_mtk.h"
  #include "hnat_api.h"
+ #include "hnat.h"
 @@ -1378,44 +1378,115 @@ static unsigned int is_ppe_support_type
  	return 0;
  }

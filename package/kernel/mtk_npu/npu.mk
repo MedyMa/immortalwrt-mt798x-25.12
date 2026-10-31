@@ -56,6 +56,7 @@ define KernelPackage/npu
   DEPENDS:= \
 	@(TARGET_mediatek_filogic||TARGET_mediatek_filogic_a73||TARGET_mediatek_mt7988) \
 	+kmod-pce \
+	+mtk-tops-accounting \
 	+@KERNEL_RELAY \
 	+@MTK_NPU
 ifeq ($(CONFIG_MTK_NPU_PPP),y)

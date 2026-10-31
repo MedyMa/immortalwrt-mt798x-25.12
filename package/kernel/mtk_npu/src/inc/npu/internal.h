@@ -20,6 +20,9 @@ struct npu {
 
 extern struct npu npu;
 
+/* Host initialization state, distinct from firmware packet activity. */
+bool mtk_npu_is_ready(void);
+
 #define NPU_DBG(fmt, ...)		dev_dbg(npu.dev, fmt, ##__VA_ARGS__)
 #define NPU_INFO(fmt, ...)		dev_info(npu.dev, fmt, ##__VA_ARGS__)
 #define NPU_NOTICE(fmt, ...)		dev_notice(npu.dev, fmt, ##__VA_ARGS__)

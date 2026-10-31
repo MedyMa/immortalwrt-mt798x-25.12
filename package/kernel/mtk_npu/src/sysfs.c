@@ -24,6 +24,19 @@ static const char *npu_role_name[__NPU_ROLE_TYPE_MAX] = {
 	[NPU_ROLE_TYPE_CLUSTER] = "npu-offload",
 };
 
+/* Read host state without mailbox requests or hardware counter drains. */
+static ssize_t state_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf,
+		"{\"schema\":1,\"firmware_ready\":%s,\"mcu_alive\":%s,"
+		"\"registered_tunnel_types\":%u,\"host_counter_unit\":\"events\","
+		"\"traffic_byte_source\":\"native_HNAT_conntrack\","
+		"\"packet_offload_verified\":false}\n",
+		mtk_npu_is_ready() ? "true" : "false",
+		mtk_npu_mcu_alive() ? "true" : "false",
+		mtk_npu_tnl_type_get_offload_num());
+}
+
 static ssize_t fw_log_level_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	enum npu_fw_log_level level;
@@ -174,10 +187,12 @@ static ssize_t wdt_store(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR_RW(fw_log_level);
 static DEVICE_ATTR_RO(fw_info);
+static DEVICE_ATTR_RO(state);
 static DEVICE_ATTR_WO(trm);
 static DEVICE_ATTR_WO(wdt);
 
 static struct attribute *mcu_attributes[] = {
+	&dev_attr_state.attr,
 	&dev_attr_fw_log_level.attr,
 	&dev_attr_fw_info.attr,
 	&dev_attr_trm.attr,

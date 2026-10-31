@@ -135,7 +135,11 @@ mtwifi_vif_sta_set_data() {
 #
 
 mtwifi_check_ap() {
-	has_ap=1
+	local disabled
+	json_select config
+	json_get_var disabled disabled
+	json_select ..
+	[ "$disabled" = "1" ] || has_ap=1
 }
 
 mtwifi_check_sta() {
@@ -705,7 +709,11 @@ mac80211_prepare_vif() {
 
 	json_select config
 
-	json_get_vars ifname mode ssid wds powersave macaddr enable wpa_psk_file vlan_file
+	json_get_vars ifname mode ssid wds powersave macaddr enable wpa_psk_file vlan_file disabled
+	if [ "$disabled" = "1" ]; then
+		json_select ..
+		return 0
+	fi
 
 	# MTK: config 里没有 ifname 时，用驱动分配的接口名
 	[ -z "$ifname" ] && ifname="$mtwifi_ifname"
@@ -819,8 +827,12 @@ mtwifi_hostapd_start() {
 		rm -f "$pid_file"
 	fi
 
-	/usr/sbin/hostapd -B -P "$pid_file" "$conf_file"
+	if ! /usr/sbin/hostapd -B -P "$pid_file" "$conf_file"; then
+		logger -t "netifd-mtwifi" "hostapd failed for $phy; see the preceding hostapd error"
+		return 1
+	fi
 	logger -t "netifd-mtwifi" "hostapd started for $phy"
+	return 0
 }
 
 mtwifi_hostapd_wps_er_start() {
@@ -1185,15 +1197,25 @@ drv_mtwifi_setup() {
 	for_each_interface "sta" mtwifi_check_sta
 
 	# 3a. AP 侧生成 hostapd 配置
-	[ -n "$has_ap" ] && mac80211_hostapd_setup_base "$phy"
-	[ -n "$has_ap" ] && for_each_interface "ap" mac80211_prepare_vif
+	if [ -n "$has_ap" ]; then
+		if ! mac80211_hostapd_setup_base "$phy"; then
+			wireless_setup_failed "MTWIFI_HOSTAPD_CONFIG_FAILED"
+			lock -u "$LOCK_FILE"
+			return 1
+		fi
+		for_each_interface "ap" mac80211_prepare_vif
+	fi
 
 	# 3b. STA 侧生成 wpa_supplicant 配置并 interface_add + 挂 scan action
 	[ -n "$has_sta" ] && for_each_interface "sta" mtwifi_supplicant_setup_vif
 
 	# 4. 起 hostapd + 挂 WPS ER
-	if [ -n "$has_ap" ] && [ -f "$hostapd_conf_file" ]; then
-		mtwifi_hostapd_start "$phy"
+	if [ -n "$has_ap" ]; then
+		if [ ! -s "$hostapd_conf_file" ] || ! mtwifi_hostapd_start "$phy"; then
+			wireless_setup_failed "MTWIFI_HOSTAPD_START_FAILED"
+			lock -u "$LOCK_FILE"
+			return 1
+		fi
 		mtwifi_hostapd_wps_er_start "$phy"
 	fi
 

@@ -9,7 +9,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME:=wifi-profile
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_BUILD_DEPENDS:=
 PKG_FILE_DEPENDS:=
 PKG_LICENSE:=GPL-2.0
@@ -33,7 +33,9 @@ PKG_KCONFIG:= \
 	MTK_WIFI7_2ADIE_TRIBAND
 
 PKG_CONFIG_DEPENDS:=$(foreach c, $(PKG_KCONFIG),$(if $(CONFIG_$c),CONFIG_$(c)))
-PKG_CONFIG_DEPENDS+=CONFIG_TARGET_mediatek_filogic_DEVICE_bananapi_bpi-r4
+PKG_CONFIG_DEPENDS+= \
+	CONFIG_TARGET_mediatek_filogic_DEVICE_bananapi_bpi-r4 \
+	CONFIG_TARGET_mediatek_filogic_a73_DEVICE_bananapi_bpi-r4
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -212,7 +214,8 @@ ifneq ($(CONFIG_MTK_WIFI7_PROFILING_SUPPORT),y)
 	# Example combination Eagle.
 	if [ "$$(CONFIG_first_card_name)" = "MT7990" -o "$$(CONFIG_second_card_name)" = "MT7990" ] ; then \
 		$(INSTALL_DATA) ./files/mt7990/* $(1)/etc/wireless/mediatek/; \
-		if [ "$$(CONFIG_TARGET_mediatek_filogic_DEVICE_bananapi_bpi-r4)" = "y" ] && \
+		if { [ "$$(CONFIG_TARGET_mediatek_filogic_DEVICE_bananapi_bpi-r4)" = "y" ] || \
+		     [ "$$(CONFIG_TARGET_mediatek_filogic_a73_DEVICE_bananapi_bpi-r4)" = "y" ]; } && \
 		   [ "$$(CONFIG_MTK_WIFI7_SKU_TYPE)" = "BE14000" ]; then \
 			cat ./files/bpi-r4-be14/l1profile-extra.dat >> $(1)/etc/wireless/mediatek/l1profile.dat; \
 			sed -i 's/^E2pAccessMode=.*/E2pAccessMode=1/' $(1)/etc/wireless/mediatek/mt7990.1.dat; \

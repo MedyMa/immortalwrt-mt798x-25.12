@@ -47,6 +47,12 @@ struct npu_init_data {
 };
 
 struct npu npu;
+static bool npu_ready;
+
+bool mtk_npu_is_ready(void)
+{
+	return READ_ONCE(npu_ready);
+}
 
 static int mtk_npu_post_init(struct platform_device *pdev)
 {
@@ -69,7 +75,7 @@ static int mtk_npu_post_init(struct platform_device *pdev)
 	ret = mtk_npu_tnl_offload_post_init(pdev);
 	if (ret) {
 		NPU_ERR("tnl offload post init failed: %d\n", ret);
-		goto err_logger_deinit;
+		goto err_mcu_tear_down;
 	}
 
 	ret = mtk_npu_netevent_register(pdev);
@@ -241,6 +247,7 @@ static int mtk_npu_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_misc_deinit;
 
+	WRITE_ONCE(npu_ready, true);
 	NPU_INFO("init done\n");
 	return ret;
 
@@ -268,6 +275,7 @@ static int mtk_npu_remove(struct platform_device *pdev)
 static void mtk_npu_remove(struct platform_device *pdev)
 #endif /* KERNEL_VERSION(6, 11, 0) > LINUX_VERSION_CODE */
 {
+	WRITE_ONCE(npu_ready, false);
 	mtk_npu_trm_fs_deinit();
 
 	mtk_npu_debugfs_deinit(pdev);
@@ -293,6 +301,8 @@ static void mtk_npu_remove(struct platform_device *pdev)
 	mtk_npu_tnl_offload_deinit(pdev);
 
 	mtk_npu_mcu_tear_down(pdev);
+
+	mtk_npu_net_core_deinit(pdev);
 
 	mtk_npu_netsys_deinit(pdev);
 
