@@ -9,7 +9,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME:=wifi-profile
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_BUILD_DEPENDS:=
 PKG_FILE_DEPENDS:=
 PKG_LICENSE:=GPL-2.0
@@ -219,6 +219,8 @@ ifneq ($(CONFIG_MTK_WIFI7_PROFILING_SUPPORT),y)
 		   [ "$$(CONFIG_MTK_WIFI7_SKU_TYPE)" = "BE14000" ]; then \
 			cat ./files/bpi-r4-be14/l1profile-extra.dat >> $(1)/etc/wireless/mediatek/l1profile.dat; \
 			sed -i 's/^E2pAccessMode=.*/E2pAccessMode=1/' $(1)/etc/wireless/mediatek/mt7990.1.dat; \
+			$(INSTALL_DIR) $(1)/lib/preinit; \
+			$(INSTALL_DATA) ./files/bpi-r4-be14/81_be14_profile_fixup $(1)/lib/preinit/; \
 		fi; \
 		if [ "$$(CONFIG_MTK_WIFI7_SKU_TYPE)" = "BE19000" ] ; then \
 			sed -i "s/MT7990_EEPROM_iFEM233.bin/MT7990_EEPROM.bin/" $(1)/etc/wireless/mediatek/l1profile.dat; \

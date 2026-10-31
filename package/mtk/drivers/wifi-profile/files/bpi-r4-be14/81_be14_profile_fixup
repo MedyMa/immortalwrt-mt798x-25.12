@@ -1,0 +1,57 @@
+# Update known old defaults after sysupgrade restores /etc/wireless, before
+# the vendor modules load. Custom profiles and user radio settings are kept.
+bpi_r4_be14_profile_fixup() {
+	local base=/etc/wireless rom=/rom/etc/wireless
+	local init=mediatek/mt7990.1.dat work pending old_l1=0
+
+	[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = 'bananapi,bpi-r4' ] || return 0
+	[ -f "$rom/$init" ] && [ -f "$rom/l1profile.dat" ] || return 0
+	# The fixed BE14 image is the authority; other SKUs must never migrate.
+	grep -qx 'E2pAccessMode=1' "$rom/$init" || return 0
+	grep -qx 'INDEX1_band=6g' "$rom/l1profile.dat" || return 0
+	[ -f "$base/l1profile.dat" ] && [ ! -L "$base/l1profile.dat" ] || return 0
+
+	work="$(mktemp -d /tmp/be14-profile.XXXXXX)" || return 0
+	if ! sed '/^INDEX1=/d; /^INDEX1_/d' "$rom/l1profile.dat" > "$work/rom-l1"; then
+		rm -f "$work/rom-l1"
+		rmdir "$work"
+		return 0
+	fi
+	if cmp -s "$work/rom-l1" "$base/l1profile.dat"; then
+		old_l1=1
+	elif ! cmp -s "$rom/l1profile.dat" "$base/l1profile.dat"; then
+		# EEPROM offsets, paths and radio mappings may be customized here.
+		rm -f "$work/rom-l1"
+		rmdir "$work"
+		return 0
+	fi
+	if [ -f "$base/$init" ] && [ ! -L "$base/$init" ] &&
+	   grep -qx 'E2pAccessMode=2' "$base/$init"; then
+		# WHNAT may have been toggled independently; preserve its value.
+		if sed '/^E2pAccessMode=/d; /^WHNAT=/d' "$rom/$init" > "$work/rom-init" &&
+		   sed '/^E2pAccessMode=/d; /^WHNAT=/d' "$base/$init" > "$work/old-init" &&
+		   cmp -s "$work/rom-init" "$work/old-init"; then
+			if sed -i 's/^E2pAccessMode=2$/E2pAccessMode=1/' "$base/$init"; then
+				echo '<6>be14: migrated the old default EEPROM access mode' > /dev/kmsg
+			fi
+		fi
+	fi
+
+	if [ "$old_l1" = 1 ]; then
+		# Stage on the same filesystem so replacement is atomic.
+		pending="$(mktemp "$base/l1profile.dat.be14.XXXXXX")"
+		if [ -n "$pending" ]; then
+			if cp -p "$base/l1profile.dat" "$pending" &&
+				cat "$rom/l1profile.dat" > "$pending" &&
+				mv -f "$pending" "$base/l1profile.dat"; then
+				echo '<6>be14: restored the missing default second PCIe radio profile' > /dev/kmsg
+			fi
+			rm -f "$pending"
+		fi
+	fi
+	rm -f "$work/rom-init" "$work/old-init" "$work/rom-l1"
+	rmdir "$work"
+	return 0
+}
+
+[ "$INITRAMFS" = 1 ] || boot_hook_add preinit_main bpi_r4_be14_profile_fixup
