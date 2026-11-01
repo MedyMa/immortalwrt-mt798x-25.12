@@ -9,9 +9,8 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=crypto-eip
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 # MediaTek public SDK c58bfb6bc8462ac51adc59d6ed6b9dbd7781f3a2.
-PKG_SOURCE_VERSION:=c58bfb6bc8462ac51adc59d6ed6b9dbd7781f3a2
 PKG_BUILD_DEPENDS:=pce
 PKG_FILE_DEPENDS:=$(CURDIR)/src/ $(CURDIR)/firmware/
 
