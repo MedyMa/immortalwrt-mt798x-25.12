@@ -7,7 +7,7 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=mtwifi-cfg
 PKG_LICENSE:=GPL-2.0+
 PKG_VERSION:=1
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -16,7 +16,7 @@ define Package/mtwifi-cfg
   CATEGORY:=MTK Properties
   SUBMENU:=Applications
   TITLE:=mtwifi configure scripts for mt79xx
-  DEPENDS:=+iw +iwinfo +mwctl +wifi-dats +lua-cjson +libuci-lua +luci-lib-nixio +datconf-lua @!PACKAGE_luci-app-mtk @!PACKAGE_wifi-profile
+  DEPENDS:=+iw +iwinfo +mwctl +wifi-dats +wifi-scripts +lua-cjson +libuci-lua +luci-lib-nixio +datconf-lua @!PACKAGE_luci-app-mtk @!PACKAGE_wifi-profile
 endef
 
 define Build/Compile

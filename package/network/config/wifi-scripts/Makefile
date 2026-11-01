@@ -9,7 +9,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=wifi-scripts
 PKG_VERSION:=1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0
 
 PKG_MAINTAINER:=Felix Fietkau <nbd@nbd.name>
@@ -56,16 +56,12 @@ define Package/wifi-scripts/install
 		rm -f $(1)/lib/wifi/mac80211.uc; \
 		rm -f $(1)/lib/netifd/hostapd.sh; \
 		rm -f $(1)/lib/netifd/netifd-wireless.sh; \
-		rm -f $(1)/lib/netifd/wireless.uc; \
-		rm -f $(1)/lib/netifd/wireless-device.uc; \
-		rm -f $(1)/usr/share/ucode/wifi/utils.uc; \
 		rm -f $(1)/lib/netifd/wireless/mac80211.sh)
+	# netifd's ucode dispatcher also loads vendor shell drivers through dump,
+	# setup and teardown. It must remain installed when mtwifi-cfg is selected.
 	$(if $(CONFIG_PACKAGE_mtwifi-cfg), \
 		rm -f $(1)/lib/wifi/mac80211.uc; \
 		rm -f $(1)/lib/netifd/hostapd.sh; \
-		rm -f $(1)/lib/netifd/wireless.uc; \
-		rm -f $(1)/lib/netifd/wireless-device.uc; \
-		rm -f $(1)/usr/share/ucode/wifi/utils.uc; \
 		rm -f $(1)/lib/netifd/wireless/mac80211.sh)
 ifeq ($(CONFIG_WIFI_SCRIPTS_UCODE),y)
 	$(CP) ./files-ucode/* $(1)/

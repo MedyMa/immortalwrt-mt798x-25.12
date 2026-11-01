@@ -2255,6 +2255,13 @@ static void dbg_dump_entry(struct seq_file *m, struct foe_entry *entry,
 	}
 }
 
+static int hnat_control_abi_show(struct seq_file *m, void *private)
+{
+	seq_puts(m, "schema=1\nipv6_command=11\nbind_rate_command=1\n");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(hnat_control_abi);
+
 static int hnat_stats_read(struct seq_file *m, void *private)
 {
 	struct mtk_hnat *h = hnat_priv;
@@ -2790,7 +2797,7 @@ static const struct file_operations hnat_mape_toggle_fops = {
 
 static int hnat_hook_toggle_read(struct seq_file *m, void *private)
 {
-	pr_info("value=%d, hook is %s now!\n", hook_toggle, (hook_toggle) ? "enabled" : "disabled");
+	seq_printf(m, "%s\n", READ_ONCE(hook_toggle) ? "enabled" : "disabled");
 
 	return 0;
 }
@@ -4398,6 +4405,8 @@ int hnat_init_debugfs(struct mtk_hnat *h)
 			    &hnat_entry_fops);
 	debugfs_create_file("hnat_stats", 0444, root, h,
 			    &hnat_stats_fops);
+	debugfs_create_file("control_abi", 0444, root, h,
+			    &hnat_control_abi_fops);
 	debugfs_create_file("hnat_setting", 0644, root, h,
 			    &hnat_setting_fops);
 	debugfs_create_file("mcast_table", 0444, root, h,

@@ -32,7 +32,7 @@ hnat_module_loaded() {
 }
 
 load_hnat_module() {
-	try_modprobe "mtkhnat" "mediatek_hnat"
+	hnat_module_loaded || try_modprobe "mtkhnat" "mediatek_hnat"
 }
 
 # >>> NEW: 只关真正会残留硬件状态的开关
