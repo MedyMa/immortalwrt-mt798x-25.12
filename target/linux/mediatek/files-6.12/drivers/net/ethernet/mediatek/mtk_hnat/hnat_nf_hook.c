@@ -2340,19 +2340,25 @@ int hnat_bind_crypto_entry(struct sk_buff *skb, const struct net_device *dev, in
 	const struct tcpudphdr *pptr;
 	u32 gmac = NR_DISCARD;
 	int port_id = 0;
+	unsigned int mac_idx;
 	int udp = 0;
 	u32 qid;
-	struct mtk_mac *mac;
+	struct mtk_mac *mac = NULL;
 	struct flow_offload_hw_path hw_path = { .dev = (struct net_device *) dev,
 						.virt_dev = (struct net_device *) dev };
 	u16 h_proto = 0;
+
+	if (!skb || !dev || !hnat_priv || !hnat_priv->eth)
+		return 0;
 
 	if (!tnl_toggle) {
 		pr_notice("tnl_toggle is disable now!|\n");
 		return -1;
 	}
 
-	if (!skb_hnat_is_hashed(skb) || skb_hnat_ppe(skb) >= CFG_PPE_NUM)
+	if (!skb_hnat_is_hashed(skb) || skb_hnat_ppe(skb) >= CFG_PPE_NUM ||
+	    skb_hnat_entry(skb) >= hnat_priv->foe_etry_num ||
+	    !hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)])
 		return 0;
 
 	foe = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
@@ -2369,10 +2375,28 @@ int hnat_bind_crypto_entry(struct sk_buff *skb, const struct net_device *dev, in
 
 	hnat_get_filled_unbind_entry(skb, &entry);
 
+	/* The XFRM inline provider has resolved the real outer Ethernet header.
+	 * Native bridge path lookup requires that destination and ETH flag before
+	 * ndo_flow_offload_check, otherwise a WAN bridge remains a virtual netdev.
+	 */
+	if (dev->type == ARPHRD_ETHER) {
+		if (!skb_mac_header_was_set(skb) ||
+		    skb_mac_header(skb) < skb->head ||
+		    skb_mac_header(skb) + ETH_HLEN > skb_tail_pointer(skb) ||
+		    !is_valid_ether_addr(eth_hdr(skb)->h_dest))
+			return 0;
+		hw_path.flags |= BIT(DEV_PATH_ETHERNET);
+		ether_addr_copy(hw_path.eth_dest, eth_hdr(skb)->h_dest);
+		ether_addr_copy(hw_path.eth_src, eth_hdr(skb)->h_source);
+	}
 	if (dev->netdev_ops->ndo_flow_offload_check) {
-		dev->netdev_ops->ndo_flow_offload_check(&hw_path);
+		if (dev->netdev_ops->ndo_flow_offload_check(&hw_path))
+			return 0;
 		dev = (IS_GMAC1_MODE) ? hw_path.virt_dev : hw_path.dev;
 	}
+
+	if (!dev)
+		return 0;
 
 	if (hw_path.flags & BIT(DEV_PATH_PPPOE)) {
 		memcpy(eth.h_dest, hw_path.eth_dest, ETH_ALEN);
@@ -2540,7 +2564,15 @@ hnat_skip_fill_inner:
 				return -1;
 		}
 
-		mac = netdev_priv(master_dev);
+		/* Only the driver's own physical netdevs have mtk_mac storage. */
+		for (mac_idx = 0; mac_idx < MTK_MAX_DEVS; mac_idx++) {
+			if (hnat_priv->eth->netdev[mac_idx] != master_dev)
+				continue;
+			mac = hnat_priv->eth->mac[mac_idx];
+			break;
+		}
+		if (!mac)
+			return -EOPNOTSUPP;
 		gmac = HNAT_GMAC_FP(mac->id);
 	} else {
 		pr_notice("Unknown case of dp, iif=%x --> %s\n", skb_hnat_iface(skb), dev->name);

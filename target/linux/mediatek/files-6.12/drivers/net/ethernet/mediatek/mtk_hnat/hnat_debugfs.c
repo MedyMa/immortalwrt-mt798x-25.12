@@ -2871,8 +2871,10 @@ static const struct file_operations hnat_mcast_hook_toggle_fops = {
 
 static int hnat_tnl_toggle_read(struct seq_file *m, void *private)
 {
-	pr_info("value=%d, tnl is %s now!\n",
-		tnl_toggle, (tnl_toggle) ? "enabled" : "disabled");
+	int enabled = READ_ONCE(tnl_toggle);
+
+	seq_printf(m, "value=%d, tnl is %s now!\n",
+		enabled, (enabled) ? "enabled" : "disabled");
 
 	return 0;
 }

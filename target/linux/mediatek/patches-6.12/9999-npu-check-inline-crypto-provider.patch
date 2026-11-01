@@ -1,0 +1,18 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] net: mediatek: reject encrypted NPU flow without crypto provider
+
+The inline EIP197 provider is optional. Match the plain IPsec flow action's
+guard before calling its CDRT callback for an encrypted NPU tunnel.
+
+--- a/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
++++ b/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
+@@ -665,6 +665,9 @@
+ 				struct xfrm_state *xs_old = dst_xfrm(act->npu.dst);
+ 				struct xfrm_state *xs;
+ 
++				if (!mtk_flow_offload_get_cdrt)
++					return -EOPNOTSUPP;
++
+ 				if (!xs_old)
+ 					return -EOPNOTSUPP;
+ 				/*
