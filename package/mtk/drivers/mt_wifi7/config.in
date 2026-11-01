@@ -1182,7 +1182,12 @@ config MTK_WIFI7_BAND_STEERING
 
 config MTK_WIFI7_LED_CONTROL_SUPPORT
 	bool "LED Control Support"
+	default y if TARGET_mediatek_filogic_DEVICE_bananapi_bpi-r4 && MTK_WIFI7_SKU_TYPE = "BE14000"
+	default y if TARGET_mediatek_filogic_a73_DEVICE_bananapi_bpi-r4 && MTK_WIFI7_SKU_TYPE = "BE14000"
 	default n
+	help
+	  Enable the vendor LED initialization and radio status control. The
+	  BPI-R4 BE14000 card uses the MT7990 three-band LED GPIO mapping.
 
 config MTK_WIFI7_WLAN_HOOK
        bool "WLAN hook Support"
