@@ -7,7 +7,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=autocore
 PKG_FLAGS:=nonshared
-PKG_RELEASE:=42
+PKG_RELEASE:=43
 
 PKG_CONFIG_DEPENDS:= \
 	CONFIG_TARGET_bcm27xx \
@@ -24,6 +24,8 @@ define Package/autocore
     +TARGET_bcm27xx:bcm27xx-utils \
     +TARGET_bcm53xx:nvram \
     +TARGET_mediatek:mhz \
+    +TARGET_mediatek:coreutils-timeout \
+    +TARGET_mediatek:wireless-tools \
     +TARGET_x86:ethtool \
     +TARGET_x86:lm-sensors
 endef
