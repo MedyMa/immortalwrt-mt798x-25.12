@@ -66,7 +66,7 @@ define KernelPackage/crypto-eip/description
   Enable crypto engine to accelerate encrypt/decrypt. Support look aside
   mode (semi-HW) and inline mode (pure-HW). Look aside mode is bind with
   Linux Crypto API and support AES, DES, SHA1, and SHA2 algorithms. In-
-  line mode only support ESP Tunnel mode (single tunnel) now.
+  line mode supports XFRM ESP packet offload for supported MTK devices.
 endef
 
 define KernelPackage/crypto-eip/config
@@ -74,6 +74,7 @@ define KernelPackage/crypto-eip/config
 endef
 
 define KernelPackage/crypto-eip-inline
+  DEFAULT:=y if CRYPTO_OFFLOAD_INLINE
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:= EIP-197 Crypto Engine Inline Driver
@@ -92,7 +93,7 @@ define KernelPackage/crypto-eip-inline
 endef
 
 define KernelPackage/crypto-eip-inline/description
-  EIP197 inline mode. HW offload for IPsec ESP Tunnel mode.
+  EIP197 inline ESP packet offload in tunnel or transport mode.
 endef
 
 define KernelPackage/crypto-eip-autoload

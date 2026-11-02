@@ -46,6 +46,7 @@ endif
 
 # crypto-eip-ddk kernel package configuration
 define KernelPackage/crypto-eip-ddk
+  DEFAULT:=y if CRYPTO_OFFLOAD_INLINE
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:= MTK EIP DDK
@@ -58,6 +59,7 @@ define KernelPackage/crypto-eip-ddk/description
 endef
 
 define KernelPackage/crypto-eip-ddk-ksupport
+  DEFAULT:=y if CRYPTO_OFFLOAD_INLINE
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:= MTK EIP DDK Kernel Support
@@ -72,6 +74,7 @@ define KernelPackage/crypto-eip-ddk-ksupport/description
 endef
 
 define KernelPackage/crypto-eip-ddk-ctrl
+  DEFAULT:=y if CRYPTO_OFFLOAD_INLINE
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:= MTK EIP DDK Global Control Driver
@@ -86,6 +89,7 @@ define KernelPackage/crypto-eip-ddk-ctrl/description
 endef
 
 define KernelPackage/crypto-eip-ddk-ctrl-app
+  DEFAULT:=y if CRYPTO_OFFLOAD_INLINE
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:= MTK EIP DDK Global Control App
@@ -100,6 +104,7 @@ define KernelPackage/crypto-eip-ddk-ctrl-app/description
 endef
 
 define KernelPackage/crypto-eip-ddk-engine
+  DEFAULT:=y if CRYPTO_OFFLOAD_INLINE
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:= MTK EIP DDK engine

@@ -10,6 +10,7 @@ EIP_PKGS+= \
 	crypto-eip-inline-fw
 
 define Package/crypto-eip-inline-fw
+  DEFAULT:=y if CRYPTO_OFFLOAD_INLINE
   TITLE:=Mediatek EIP Firmware
   SECTION:=firmware
   CATEGORY:=Firmware

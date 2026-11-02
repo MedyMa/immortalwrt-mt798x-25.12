@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mtk-npu-tunnel
 PKG_VERSION:=0.1
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 PKGARCH:=all
 
@@ -15,15 +15,15 @@ define Package/mtk-npu-tunnel
   SUBMENU:=VPN
   TITLE:=MT7988 NPU L2TP/IPsec policy controller
   DEPENDS:=@TARGET_mediatek_filogic_a73 \
-	+firewall4 +ip-full +uci +ubus +coreutils-timeout \
+	firewall4 +ip-full +uci +ubus +coreutils-timeout \
 	+strongswan-default +strongswan-mod-kdf +strongswan-swanctl \
 	+xl2tpd +ppp-mod-pppol2tp +kmod-nft-xfrm \
-	+kmod-npu +kmod-npu-autoload +kmod-mediatek_hnat \
-	+kmod-npu-nf_hnat +kmod-npu-nf_hnat-autoload +npu-rebb-fw \
-	+kmod-crypto-eip +kmod-crypto-eip-inline +kmod-crypto-eip-autoload \
-	+crypto-eip-inline-fw \
-	+@CRYPTO_OFFLOAD_INLINE +@CRYPTO_XFRM_OFFLOAD_MTK_PCE \
-	+@MTK_NPU_L2TP +@MTK_NPU_L2TP_V2 +@MTK_NPU_PPP
+	kmod-npu kmod-npu-autoload kmod-mediatek_hnat \
+	kmod-npu-nf_hnat kmod-npu-nf_hnat-autoload npu-rebb-fw \
+	kmod-crypto-eip kmod-crypto-eip-inline kmod-crypto-eip-autoload \
+	crypto-eip-inline-fw \
+	@CRYPTO_OFFLOAD_INLINE @CRYPTO_XFRM_OFFLOAD_MTK_PCE \
+	@MTK_NPU_L2TP @MTK_NPU_L2TP_V2 @MTK_NPU_PPP
 endef
 
 define Package/mtk-npu-tunnel/description
