@@ -30,3 +30,5 @@ crypto-eip-ddk-ksupport-y += ../../kit/eip197/eip201.o
 crypto-eip-ddk-ksupport-y += ../../device/device_generic.o
 crypto-eip-ddk-ksupport-y += ../../device/lkm/of/lkm.o
 crypto-eip-ddk-ksupport-y += ../../device/lkm/of/device_lkm.o
+
+include $(src)/../module-objects.mk

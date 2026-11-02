@@ -2107,88 +2107,105 @@ error_ret:
 	return sa_host_addr.p;
 }
 
+static bool mtk_ddk_pec_uninit_ring(unsigned int ring)
+{
+	unsigned int tries = MTK_EIP197_INLINE_NOF_TRIES;
+	PEC_Status_t status;
+
+	while (tries--) {
+		status = PEC_UnInit(ring);
+		if (status == PEC_STATUS_OK)
+			return true;
+		if (status != PEC_STATUS_BUSY) {
+			CRYPTO_ERR("PEC interface %u could not deinit, error=%d\n", ring, status);
+			return false;
+		}
+		udelay(MTK_EIP197_INLINE_RETRY_DELAY_MS * 1000);
+	}
+	CRYPTO_ERR("PEC interface %u could not deinit, timeout\n", ring);
+	return false;
+}
+
 int mtk_ddk_pec_init(void)
 {
 	PEC_InitBlock_t pec_init_blk = {0, 0, false};
 	PEC_Capabilities_t pec_cap;
-	PEC_Status_t pec_sta;
-	u32 i = MTK_EIP197_INLINE_NOF_TRIES;
+	PEC_Status_t pec_sta = PEC_STATUS_BUSY;
+	unsigned int initialized = 0, tries;
+	int ret = -EIO;
 	u32 j;
 #ifdef PEC_PCL_EIP197
 	PCL_Status_t pcl_sta;
+	bool pcl_ready = false, dtl_ready = false;
 #endif
 
 #ifdef PEC_PCL_EIP197
 	pcl_sta = PCL_Init(PCL_INTERFACE_ID, 1);
 	if (pcl_sta != PCL_STATUS_OK) {
 		CRYPTO_ERR("PCL could not be initialized, error=%d\n", pcl_sta);
-		return 0;
+		goto err;
 	}
+	pcl_ready = true;
 
 	pcl_sta = PCL_DTL_Init(PCL_INTERFACE_ID);
 	if (pcl_sta != PCL_STATUS_OK) {
 		CRYPTO_ERR("PCL-DTL could not be initialized, error=%d\n", pcl_sta);
-		return -1;
+		goto err;
 	}
+	dtl_ready = true;
 #endif
 	for (j = 0; j < PEC_MAX_INTERFACE_NUM; j++) {
-		while (i) {
+		tries = MTK_EIP197_INLINE_NOF_TRIES;
+		while (tries--) {
 			pec_sta = PEC_Init(j, &pec_init_blk);
 			if (pec_sta == PEC_STATUS_OK) {
 				CRYPTO_INFO("PEC_INIT interface %d ok!\n", j);
 				break;
-			} else if (pec_sta != PEC_STATUS_OK && pec_sta != PEC_STATUS_BUSY) {
-				return pec_sta;
+			} else if (pec_sta != PEC_STATUS_BUSY) {
+				CRYPTO_ERR("PEC interface %u could not initialize, error=%d\n", j, pec_sta);
+				goto err;
 			}
 
 			mdelay(MTK_EIP197_INLINE_RETRY_DELAY_MS);
-			i--;
 		}
-	}
-
-	if (!i) {
-		CRYPTO_ERR("PEC could not be initialized: %d\n", pec_sta);
-		return pec_sta;
+		if (pec_sta != PEC_STATUS_OK) {
+			CRYPTO_ERR("PEC interface %u could not initialize, timeout\n", j);
+			ret = -ETIMEDOUT;
+			goto err;
+		}
+		initialized++;
 	}
 
 	pec_sta = PEC_Capabilities_Get(&pec_cap);
 	if (pec_sta != PEC_STATUS_OK) {
 		CRYPTO_ERR("PEC capability could not be obtained: %d\n", pec_sta);
-#ifdef PEC_PCL_EIP197
-		PCL_UnInit(PCL_INTERFACE_ID);
-#endif
-		return pec_sta;
+		goto err;
 	}
 
 	CRYPTO_INFO("PEC Capabilities: %s\n", pec_cap.szTextDescription);
 
 	return 0;
+
+err:
+	/* Only tear down rings and classifier resources acquired by this call. */
+	while (initialized)
+		mtk_ddk_pec_uninit_ring(--initialized);
+#ifdef PEC_PCL_EIP197
+	if (dtl_ready)
+		PCL_DTL_UnInit(PCL_INTERFACE_ID);
+	if (pcl_ready)
+		PCL_UnInit(PCL_INTERFACE_ID);
+#endif
+	return ret;
 }
 
 void mtk_ddk_pec_deinit(void)
 {
-	unsigned int LoopCounter = MTK_EIP197_INLINE_NOF_TRIES;
-	PEC_Status_t PEC_Status;
 	int j;
 
 	for (j = 0; j < PEC_MAX_INTERFACE_NUM; j++) {
-		while (LoopCounter > 0) {
-			PEC_Status = PEC_UnInit(j);
-			if (PEC_Status == PEC_STATUS_OK)
-				break;
-			else if (PEC_Status != PEC_STATUS_OK && PEC_Status != PEC_STATUS_BUSY) {
-				CRYPTO_ERR("PEC could not deinit, error=%d\n", PEC_Status);
-				return;
-			}
-			// Wait for MTK_EIP197_INLINE_RETRY_DELAY_MS milliseconds
-			udelay(MTK_EIP197_INLINE_RETRY_DELAY_MS * 1000);
-			LoopCounter--;
-		}
-		// Check for timeout
-		if (LoopCounter == 0) {
-			CRYPTO_ERR("PEC could not be un-initialized, timeout\n");
+		if (!mtk_ddk_pec_uninit_ring(j))
 			return;
-		}
 	}
 
 #ifdef PEC_PCL_EIP197

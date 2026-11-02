@@ -25,3 +25,5 @@ crypto-eip-ddk-ctrl-y += ../../kit/eip197/eip97_global_fsm.o
 crypto-eip-ddk-ctrl-y += ../../kit/eip197/eip74.o
 crypto-eip-ddk-ctrl-y += ../../device/lkm/of/device_lkm.o
 crypto-eip-ddk-ctrl-y += ../../device/device_generic.o
+
+include $(src)/../module-objects.mk

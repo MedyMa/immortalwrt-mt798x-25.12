@@ -7,3 +7,5 @@ crypto-eip-ddk-ctrl-app-y += ../../app/da_gc_drbg.o
 crypto-eip-ddk-ctrl-app-y += ../../app/da_gc_ce.o
 crypto-eip-ddk-ctrl-app-y += ../../app/da_gc_pe.o
 crypto-eip-ddk-ctrl-app-y += ../../app/da_gc_eip197.o
+
+include $(src)/../module-objects.mk

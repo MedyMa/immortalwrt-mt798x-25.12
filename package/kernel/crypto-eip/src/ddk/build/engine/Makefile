@@ -51,3 +51,5 @@ crypto-eip-ddk-engine-y += ../../kit/builder/sa/sa_builder_extended_dtls.o
 # token builder
 crypto-eip-ddk-engine-y += ../../kit/builder/token/token_builder_context.o
 crypto-eip-ddk-engine-y += ../../kit/builder/token/token_builder_core.o
+
+include $(src)/../module-objects.mk

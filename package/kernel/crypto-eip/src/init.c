@@ -481,18 +481,25 @@ out:
 
 static int __init mtk_crypto_eip_hw_init(void)
 {
+	int ret;
+
 	crypto_eip_write(EIP197_FORCE_CLK_ON, 0xffffffff);
 
 	crypto_eip_write(EIP197_FORCE_CLK_ON2, 0xffffffff);
 
 	/* TODO: adjust AXI burst? */
 
-	mtk_ddk_pec_init();
+	ret = mtk_ddk_pec_init();
+	if (ret) {
+		crypto_eip_write(EIP197_FORCE_CLK_ON, 0);
+		crypto_eip_write(EIP197_FORCE_CLK_ON2, 0);
+		return ret;
+	}
 
 	return 0;
 }
 
-static void __exit mtk_crypto_eip_hw_deinit(void)
+static void mtk_crypto_eip_hw_deinit(void)
 {
 	mtk_ddk_pec_deinit();
 
@@ -518,15 +525,24 @@ static int __init mtk_crypto_eip_init(void)
 	}
 
 	ret = mtk_crypto_register_nf_hooks();
-	if (ret)
+	if (ret) {
 		CRYPTO_ERR("crypto-eip register hook failed: %d\n", ret);
-
-	mtk_crypto_xfrm_offload_init(mcrypto.eth);
-	mtk_crypto_debugfs_init();
+		goto err_hw;
+	}
 
 #if defined(CONFIG_CRYPTO_MTK_DDK_LOOKASIDE)
-	mtk_crypto_register_algorithms(priv);
+	ret = mtk_crypto_register_algorithms(priv);
+	if (ret) {
+		CRYPTO_ERR("crypto-eip register algorithms failed: %d\n", ret);
+		goto err_nf;
+	}
 #endif /* CONFIG_CRYPTO_MTK_DDK_LOOKASIDE */
+
+	/* Publish callbacks only after every fallible initialization succeeded.
+	 * A failed module_init() releases the module text without calling exit.
+	 */
+	mtk_crypto_xfrm_offload_init(mcrypto.eth);
+	mtk_crypto_debugfs_init();
 
 #if defined(CONFIG_MTK_TOPS_CAPWAP_DTLS)
 	mtk_dtls_capwap_init();
@@ -534,6 +550,14 @@ static int __init mtk_crypto_eip_init(void)
 
 	CRYPTO_INFO("crypto-eip init done\n");
 
+	return 0;
+
+#if defined(CONFIG_CRYPTO_MTK_DDK_LOOKASIDE)
+err_nf:
+	mtk_crypto_unregister_nf_hooks();
+#endif
+err_hw:
+	mtk_crypto_eip_hw_deinit();
 	return ret;
 }
 
