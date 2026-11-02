@@ -235,6 +235,10 @@ DMABuf_Status_t
 DMABuf_Particle_Release(
         DMABuf_Handle_t Handle);
 
+/* Bus address of an allocated or registered DMA buffer. */
+DMABuf_Status_t
+DMABuf_DMAAddress_Get(DMABuf_Handle_t Handle, uint64_t *Address_p);
+
 #endif /* Include Guard */
 
 /* end of file api_dmabuf.h */

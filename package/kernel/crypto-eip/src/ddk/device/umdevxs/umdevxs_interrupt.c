@@ -441,6 +441,7 @@ UMDevXS_Interrupt_UnInit(
         free_irq(UMDevXS_Interrupt_InstalledIRQ[ICDeviceId], dev);
 
         UMDevXS_Interrupt_InstalledIRQ[ICDeviceId] = -1;
+        UMDevXS_Interrupt_fInstalled[ICDeviceId] = false;
     }
 #endif /* UMDEVXS_REMOVE_INTERRUPT */
 }
@@ -461,6 +462,9 @@ UMDevXS_Interrupt_Request(
     int res;
     void * dev;
     unsigned long flags;
+
+    if (ICDeviceId < 0 || ICDeviceId >= UMDEVXS_INTERRUPT_IC_DEVICE_COUNT)
+        return -EINVAL;
 
     if (!UMDevXS_Interrupt_fInstalled[ICDeviceId])
     {
@@ -508,12 +512,13 @@ UMDevXS_Interrupt_Request(
         {
             // not hooked after all, so clear global to avoid irq_free
             UMDevXS_Interrupt_InstalledIRQ[ICDeviceId] = -1;
+            UMDevXS_Interrupt_fInstalled[ICDeviceId] = false;
 
             LOG_CRIT(UMDEVXS_LOG_PREFIX
                      "%s: request_irq failed, error %d\n",
                      __func__,
                      res);
-            return -1;
+            return res;
         }
 
         LOG_INFO(UMDEVXS_LOG_PREFIX

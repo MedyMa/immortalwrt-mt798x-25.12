@@ -325,7 +325,14 @@ Global_Init(void)
                                        &NofLAInterfaces,
                                        &NofInlineInterfaces);
 
-        RingPEMap.RingPE_Mask = (1<< (NofRings + NofLAInterfaces + NofInlineInterfaces))-1;
+        if (NofRings + NofLAInterfaces + NofInlineInterfaces == 0 ||
+            NofRings + NofLAInterfaces + NofInlineInterfaces > 32)
+        {
+            GlobalControl97_UnInit();
+            return false;
+        }
+        RingPEMap.RingPE_Mask = NofRings + NofLAInterfaces + NofInlineInterfaces == 32 ?
+            0xffffffffU : (1U << (NofRings + NofLAInterfaces + NofInlineInterfaces)) - 1;
         /* Enable the number of configured rings */
         RingPEMap.RingPrio_Mask = 0x00; /* All rings at standard priority */
 
@@ -336,7 +343,7 @@ Global_Init(void)
             {
                 LOG_CRIT("DA_GC: Ring configuration failed for PE %d\n", i);
                 GlobalControl97_UnInit();
-                return rc;
+                return false;
             }
         }
     }
@@ -348,6 +355,7 @@ Global_Init(void)
 
         if (rc != GLOBAL_CONTROL_NO_ERROR && rc != GLOBAL_CONTROL_ERROR_NOT_IMPLEMENTED)
         {
+                GlobalControl97_UnInit();
                 return false;
         }
 
@@ -372,7 +380,7 @@ Global_Init(void)
                 {
                     LOG_CRIT("Could not ressed PRNG of PE#%d\n",i);
                     GlobalControl97_UnInit();
-                    return rc;
+                    return false;
                 }
             }
         }

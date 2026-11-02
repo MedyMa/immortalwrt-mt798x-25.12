@@ -263,8 +263,6 @@ Adapter_UnInit(void)
 
     Adapter_IsInitialized = false;
 
-    DMAResource_UnInit();
-
 #ifdef ADAPTER_PEC_INTERRUPTS_ENABLE
     if (RPM_DEVICE_UNINIT_START_MACRO(ADAPTER_GLOBAL_RPM_EIP201_DEVICE_ID,
                                       true) == RPM_SUCCESS)
@@ -273,6 +271,9 @@ Adapter_UnInit(void)
         (void)RPM_DEVICE_UNINIT_STOP_MACRO(ADAPTER_GLOBAL_RPM_EIP201_DEVICE_ID);
     }
 #endif
+
+    /* An interrupt/tasklet may still refer to ring DMA memory. */
+    DMAResource_UnInit();
 
     (void)RPM_DEVICE_UNINIT_START_MACRO(ADAPTER_GLOBAL_RPM_EIP197_DEVICE_ID, false);
     (void)RPM_DEVICE_UNINIT_STOP_MACRO(ADAPTER_GLOBAL_RPM_EIP197_DEVICE_ID);

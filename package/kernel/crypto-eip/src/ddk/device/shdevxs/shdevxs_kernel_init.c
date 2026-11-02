@@ -78,6 +78,7 @@ SHDevXS_Init(void)
     if (SHDevXS_Device == NULL)
     {
         LOG_CRIT("SHDevXS_Init: Failed to locate %s\n", SHDEVXS_DEVICE_NAME);
+        Device_UnInitialize();
         return -1;
     }
 #endif // SHDEVXS_ENABLE_FUNCTIONS
@@ -101,6 +102,8 @@ SHDevXS_Init(void)
 int
 SHDevXS_UnInit(void)
 {
+    if (!SHDevXS_IsInitialized)
+        return 0;
 #ifdef SHDEVXS_ENABLE_RC_FUNCTIONS
     SHDevXS_Internal_RC_UnInitialize();
 #endif

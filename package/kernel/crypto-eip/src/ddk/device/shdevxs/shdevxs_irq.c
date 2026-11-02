@@ -245,8 +245,6 @@ SHDevXS_Internal_IRQ_UnInitialize(void)
 
     IRQ_Initialized = false;
 
-    SHDevXS_Internal_Lock_Free(IRQ_Lock);
-    IRQ_Lock = NULL;
 
 #ifndef UMDEVXS_REMOVE_PCI
     {
@@ -289,6 +287,8 @@ SHDevXS_Internal_IRQ_UnInitialize(void)
         Adapter_Interrupts_UnInit(nIRQ);
         (void)RPM_DEVICE_UNINIT_STOP_MACRO(SHDEVXS_IRQ_RPM_DEVICE_ID);
     }
+    SHDevXS_Internal_Lock_Free(IRQ_Lock);
+    IRQ_Lock = NULL;
 }
 
 

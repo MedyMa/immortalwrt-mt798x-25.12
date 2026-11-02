@@ -477,3 +477,18 @@ DMABuf_Particle_Release(
 
 
 /* end of file adapter_dmabuf.c */
+
+/* Return the DMA API's bus address, which need not equal __pa(host). */
+DMABuf_Status_t
+DMABuf_DMAAddress_Get(DMABuf_Handle_t Handle, uint64_t *Address_p)
+{
+    DMAResource_AddrPair_t Pair;
+
+    if (!Address_p)
+        return DMABUF_ERROR_BAD_ARGUMENT;
+    if (DMAResource_Translate(Adapter_DMABuf_Handle2DMAResourceHandle(Handle),
+                              DMARES_DOMAIN_BUS, &Pair) != 0)
+        return DMABUF_ERROR_INVALID_HANDLE;
+    *Address_p = (uint64_t)(uintptr_t)Pair.Address_p;
+    return DMABUF_STATUS_OK;
+}

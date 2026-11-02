@@ -48,6 +48,7 @@ module_exit(Driver197_PEC_PCL_Exit);
 EXPORT_SYMBOL(DMABuf_NULLHandle);
 EXPORT_SYMBOL(DMABuf_Handle_IsSame);
 EXPORT_SYMBOL(DMABuf_Alloc);
+EXPORT_SYMBOL_GPL(DMABuf_DMAAddress_Get);
 EXPORT_SYMBOL(DMABuf_Particle_Alloc);
 EXPORT_SYMBOL(DMABuf_Register);
 EXPORT_SYMBOL(DMABuf_Release);

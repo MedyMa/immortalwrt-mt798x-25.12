@@ -73,7 +73,7 @@ Adapter_Firmware_Acquire(
     *Firmware_Word32Count = 0;
 
     // Request firmware via kernel API.
-    rc = request_firmware(&firmware,
+    rc = request_firmware_direct(&firmware,
                           Firmware_Name_p,
                           Device_GetReference(NULL, NULL));
     if (rc < 0)
@@ -108,7 +108,8 @@ Adapter_Firmware_Acquire(
         const uint8_t *p = firmware->data;
         for (i=0; i<firmware->size / sizeof(uint32_t); i++)
         {
-            Firmware_Data_p[i] = p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24);
+            Firmware_Data_p[i] = (uint32_t)p[0] | ((uint32_t)p[1]<<8) |
+                                ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
             p += sizeof(uint32_t);
         }
     }

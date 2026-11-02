@@ -58,9 +58,12 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/errno.h>
 
 MODULE_LICENSE(DEMOAPP_GLOBAL_LICENSE);
 
+#else
+#include <errno.h>
 #endif // !DA_GC_USERMODE
 
 
@@ -82,19 +85,28 @@ da_gc_module_init(void)
              DEMOAPP_GLOBAL_NAME);
 
     // Initialize Packet I/O Global Control
-    Global_Init();
+    if (!Global_Init())
+        return -EIO;
 
     // Initialize Packet Classification Global Control
-    Global_Cs_Init();
+    if (!Global_Cs_Init())
+        goto error_packet;
 
     // Initialize DRBG Global Control
-    Global_DRBG_Init();
+    if (!Global_DRBG_Init())
+        goto error_classification;
 
     LOG_INFO("DA_GC: da_gc_kmodule_init done \n");
 
     Log_FormattedMessage("DA_GC: da_gc_k loaded\n");
 
     return 0;   // success
+
+error_classification:
+    Global_Cs_UnInit();
+error_packet:
+    Global_UnInit();
+    return -EIO;
 }
 
 
@@ -182,7 +194,12 @@ main()
         return -1;
     }
 
-    da_gc_module_init();
+    rc = da_gc_module_init();
+    if (rc)
+    {
+        Driver197_Global_Exit();
+        return rc;
+    }
 
     // Start the global status monitor
     da_gc_monitor();

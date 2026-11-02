@@ -95,6 +95,13 @@ static int UMDevXS_LKM_nIRQ;
 #endif
 
 
+enum {
+    INIT_PCI = 1U << 0, INIT_OF = 1U << 1, INIT_IRQ = 1U << 2,
+    INIT_CHR = 1U << 3, INIT_BUF = 1U << 4, INIT_SM = 1U << 5,
+    INIT_SH = 1U << 6,
+};
+static unsigned int UMDevXS_Started;
+
 /*----------------------------------------------------------------------------
  * UMDevXS_module_exit
  */
@@ -108,7 +115,7 @@ UMDevXS_module_exit(void);
 static int
 UMDevXS_module_init(void)
 {
-    int Status;
+    int Status = 0;
 
 #if (!defined(UMDEVXS_REMOVE_INTERRUPT) && \
      defined(UMDEVXS_REMOVE_DEVICE_PCI) && \
@@ -123,12 +130,14 @@ UMDevXS_module_init(void)
     Status = UMDevXS_PCIDev_Init();
     if (Status < 0)
         goto error_exit;
+    UMDevXS_Started |= INIT_PCI;
 #endif
 
 #ifndef UMDEVXS_REMOVE_DEVICE_OF
     Status = UMDevXS_OFDev_Init();
     if (Status < 0)
         goto error_exit;
+    UMDevXS_Started |= INIT_OF;
 #endif
 
 #ifndef UMDEVXS_REMOVE_INTERRUPT
@@ -143,12 +152,14 @@ UMDevXS_module_init(void)
         else
             for (i = 0; i < DeviceCount; i++)
                 UMDevXS_Interrupt_Init(i);
+        UMDevXS_Started |= INIT_IRQ;
     }
 #endif
 
     Status = UMDevXS_ChrDev_Init();
     if (Status < 0)
         goto error_exit;
+    UMDevXS_Started |= INIT_CHR;
 
 #ifndef UMDEVXS_REMOVE_DMABUF
     if (!BufAdmin_Init(UMDEVXS_DMARESOURCE_HANDLES_MAX, NULL, 0))
@@ -156,18 +167,21 @@ UMDevXS_module_init(void)
         Status = -ENOMEM;
         goto error_exit;
     }
+    UMDevXS_Started |= INIT_BUF;
 #endif
 
 #ifndef UMDEVXS_REMOVE_SMBUF
     Status = UMDevXS_SMBuf_Init();
     if (Status < 0)
-        return Status;
+        goto error_exit;
+    UMDevXS_Started |= INIT_SM;
 #endif
 
 #ifdef UMDEVXS_ENABLE_KERNEL_SUPPORT
     Status = SHDevXS_Init();
     if (Status < 0)
         goto error_exit;
+    UMDevXS_Started |= INIT_SH;
 #endif
     return 0;
 
@@ -187,14 +201,17 @@ UMDevXS_module_exit(void)
              "unloading driver\n");
 
 #ifdef UMDEVXS_ENABLE_KERNEL_SUPPORT
-    SHDevXS_UnInit();
+    if (UMDevXS_Started & INIT_SH)
+        SHDevXS_UnInit();
 #endif
 
 #ifndef UMDEVXS_REMOVE_SMBUF
-    UMDevXS_SMBuf_UnInit();
+    if (UMDevXS_Started & INIT_SM)
+        UMDevXS_SMBuf_UnInit();
 #endif
 
 #ifndef UMDEVXS_REMOVE_INTERRUPT
+    if (UMDevXS_Started & INIT_IRQ)
     {
         const unsigned int DeviceCount = UMDEVXS_INTERRUPT_IC_DEVICE_COUNT;
         unsigned int i;
@@ -208,18 +225,23 @@ UMDevXS_module_exit(void)
 #endif
 
 #ifndef UMDEVXS_REMOVE_PCI
-    UMDevXS_PCIDev_UnInit();
+    if (UMDevXS_Started & INIT_PCI)
+        UMDevXS_PCIDev_UnInit();
 #endif
 
 #ifndef UMDEVXS_REMOVE_DEVICE_OF
-    UMDevXS_OFDev_UnInit();
+    if (UMDevXS_Started & INIT_OF)
+        UMDevXS_OFDev_UnInit();
 #endif
 
-    UMDevXS_ChrDev_UnInit();
+    if (UMDevXS_Started & INIT_CHR)
+        UMDevXS_ChrDev_UnInit();
 
 #ifndef UMDEVXS_REMOVE_DMABUF
-    BufAdmin_UnInit();
+    if (UMDevXS_Started & INIT_BUF)
+        BufAdmin_UnInit();
 #endif
+    UMDevXS_Started = 0;
 }
 
 module_init(UMDevXS_module_init);

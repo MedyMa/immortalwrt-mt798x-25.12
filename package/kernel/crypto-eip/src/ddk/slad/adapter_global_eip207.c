@@ -215,6 +215,19 @@ GlobalControl207Lib_Firmware_Load(bool fVerbose)
         OFPP_Handle = Adapter_Firmware_NULL;
     }
 
+    if (IPUE_Handle == Adapter_Firmware_NULL ||
+        IFPP_Handle == Adapter_Firmware_NULL ||
+        ((EIP97_SupportedFuncs_Get() & BIT_1) &&
+         (OPUE_Handle == Adapter_Firmware_NULL || OFPP_Handle == Adapter_Firmware_NULL)))
+    {
+        Adapter_Firmware_Release(IPUE_Handle);
+        Adapter_Firmware_Release(IFPP_Handle);
+        Adapter_Firmware_Release(OPUE_Handle);
+        Adapter_Firmware_Release(OFPP_Handle);
+        LOG_CRIT("EIP207: required firmware image is unavailable\n");
+        return -1;
+    }
+
     LOG_INFO("\n\t\t\t\t EIP207_Global_Firmware_Load \n");
 
     rc = EIP207_Global_Firmware_Load(&Global_IOArea,
@@ -464,7 +477,9 @@ GlobalControl207_Init(
 
     FLUE_Conf.InterfacesCount = NofRings + NofLAInterfaces +
                                                     NofInlineInterfaces;
-    if (FLUE_Conf.InterfacesCount == 0)
+    if (FLUE_Conf.InterfacesCount == 0 ||
+        FLUE_Conf.InterfacesCount >
+            sizeof(FLUE_Conf.InterfaceIndex) / sizeof(FLUE_Conf.InterfaceIndex[0]))
     {
         LOG_CRIT("GlobalControl207_Init: Device not initialized\n");
         return EIP207_GLOBAL_CONTROL_ERROR_INTERNAL;

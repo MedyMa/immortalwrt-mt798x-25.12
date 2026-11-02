@@ -99,6 +99,8 @@ typedef struct
     // Initialization flag, true - initialized, otherwise - false
     bool fInitialized;
 
+    int ProbeError;
+
 } LKM_Admin_t;
 
 
@@ -124,7 +126,7 @@ static int
 LKM_Probe(
         struct platform_device * Platform_Device_p)
 {
-    int i;
+    int i, ret;
     LKM_Admin_t * p = &LKM_Admin;
     struct resource * rsc_p = NULL;
 
@@ -138,24 +140,15 @@ LKM_Probe(
         return -ENODEV;
     }
 
-    if (of_find_compatible_node(NULL, NULL, LKM_PLATFORM_DEVICE_NAME))
-    {
-        LOG_INFO(LKM_LOG_PREFIX
-                 "%s: found requested device %s\n",
-                 __func__,
-                 LKM_PLATFORM_DEVICE_NAME);
-    }
-    else
-    {
-        LOG_CRIT(LKM_LOG_PREFIX
-                 "%s: device %s not supported\n",
-                 __func__,
-                 LKM_PLATFORM_DEVICE_NAME);
+    if (!of_device_is_compatible(Platform_Device_p->dev.of_node,
+                                 LKM_PLATFORM_DEVICE_NAME))
         return -ENODEV;
-    }
 
-    // remember the device reference
-    p->Platform_Device_p = Platform_Device_p;
+    /* Only one device is supported. Publish it after ALL resources are ready:
+     * platform_driver_register() succeeds even when this probe fails.
+     */
+    if (p->Platform_Device_p)
+        return -EBUSY;
 
     if (p->fRetainMap)
     {
@@ -182,7 +175,8 @@ LKM_Probe(
                      "%s: memory resource id %d not found\n",
                      __func__,
                      p->ResId);
-            return -ENODEV;
+            ret = -ENODEV;
+            goto error;
         }
 
         p->PhysBaseAddr      = rsc_p->start;
@@ -203,7 +197,8 @@ LKM_Probe(
                      p->ResId,
                      (void*)p->PhysBaseAddr,
                      (unsigned int)p->ResByteCount);
-            return -ENODEV;
+            ret = -ENOMEM;
+            goto error;
         }
 
         LOG_INFO(LKM_LOG_PREFIX
@@ -220,18 +215,16 @@ LKM_Probe(
 
     // Optional device clock control functionality,
     // only required when the device clock needs to be enabled via the kernel
-    gateclk = clk_get(&Platform_Device_p->dev, NULL);
-    if (!IS_ERR(gateclk))
+    gateclk = clk_get_optional(&Platform_Device_p->dev, NULL);
+    if (IS_ERR(gateclk))
     {
-        // Exported under GPL
-        clk_prepare_enable(gateclk);
-        LOG_INFO("%s: clk_prepare_enable() successful\n", __func__);
+        ret = PTR_ERR(gateclk);
+        gateclk = NULL;
+        goto error;
     }
-    else
-    {
-        // Not all devices support it
-        LOG_INFO("%s: clk_get() could not obtain clock\n", __func__);
-    }
+    ret = clk_prepare_enable(gateclk);
+    if (ret)
+        goto error_put_clock;
 
     for (i = 0; i < LKM_PLATFORM_IRQ_COUNT; i++)
     {
@@ -246,7 +239,8 @@ LKM_Probe(
             LOG_INFO(LKM_LOG_PREFIX "%s: failed to get IRQ for index %d\n",
                      __func__,
                      IrqIndex);
-            return -ENODEV;
+            ret = IrqNr;
+            goto error_disable_clock;
         }
         else
             p->VirtIrqNr[i] = IrqNr;
@@ -254,8 +248,24 @@ LKM_Probe(
 
     LOG_INFO(LKM_LOG_PREFIX "%s: left\n", __func__);
 
-    // return 0 to indicate "we decided to take ownership"
+    p->Platform_Device_p = Platform_Device_p;
+    p->ProbeError = 0;
     return 0;
+
+error_disable_clock:
+    clk_disable_unprepare(gateclk);
+error_put_clock:
+    clk_put(gateclk);
+    gateclk = NULL;
+error:
+    if (p->MappedBaseAddr_p)
+        iounmap(p->MappedBaseAddr_p);
+    p->MappedBaseAddr_p = NULL;
+    p->PhysBaseAddr = 0;
+    p->ResByteCount = 0;
+    memset(p->VirtIrqNr, 0, sizeof(p->VirtIrqNr));
+    p->ProbeError = ret;
+    return ret;
 }
 
 
@@ -276,17 +286,19 @@ LKM_Remove_new(
         LOG_CRIT(LKM_LOG_PREFIX
                  "%s: failed, missing or wrong platform device\n",
                  __func__);
+        return;
     }
 
     LOG_INFO(LKM_LOG_PREFIX
              "%s: mapped base addr=%p\n", __func__, p->MappedBaseAddr_p);
 
     // Optional device clock control functionality
-    if (!IS_ERR(gateclk))
+    if (gateclk)
     {
         // Exported under GPL
         clk_disable_unprepare(gateclk);
         clk_put(gateclk);
+        gateclk = NULL;
     }
 
     if (p->MappedBaseAddr_p && p->fRetainMap)
@@ -294,6 +306,9 @@ LKM_Remove_new(
         iounmap(p->MappedBaseAddr_p);
         p->MappedBaseAddr_p = NULL;
     }
+    p->Platform_Device_p = NULL;
+    p->PhysBaseAddr = 0;
+    p->ResByteCount = 0;
 
     LOG_INFO(LKM_LOG_PREFIX "%s: left\n", __func__);
 }
@@ -337,6 +352,7 @@ LKM_Init(
     // Fill in PCI device driver data
     p->fRetainMap                    = InitData_p->fRetainMap;
     p->ResId                         = InitData_p->ResId; // not used
+    p->ProbeError                    = -ENODEV;
 
     p->Platform_Driver.probe         = LKM_Probe;
 #if KERNEL_VERSION(6, 1, 30) > LINUX_VERSION_CODE
@@ -351,6 +367,7 @@ LKM_Init(
 #endif
     p->Platform_Driver.driver.name            = InitData_p->DriverName_p;
     p->Platform_Driver.driver.owner           = THIS_MODULE;
+    p->Platform_Driver.driver.suppress_bind_attrs = true;
     p->Platform_Driver.driver.pm              = InitData_p->PM_p;
     p->Platform_Driver.driver.of_match_table  = LKM_DT_IDTable;
 
@@ -361,14 +378,14 @@ LKM_Init(
         LOG_CRIT(LKM_LOG_PREFIX
                  "%s: failed to register platform device driver\n",
                  __func__);
-        return -3;
+        return Status;
     }
 
     if (p->Platform_Device_p == NULL)
     {
         LOG_CRIT(LKM_LOG_PREFIX "%s: failed, no device detected\n", __func__);
         platform_driver_unregister(&p->Platform_Driver);
-        return -4;
+        return p->ProbeError;
     }
 
     // if provided, CustomInitData_p points to an "int"
@@ -419,7 +436,7 @@ LKM_DeviceGeneric_Get(void)
 {
     LKM_Admin_t * p = &LKM_Admin;
 
-    return &p->Platform_Device_p->dev;
+    return p->Platform_Device_p ? &p->Platform_Device_p->dev : NULL;
 }
 
 

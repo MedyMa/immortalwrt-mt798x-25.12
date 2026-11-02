@@ -1652,12 +1652,15 @@ UMDevXS_SMBuf_Init(void)
         DMADevice_p = UMDevXS_PCIDev_GetReference(NULL);
 #endif // !UMDEVXS_REMOVE_PCI
 
+        if (!DMADevice_p)
+            return -ENODEV;
+
         LOG_INFO("%s: Device DMA address mask 0x%016Lx\n",
                  __func__,
                  (long long unsigned int)UMDEVXS_SMBUF_ADDR_MASK);
 
         // Set DMA mask wider, so the DMA API will not try to bounce
-        res = UMDEVXS_SMBUF_SET_MASK(DMADevice_p,
+        res = dma_set_mask_and_coherent(DMADevice_p,
                                      UMDEVXS_SMBUF_ADDR_MASK);
         if ( res != 0)
         {
@@ -1665,7 +1668,7 @@ UMDevXS_SMBuf_Init(void)
                      "host does not support DMA address mask 0x%016Lx\n",
                      __func__,
                      (long long unsigned int)UMDEVXS_SMBUF_ADDR_MASK);
-            return false;
+            return res;
         }
     }
 

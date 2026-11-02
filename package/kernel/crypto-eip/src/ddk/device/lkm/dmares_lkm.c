@@ -777,6 +777,11 @@ HWPAL_DMAResource_Alloc(
 
         // Get device reference for this resource
         DMADevice_p = Device_GetReference(NULL, &DevData);
+        if (!DMADevice_p)
+        {
+            DMAResource_DestroyRecord(Handle);
+            return -ENODEV;
+        }
 
         // Step 1: Allocate a buffer
         if (RequestedPropertiesExt.BankType ==
@@ -928,11 +933,15 @@ HWPAL_DMAResource_Alloc(
 #else
 
 #ifndef HWPAL_DMARESOURCE_ALLOC_CACHE_COHERENT
-            DMAAddr = dma_map_single(DMADevice_p, AlignedAddr_p, n,
+            /* Alignment padding belongs before/after the usable buffer;
+             * mapping n bytes from an interior pointer overruns kmalloc().
+             */
+            DMAAddr = dma_map_single(DMADevice_p, AlignedAddr_p,
+                                     ActualProperties.Size,
                                      DMA_BIDIRECTIONAL);
             if (dma_mapping_error(DMADevice_p, DMAAddr))
             {
-                kfree(AlignedAddr_p);
+                kfree(UnalignedAddr_p);
 
                 DMAResource_DestroyRecord(Handle);
 
@@ -949,24 +958,12 @@ HWPAL_DMAResource_Alloc(
 
 #endif // HWPAL_DMARESOURCE_MINIMUM_CACHE_CONTROL
 
-            if (DMAAddr == 0)
-            {
 #ifdef HWPAL_DMARESOURCE_ALLOC_CACHE_COHERENT
-                dma_free_coherent(DMADevice_p, n, UnalignedAddr_p, DMAAddr);
-#else
-                kfree(UnalignedAddr_p);
+            /* dma_alloc_coherent() returns the DMA address of the original
+             * allocation, not of the aligned host pointer.
+             */
+            DMAAddr += (uint8_t *)AlignedAddr_p - (uint8_t *)UnalignedAddr_p;
 #endif
-
-                DMAResource_DestroyRecord(Handle);
-                LOG_CRIT(
-                    "DMAResource_Alloc: "
-                    "Failed to obtain DMA address for host address 0x%p, "
-                    "for handle 0x%p\n",
-                    AlignedAddr_p,
-                    Handle);
-
-                return -1;
-            }
 
 #ifdef HWPAL_TRACE_DMARESOURCE_BUF
             LOG_INFO("DMAResource_Alloc: Handle 0x%p, "
@@ -1123,7 +1120,7 @@ HWPAL_DMAResource_Release(
         {
             dma_unmap_single(DMADevice_p,
                              DMAAddr + HWPAL_DMARESOURCE_BANK_STATIC_OFFSET,
-                             Rec_p->BufferSize, DMA_BIDIRECTIONAL);
+                             Rec_p->Props.Size, DMA_BIDIRECTIONAL);
 #ifdef HWPAL_TRACE_DMARESOURCE_BUF
             LOG_INFO("DMAResource_Release: Handle 0x%p, "
                      "bus address freed/adjusted 0x%p / 0x%p\n",
@@ -1148,10 +1145,17 @@ HWPAL_DMAResource_Release(
                      (void*)DMAAddr);
 #endif // HWPAL_TRACE_DMARESOURCE_BUF
 
+            {
+            DMAResource_AddrPair_t *AlignedPair_p =
+                DMAResourceLib_LookupDomain(Rec_p, DMARES_DOMAIN_HOST);
+            size_t AlignmentOffset = (uint8_t *)AlignedPair_p->Address_p -
+                                     (uint8_t *)Pair_p->Address_p;
             dma_free_coherent(DMADevice_p,
                               Rec_p->BufferSize,
                               Pair_p->Address_p,
-                              DMAAddr + HWPAL_DMARESOURCE_BANK_STATIC_OFFSET);
+                              DMAAddr + HWPAL_DMARESOURCE_BANK_STATIC_OFFSET -
+                              AlignmentOffset);
+            }
 #else
             if (Rec_p->BankType == HWPAL_DMARESOURCE_BANK_STATIC_FIXED_ADDR)
             {
@@ -1223,13 +1227,16 @@ HWPAL_DMAResource_Init(void)
         // Get device reference for this resource
         DMADevice_p = Device_GetReference(NULL, NULL);
 
+        if (!DMADevice_p)
+            return false;
+
         LOG_INFO("%s: Device DMA address mask 0x%016Lx\n",
                  __func__,
                  (long long unsigned int)HWPAL_DMARESOURCE_ADDR_MASK);
 
         // Set DMA mask wider, so the DMA API will not try to bounce
-        res = HWPAL_DMARESOURCE_SET_MASK(DMADevice_p,
-                                         HWPAL_DMARESOURCE_ADDR_MASK);
+        res = dma_set_mask_and_coherent(DMADevice_p,
+                                        HWPAL_DMARESOURCE_ADDR_MASK);
         if ( res != 0)
         {
             LOG_CRIT("%s: failed, host does not support DMA address "
@@ -1652,6 +1659,7 @@ HWPAL_DMAResource_CheckAndRegister(
     Rec_p = DMAResource_Handle2RecordPtr(Handle);
     if (Rec_p == NULL)
     {
+        DMAResource_DestroyRecord(Handle);
         return -1;
     }
 
@@ -1691,6 +1699,12 @@ HWPAL_DMAResource_CheckAndRegister(
         // Get device reference for this resource
         DMADevice_p = Device_GetReference(NULL, NULL);
 
+        if (!DMADevice_p)
+        {
+            DMAResource_DestroyRecord(Handle);
+            return -ENODEV;
+        }
+
 #ifdef HWPAL_DMARESOURCE_MINIMUM_CACHE_CONTROL
         if (!is_kernel_addr ((unsigned long)AddrPair.Address_p))
         {
@@ -1714,8 +1728,8 @@ HWPAL_DMAResource_CheckAndRegister(
                                      DMA_BIDIRECTIONAL);
             if (dma_mapping_error(DMADevice_p, DMAAddr))
             {
-                if (DMAAddr)
-                    kfree(AddrPair.Address_p);
+                /* The caller still owns this registered buffer on failure. */
+                DMAResource_DestroyRecord(Handle);
 
                 LOG_WARN(
                     "HWPAL_DMAResource_CheckAndRegister: "

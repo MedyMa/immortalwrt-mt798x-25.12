@@ -229,6 +229,7 @@ Global_DRBG_Init(void)
 
     Global_DRBG_Entropy_Get(Entropy);
 
+    fDRBGPresent = false;
     rc = GlobalControl74_Init(&Configuration, Entropy);
     if (rc == GLOBAL_CONTROL_EIP74_ERROR_NOT_IMPLEMENTED)
     {
@@ -243,6 +244,7 @@ Global_DRBG_Init(void)
     else
     {
         LOG_CRIT("EIP74 initialization error\n");
+        return false;
     }
 
     Capabilities.szTextDescription[0] = 0;
@@ -276,6 +278,7 @@ Global_DRBG_UnInit(void)
 
         // Uninitialize DRBG Global Control
         GlobalControl74_UnInit();
+        fDRBGPresent = false;
     }
 }
 

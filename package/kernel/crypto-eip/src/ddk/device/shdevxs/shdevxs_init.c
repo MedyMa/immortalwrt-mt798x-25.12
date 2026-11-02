@@ -98,7 +98,14 @@ SHDevXS_Global_Init(
 #endif
 
 #ifndef SHDEVXS_DISABLE_INTERRUPTS
-    return SHDevXS_Internal_IRQ_Initialize();
+    if (SHDevXS_Internal_IRQ_Initialize() != 0)
+    {
+#ifdef SHDEVXS_ENABLE_RC_FUNCTIONS
+        SHDevXS_Internal_RC_UnInitialize();
+#endif
+        return -1;
+    }
+    return 0;
 #else
     return 0;
 #endif

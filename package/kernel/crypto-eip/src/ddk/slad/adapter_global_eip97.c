@@ -420,8 +420,6 @@ GlobalControl97_Init(
         goto exit; // error
     else
     {
-        Global_IsInitialized = true;
-
         GlobalControl97_NofRings = Capabilities.EIP202_Options.NofRings;
         GlobalControl97_NofLAInterfaces = Capabilities.EIP202_Options2.NofLA_Ifs;
         GlobalControl97_NofInlineInterfaces = Capabilities.EIP202_Options2.NofIN_Ifs;
@@ -442,6 +440,7 @@ GlobalControl97_Init(
                                       Capabilities.EIP202_Options.RF_Size);
 #endif
 
+        Global_IsInitialized = true;
         GC97_Rc = GLOBAL_CONTROL_NO_ERROR; // success
     }
 

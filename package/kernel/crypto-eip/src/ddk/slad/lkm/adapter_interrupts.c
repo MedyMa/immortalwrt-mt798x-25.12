@@ -67,7 +67,6 @@
  * Definitions and macros
  */
 
-#define MAX_OS_IRQS                     256
 
 #define ARRAY_ELEMCOUNT(_a)             (sizeof(_a) / sizeof(_a[0]))
 
@@ -122,7 +121,6 @@ static Adapter_Interrupt_t Adapter_IRQTable[] = { ADAPTER_EIP202_IRQS };
 // Define maximum number of supported interrupts
 #define ADAPTER_MAX_INTERRUPTS  ARRAY_ELEMCOUNT(Adapter_IRQTable)
 
-static Adapter_AIC_t * IRQ_AIC_Mapping[MAX_OS_IRQS];
 
 
 /*----------------------------------------------------------------------------
@@ -468,18 +466,22 @@ AdapterINT_TopHalfHandler(
         void * dev_id)
 {
     irqreturn_t Int_Rc = IRQ_NONE;
+    unsigned int i;
+    Adapter_AIC_t *aic = NULL;
+
     LOG_INFO("\n\t\t%s \n", __func__);
 
-    if (irq < 0 || irq >= MAX_OS_IRQS || IRQ_AIC_Mapping[irq]==NULL)
-    {
-        LOG_CRIT("%s: No AIC defined for IRQ %d\n",__func__,irq);
+    IDENTIFIER_NOT_USED(dev_id);
+    /* Linux virtual IRQ numbers have no 8-bit upper bound. */
+    for (i = 0; i < ARRAY_ELEMCOUNT(Adapter_AICTable); i++)
+        if (Adapter_AICTable[i].isIRQ &&
+            READ_ONCE(Adapter_AICTable[i].irq) == irq)
+        {
+            aic = &Adapter_AICTable[i];
+            break;
+        }
+    if (!aic || AdapterINT_AICHandler(aic) < 0)
         goto error;
-    }
-
-    if ( AdapterINT_AICHandler(IRQ_AIC_Mapping[irq]) < 0)
-    {
-        goto error;
-    }
 
     Int_Rc = IRQ_HANDLED;
 
@@ -639,6 +641,7 @@ Adapter_Interrupts_Init(
 {
     int i;
     int IntNr = nIRQ;
+    int ret = -EINVAL;
 
     LOG_INFO("\n\t\t %s \n", __func__);
 
@@ -670,6 +673,9 @@ Adapter_Interrupts_Init(
                            Adapter_IRQTable[i].SourceBitMask);
     }
 
+    /* All tasklets are initialized, so a partial IRQ setup can use UnInit. */
+    Adapter_IRQ_Initialized = true;
+
     // Request the IRQs for each AIC or register to IRQ of other AIC.
     for (i=0; i<ARRAY_ELEMCOUNT(Adapter_AICTable); i++)
     {
@@ -699,12 +705,12 @@ Adapter_Interrupts_Init(
             if (res < 0)
             {
                 LOG_CRIT("%s: Request IRQ error %d\n", __func__, res);
-                return res;
+                ret = res;
+                goto error_exit;
             }
             else
             {
-                Adapter_AICTable[i].irq = IntNr;
-                IRQ_AIC_Mapping[IntNr] = Adapter_AICTable + i;
+                WRITE_ONCE(Adapter_AICTable[i].irq, IntNr);
                 LOG_INFO("%s: Successfully hooked IRQ %d\n", __func__, IntNr);
             }
         }
@@ -718,6 +724,7 @@ Adapter_Interrupts_Init(
             if (IntNr < 0 || IntNr >= ADAPTER_MAX_INTERRUPTS)
             {
                 LOG_CRIT("%s: IRQ %d out of range\n", __func__,IntNr);
+                goto error_exit;
             }
             Adapter_IRQTable[IntNr].extra =  Adapter_AICTable + i;
             Adapter_Interrupt_SetHandler(IntNr, AdapterINT_ChainedAIC);
@@ -731,6 +738,10 @@ Adapter_Interrupts_Init(
     Adapter_IRQ_Initialized = true;
 
     return 0;
+
+error_exit:
+    Adapter_Interrupts_UnInit(nIRQ);
+    return ret;
 }
 
 
@@ -754,10 +765,9 @@ Adapter_Interrupts_UnInit(const int nIRQ)
         {
             EIP201_SourceMask_DisableSource(Adapter_AICTable[i].Device,
                                             EIP201_SOURCE_ALL);
-            Adapter_AICTable[i].Device = NULL;
         }
 
-        if(Adapter_AICTable[i].isIRQ && Adapter_AICTable[i].irq > 0)
+        if(Adapter_AICTable[i].isIRQ && Adapter_AICTable[i].irq >= 0)
         {
 #ifdef ADAPTER_EIP202_USE_UMDEVXS_IRQ
             UMDevXS_Interrupt_Request(NULL,Adapter_AICTable[i].irq_idx);
@@ -788,7 +798,11 @@ Adapter_Interrupts_UnInit(const int nIRQ)
 
     AdapterINT_Report_InterruptCounters();
 
-    ZEROINIT(IRQ_AIC_Mapping);
+    for (i = 0; i < ARRAY_ELEMCOUNT(Adapter_AICTable); i++)
+    {
+        Adapter_AICTable[i].Device = NULL;
+        WRITE_ONCE(Adapter_AICTable[i].irq, -1);
+    }
 
     Adapter_IRQ_Initialized = false;
 

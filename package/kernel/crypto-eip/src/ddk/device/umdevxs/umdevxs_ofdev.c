@@ -83,6 +83,7 @@ int
 UMDevXS_OFDev_Init(void)
 {
     LKM_Init_t LKMInit;
+    int rc;
 
     LOG_INFO(UMDEVXS_LOG_PREFIX "%s: entered\n", __func__);
 
@@ -98,12 +99,13 @@ UMDevXS_OFDev_Init(void)
     LKMInit.PM_p                = RPM_OPS_PM;
 #endif
 
-    if (LKM_Init(&LKMInit) < 0)
+    rc = LKM_Init(&LKMInit);
+    if (rc < 0)
     {
         LOG_CRIT(UMDEVXS_LOG_PREFIX
                  "%s: Failed to register the OF device\n",
                  __func__);
-        return -1;
+        return rc;
     }
 
 #ifdef UMDEVXS_USE_RPM
