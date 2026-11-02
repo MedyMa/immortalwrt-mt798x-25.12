@@ -371,6 +371,8 @@ function M.prepare()
 	merge(values, c:get_all("mapd", "mapd_user"))
 	merge(values, cfg)
 	values.enable, values.Enable, values.network = nil, nil, nil
+	-- netifd owns addressing and DHCP, including after controller changes.
+	values.DhcpCtl = "0"
 	values.DeviceRole, values.lan_interface = role, table.concat(ports, " ")
 	values.wan_interface = c:get("network", "wan", "device") or ""
 	values.bss_config_priority = table.concat(mains, ";")

@@ -1337,7 +1337,7 @@ drv_mtwifi_setup() {
 	wireless_set_up
 
 	lock -u $LOCK_FILE
-	if [ -x /usr/libexec/mtk-easymesh ]; then
+	if [ -x /usr/libexec/mtk-easymesh ] && [ "$(uci -q get mapd.mapd_cfg.enable)" = 1 ]; then
 		/etc/init.d/easymesh reload >/dev/null 2>&1 &
 	fi
 }

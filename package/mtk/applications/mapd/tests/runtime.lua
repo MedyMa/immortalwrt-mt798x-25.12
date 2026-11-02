@@ -126,6 +126,9 @@ for i = 0, 2 do write("/etc/wireless/b" .. i .. ".dat", "MapMode=1\n") end
 local interfaces = mesh.interfaces()
 expect(#interfaces == 3 and interfaces[1].ifname == "ra0" and interfaces[3].ifname == "rax0", "all BE14 bands resolve through L1 profile")
 expect(interfaces[1].ifname ~= "platform/11280000.pcie/pci0000:00/0000:00:00.0", "PCI paths are never control interfaces")
+local wireless_before = fs.readfile("/etc/config/wireless")
+expect(not mesh.configure() and fs.readfile("/etc/config/wireless") == wireless_before,
+	"disabled Mesh does not create backhaul interfaces or reload wireless")
 c = uci.cursor(); c:set("mapd", "mapd_cfg", "enable", "1"); c:commit("mapd")
 expect(mesh.configure(), "agent creates managed backhaul STAs")
 expect(not mesh.configure(), "backhaul configuration is idempotent")
@@ -156,10 +159,12 @@ mesh.exec = function(argv)
 	return true, "OK\n"
 end
 local network_before, dhcp_before = fs.readfile("/etc/config/network"), fs.readfile("/etc/config/dhcp")
+c = uci.cursor(); c:set("mapd", "mapd_cfg", "DhcpCtl", "1"); c:commit("mapd")
 expect(mesh.prepare(), "controller runtime configuration generated")
 local state = mesh.read_json(mesh.state_path)
 expect(state.almac == "02:10:20:30:40:50" and state.bridge == "br-lan", "AL MAC and bridge come from running LAN")
 local mapcfg = fs.readfile("/etc/map/mapd_cfg")
+expect(mapcfg:find("DhcpCtl=0\n", 1, true), "native runtime disables legacy DHCP control")
 expect(mapcfg:find("lan_interface=lan0 lan1", 1, true) and not mapcfg:find("lan_interface=eth2", 1, true), "LAN ports do not include unbridged WAN")
 expect(mapcfg:find("SteerEnable=1", 1, true), "current UI settings override stale user mirrors")
 expect(fs.readfile("/etc/map/1905d.cfg"):find("map_root=1", 1, true), "controller role reaches 1905 configuration")
