@@ -1,7 +1,9 @@
 # MediaTek EasyMesh：25.12 原生无线后端集成
 
 适用于本源码树的 `mt_wifi7` 私有驱动、`mtwifi-cfg`、netifd 和 hostapd 后端。
-LuCI 提供基础设置、入网引导、状态、客户端、MLO 五个页面。
+中文菜单名称为“无线Mesh”，位于“网络”菜单下。页面按 Traffic App 的卡片样式统一，
+提供概览、设置、添加节点、MLO 四个选项卡；概览同时展示运行状态与本机关联设备。
+按钮、开关、表单、选项卡与编辑弹窗适配 Argon 明暗模式及窄屏。
 运行代码和依赖均由源码包安装。
 
 ## 构建与默认状态
@@ -64,9 +66,13 @@ Controller 或关闭 Mesh 时禁用自动创建的 STA。WPS/DPP 学到的 AP �
 | `/etc/map/wts_bsta_mlo_config` | Agent 回程 MLD profiles |
 | `/var/run/easymesh/platform.json`、`error` | 当前平台状态和最近一次服务错误，不含无线密码 |
 
-MLO 页的本机 `wireless.mldgroup` 范围为 0–16；Controller 分发使用
+本机 MLO 只在“网络 → 无线”的现有 MLO 管理器中设置，由其统一维护
+`wireless` 分组以及恢复记录。无线Mesh 页面不直接修改本机 `mldgroup`、`mlo` 或恢复文件。
+
+无线Mesh 的 MLO 页面仅允许 Controller 编辑下发给 Agent 的策略，使用
 `mapd` 的 `iface` sections 和 `mld_groupID`，0 表示不分组，1–16 为多链路组，
 17–48 为单链路 profiles。无显式 BSS profiles 时，从本机活动 AP 生成。
+Agent 接收主节点下发的无线配置，避免再在同一 Agent 上独立调整本机 MLO 分组。
 `bh_sta` sections 的链路数必须与无线电列表相符。配置通过校验不代表设备已建立多链路。
 
 ## 诊断
@@ -83,8 +89,8 @@ logread -e easymesh
 
 状态页分别显示配置开关、开机启用状态、三个实际进程、mapd 控制套接字、LAN 桥、
 拓扑和守护进程输出。只有进程及套接字均就绪时才显示运行。
-客户端页仅展示本机 `iw` 查询到的终端，不冒充全网客户端表；无法判断的回程身份
-显示 Unknown。接口速率或 Mesh 状态不作为 NPU、PPE、EIP 硬件加速的证据。
+概览中的设备列表仅展示本机 `iw` 查询到的终端，不冒充全网客户端表；无法判断的
+链路类型留空，不作推测。运行状态和设备列表每 10 秒一起更新，后台故障分别显示。接口速率或 Mesh 状态不作为 NPU、PPE、EIP 硬件加速的证据。
 
 ## 验证
 

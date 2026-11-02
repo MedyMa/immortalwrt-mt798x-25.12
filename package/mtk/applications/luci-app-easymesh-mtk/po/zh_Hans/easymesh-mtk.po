@@ -2,7 +2,7 @@ msgid ""
 msgstr "Content-Type: text/plain; charset=UTF-8\n"
 
 msgid "EasyMesh"
-msgstr "EasyMesh"
+msgstr "无线Mesh"
 
 msgid "Basic Settings"
 msgstr "基础设置"
@@ -23,7 +23,7 @@ msgid "General"
 msgstr "常规"
 
 msgid "Enable EasyMesh"
-msgstr "启用 EasyMesh"
+msgstr "启用 无线Mesh"
 
 msgid "Work Mode"
 msgstr "工作模式"
@@ -41,13 +41,13 @@ msgid "Auto"
 msgstr "自动"
 
 msgid "Controller"
-msgstr "控制器"
+msgstr "主节点"
 
 msgid "Agent"
-msgstr "代理节点"
+msgstr "子节点"
 
 msgid "Changing the role requires a restart of the EasyMesh daemons."
-msgstr "修改角色后需要重启 EasyMesh 守护进程。"
+msgstr "修改角色后需要重启 无线Mesh 守护进程。"
 
 msgid "MAP version"
 msgstr "MAP 版本"
@@ -173,7 +173,7 @@ msgid "The controller manages the DHCP server setting of its agents."
 msgstr "控制器管理其代理节点的 DHCP 服务器设置。"
 
 msgid "EasyMesh status"
-msgstr "EasyMesh 状态"
+msgstr "无线Mesh 状态"
 
 msgid "Runtime state of the MAP Turnkey daemons and of the current mesh."
 msgstr "MAP Turnkey 守护进程与当前 Mesh 的运行状态。"
@@ -198,21 +198,6 @@ msgstr "已设为开机启动"
 
 msgid "disabled at boot"
 msgstr "未设为开机启动"
-
-msgid "Device role"
-msgstr "设备角色"
-
-msgid "Controller"
-msgstr "控制器"
-
-msgid "Agent"
-msgstr "代理节点"
-
-msgid "Auto"
-msgstr "自动"
-
-msgid "MAP version"
-msgstr "MAP 版本"
 
 msgid "AL MAC"
 msgstr "AL MAC"
@@ -242,7 +227,7 @@ msgid "(no data)"
 msgstr "（无数据）"
 
 msgid "EasyMesh onboarding"
-msgstr "EasyMesh 入网引导"
+msgstr "无线Mesh 入网引导"
 
 msgid "Onboarding joins an agent to the mesh. Use WPS for a quick setup or DPP for a secure QR-code based setup."
 msgstr "入网引导用于将代理节点加入 Mesh。快速配置可使用 WPS，安全配置可使用 DPP 二维码方式。"
@@ -280,15 +265,6 @@ msgstr "DPP URI"
 msgid "Current device role: %s"
 msgstr "当前设备角色：%s"
 
-msgid "Controller"
-msgstr "控制器"
-
-msgid "Agent"
-msgstr "代理节点"
-
-msgid "Auto"
-msgstr "自动"
-
 msgid "Retrieve DPP URI"
 msgstr "获取 DPP URI"
 
@@ -302,7 +278,7 @@ msgid "Re-run the MAP Turnkey bring-up script. Required after a device role or M
 msgstr "重新运行 MAP Turnkey 启动脚本。在修改设备角色或 MAP 版本后，以及修改超过四个 MBSS 后必须执行。"
 
 msgid "Restart EasyMesh"
-msgstr "重启 EasyMesh"
+msgstr "重启 无线Mesh"
 
 msgid "WPS push button started on %s."
 msgstr "已在 %s 上启动 WPS 按钮。"
@@ -314,7 +290,7 @@ msgid "DPP onboarding started on the controller."
 msgstr "已在控制器上启动 DPP 入网。"
 
 msgid "EasyMesh daemons are restarting, this may take a few seconds."
-msgstr "EasyMesh 守护进程正在重启，可能需要几秒钟。"
+msgstr "无线Mesh 守护进程正在重启，可能需要几秒钟。"
 
 msgid "DPP presence band updated."
 msgstr "DPP 存在通告频段已更新。"
@@ -338,7 +314,7 @@ msgid "Connected Clients"
 msgstr "已连接客户端"
 
 msgid "All clients currently associated to the EasyMesh network. Signal bars reflect RSSI. Rates show RX/TX in Mbps. This list refreshes automatically every 10 seconds."
-msgstr "当前连接到 EasyMesh 网络的所有客户端。信号条反映 RSSI，速率为 RX/TX（Mbps）。列表每 10 秒自动刷新。"
+msgstr "当前连接到 无线Mesh 网络的所有客户端。信号条反映 RSSI，速率为 RX/TX（Mbps）。列表每 10 秒自动刷新。"
 
 msgid "Hostname / IP"
 msgstr "主机名 / IP"
@@ -358,14 +334,8 @@ msgstr "接收 / 发送"
 msgid "Type"
 msgstr "类型"
 
-msgid "Backhaul"
-msgstr "回程"
-
 msgid "Client"
 msgstr "客户端"
-
-msgid "Refresh"
-msgstr "刷新"
 
 msgid "No clients connected."
 msgstr "当前没有已连接的客户端。"
@@ -422,7 +392,7 @@ msgid "Cert"
 msgstr "Cert 认证模式"
 
 msgid "Driver MapMode. 1 = EasyMesh/MAP Turnkey, 2 = Standalone Band Steering (BS 2.0), 3 = API Mode, 4 = Cert. Requires driver reload / reboot."
-msgstr "驱动 MapMode。1 = EasyMesh/MAP Turnkey，2 = 独立频段引导（BS 2.0），3 = API 模式，4 = Cert 认证模式。需要重载驱动或重启设备。"
+msgstr "驱动 MapMode。1 = 无线Mesh/MAP Turnkey，2 = 独立频段引导（BS 2.0），3 = API 模式，4 = Cert 认证模式。需要重载驱动或重启设备。"
 
 msgid "SR Mesh Uplink Mode"
 msgstr "Mesh 上行链路空间复用模式"
@@ -758,7 +728,7 @@ msgid "Radio MAC"
 msgstr "无线电 MAC"
 
 msgid "Select the radios participating in EasyMesh. Applying a mode change reloads the vendor driver."
-msgstr "选择参与 EasyMesh 的无线电。应用模式变更会重新加载私有驱动。"
+msgstr "选择参与 无线Mesh 的无线电。应用模式变更会重新加载私有驱动。"
 
 msgid "Service errors"
 msgstr "服务错误"
@@ -788,4 +758,298 @@ msgid "Unknown"
 msgstr "未知"
 
 msgid "DPP presence band saved. Restart EasyMesh to apply."
-msgstr "DPP 入网频段已保存，重启 EasyMesh 后生效。"
+msgstr "DPP 入网频段已保存，重启 无线Mesh 后生效。"
+
+msgid "0: off · 1–16: multi-link · 17–48: single-link"
+msgstr "0：关闭 · 1–16：多链路 · 17–48：单链路"
+
+msgid "0: off · Use the same group from 1 to 16 on participating bands."
+msgstr "0 表示关闭；参与多链路的频段使用相同组号（1–16）。"
+
+msgid "Add node"
+msgstr "添加节点"
+
+msgid "Advanced profiles distributed to agents"
+msgstr "向子节点分发的高级配置"
+
+msgid "Applying changes reloads this radio."
+msgstr "应用修改时会重新加载该无线电。"
+
+msgid "Associated clients"
+msgstr "关联设备"
+
+msgid "Backhaul link"
+msgstr "回程链路"
+
+msgid "Backhaul profiles"
+msgstr "回程配置"
+
+msgid "Band saved. Restart EasyMesh to apply."
+msgstr "频段已保存，重启 无线Mesh 后生效。"
+
+msgid "Bands and driver options"
+msgstr "频段与驱动设置"
+
+msgid "Basic"
+msgstr "基础设置"
+
+msgid "Check service status below"
+msgstr "请查看下方服务状态"
+
+msgid "Check the connection in Overview"
+msgstr "在概览中确认连接"
+
+msgid "Clients"
+msgstr "客户端"
+
+msgid "Code generated. Copy it to the controller to add this node."
+msgstr "入网码已生成，请复制到主节点添加此设备。"
+
+msgid "Connect another node to your Mesh"
+msgstr "将新节点接入 Mesh 网络"
+
+msgid "Connected devices will appear here."
+msgstr "设备连接后会显示在这里。"
+
+msgid "Connection"
+msgstr "链路"
+
+msgid "Control connection"
+msgstr "控制连接"
+
+msgid "Controller profiles"
+msgstr "主节点分发配置"
+
+msgid "Copy code"
+msgstr "复制入网码"
+
+msgid "DPP code pairing"
+msgstr "DPP 入网码配对"
+
+msgid "DPP requires MAP R3. Change the MAP version in Settings first."
+msgstr "DPP 需要 MAP R3，请先在设置中修改版本。"
+
+msgid "Device"
+msgstr "设备"
+
+msgid "Devices connected to this router"
+msgstr "查看当前连接本机的设备"
+
+msgid "Discovery band"
+msgstr "发现频段"
+
+msgid "Enable EasyMesh in Settings"
+msgstr "请先在设置中启用 无线Mesh"
+
+msgid "Enable Mesh on both nodes"
+msgstr "两端启用 Mesh"
+
+msgid "Generate a code on this node, then paste it on the controller."
+msgstr "在本机生成入网码，再复制到主节点完成配对。"
+
+msgid "Generate a code to share with the controller"
+msgstr "生成入网码后复制到主节点"
+
+msgid "Generate code"
+msgstr "生成入网码"
+
+msgid "Group members need matching SSID and security. Applying changes interrupts connections."
+msgstr "同组频段须使用相同 SSID 和安全设置，应用修改会短暂断开连接。"
+
+msgid "Leave empty to use the local AP profiles."
+msgstr "留空时使用本机 AP 配置。"
+
+msgid "Link rate"
+msgstr "连接速率"
+
+msgid "Local router only · Refreshes every 10 seconds"
+msgstr "仅显示本机关联设备 · 每 10 秒更新"
+
+msgid "Manage multi-link groups"
+msgstr "管理无线多链路分组"
+
+msgid "Mesh manager"
+msgstr "Mesh 管理"
+
+msgid "Mesh settings"
+msgstr "Mesh 设置"
+
+msgid "Mesh status at a glance"
+msgstr "查看运行状态与回程"
+
+msgid "No backhaul information"
+msgstr "暂无回程信息"
+
+msgid "No clients connected"
+msgstr "暂无关联设备"
+
+msgid "No data yet"
+msgstr "暂无数据"
+
+msgid "No onboarding code available."
+msgstr "暂时无法获取入网码。"
+
+msgid "Node discovery"
+msgstr "节点发现"
+
+msgid "Node request accepted. Check Overview for the join result."
+msgstr "添加请求已提交，请在概览中确认入网结果。"
+
+msgid "Not ready"
+msgstr "未就绪"
+
+msgid "Onboarding code"
+msgstr "入网码"
+
+msgid "Onboarding code copied."
+msgstr "入网码已复制。"
+
+msgid "One controller manages the other agents."
+msgstr "主节点统一管理其余子节点。"
+
+msgid "Pair with one button"
+msgstr "一键配对"
+
+msgid "Participate in Mesh"
+msgstr "参与 Mesh"
+
+msgid "Paste a code generated by the agent, then add the node."
+msgstr "粘贴子节点生成的入网码，然后添加节点。"
+
+msgid "Paste the agent DPP code here"
+msgstr "粘贴子节点的 DPP 入网码"
+
+msgid "Paste the agent onboarding code first."
+msgstr "请先粘贴子节点的入网码。"
+
+msgid "Radio participation and advanced wireless settings"
+msgstr "选择参与频段，按需调整高级无线参数"
+
+msgid "Ready"
+msgstr "已就绪"
+
+msgid "Refresh to retry"
+msgstr "刷新后重试"
+
+msgid "Request failed."
+msgstr "请求失败。"
+
+msgid "Restart failed."
+msgstr "重启请求失败。"
+
+msgid "Restart requested. Check Overview for service status."
+msgstr "重启请求已提交，请在概览中查看服务状态。"
+
+msgid "Restart requested. Status will update automatically."
+msgstr "重启请求已提交，状态将自动更新。"
+
+msgid "Running"
+msgstr "运行中"
+
+msgid "Select and copy the code manually."
+msgstr "请选中入网码并手动复制。"
+
+msgid "Service status"
+msgstr "服务状态"
+
+msgid "Set up your Mesh network"
+msgstr "配置无线 Mesh 网络"
+
+msgid "Settings"
+msgstr "设置"
+
+msgid "Start WPS"
+msgstr "开始 WPS 配对"
+
+msgid "Start WPS on both nodes"
+msgstr "两端开始 WPS 配对"
+
+msgid "Start at boot"
+msgstr "开机启动"
+
+msgid "Stopped"
+msgstr "未运行"
+
+msgid "Topology and device details"
+msgstr "拓扑与设备详情"
+
+msgid "Unable to read Mesh status."
+msgstr "无法获取 Mesh 状态。"
+
+msgid "Unable to read clients"
+msgstr "无法获取关联设备"
+
+msgid "Unavailable"
+msgstr "暂不可用"
+
+msgid "Updated every 15 seconds"
+msgstr "每 15 秒自动更新"
+
+msgid "Use a visible 2.4 or 5 GHz network. WPS is unavailable on 6 GHz."
+msgstr "使用未隐藏的 2.4 或 5 GHz 网络，6 GHz 不支持 WPS。"
+
+msgid "Use an existing LAN bridge. Manage addresses and DHCP under Network."
+msgstr "使用已有 LAN 桥；地址与 DHCP 请在“网络”中设置。"
+
+msgid "Use an onboarding code · MAP R3"
+msgstr "通过入网码配对 · 需要 MAP R3"
+
+msgid "Use the same version on every node. DPP requires R3."
+msgstr "所有节点使用相同版本；DPP 配对需要 R3。"
+
+msgid "WPS quick pairing"
+msgstr "WPS 快速配对"
+
+msgid "WPS requested. Start WPS on the other node, then check Overview."
+msgstr "WPS 请求已提交，请同时在另一端开始配对，并在概览中确认结果。"
+
+msgid "Wireless control"
+msgstr "无线控制"
+
+msgid "BSS profile"
+msgstr "BSS 配置"
+
+msgid "Backhaul profile"
+msgstr "回程配置"
+
+msgid "Local router only"
+msgstr "仅显示本机关联设备"
+
+msgid "Refreshes every 10 seconds"
+msgstr "每 10 秒自动更新"
+
+msgid "Expand network details to check services"
+msgstr "展开网络详情查看服务"
+
+msgid "Network details"
+msgstr "网络详情"
+
+msgid "Device details"
+msgstr "设备详情"
+
+msgid "Mesh status and connected devices"
+msgstr "查看运行状态与关联设备"
+
+msgid "Wireless MLO settings"
+msgstr "无线 MLO 设置"
+
+msgid "Local MLO groups are managed under Network → Wireless. The profiles below are distributed to agents by the controller."
+msgstr "本机 MLO 统一在“网络 → 无线”中管理。此处仅配置主节点向子节点下发的策略。"
+
+msgid "Mesh profiles for agents"
+msgstr "管理向子节点下发的多链路配置"
+
+msgid "Mesh multi-link profiles"
+msgstr "Mesh 多链路配置"
+
+msgid "Managed by the controller"
+msgstr "由主节点统一管理"
+
+msgid "Configure distributed profiles on the controller. Agents receive their wireless settings from it."
+msgstr "请在主节点配置分发策略，子节点会接收其下发的无线设置。"
+
+msgid "Node wireless profiles"
+msgstr "子节点无线配置"
+
+msgid "Leave profiles empty to follow local AP settings. Agents should be configured by the controller."
+msgstr "留空时沿用本机 AP 配置；子节点请由主节点统一配置。"

@@ -3,6 +3,8 @@
 'require rpc';
 'require uci';
 'require ui';
+'require dom';
+'require easymesh-mtk.ui as meshUI';
 
 var calls = {
 	get_uri: rpc.declare({ object: 'easymesh-mtk', method: 'get_uri', params: [ 'ifname' ], expect: { '': {} } }),
@@ -12,172 +14,131 @@ var calls = {
 };
 
 return view.extend({
-	load: function() {
-		return uci.load('mapd');
-	},
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null,
+
+	load: function() { return Promise.all([ uci.load('mapd'), uci.load('1905d_cfg') ]); },
 
 	handleRpc: function(method, args) {
-		return calls[method].apply(null, args || []).catch(function(e) {
-			return { ok: false, error: e.message };
-		});
+		return calls[method].apply(null, args || []).catch(function(e) { return { ok: false, error: e.message }; });
 	},
 
-	report: function(res, okMessage) {
-		if (res.ok)
-			ui.addNotification(null, E('p', {}, okMessage), 'info');
-		else
-			ui.addNotification(null, E('p', {}, _('Failed: %s').format(res.error || _('unknown error'))), 'error');
+	report: function(result, message, target) {
+		var text = result.ok ? message : (result.error || _('Request failed.'));
+		target = target || this.notice;
+		if (target) {
+			target.className = 'em-notice em-inline-notice ' + (result.ok ? 'em-notice-success' : 'em-notice-error');
+			dom.content(target, text);
+		} else ui.addNotification(null, E('p', {}, text), result.ok ? 'info' : 'error');
 	},
 
 	handleWps: function(ev) {
-		var btn = ev.currentTarget;
-		btn.classList.add('spinning');
-		btn.disabled = true;
-		return this.handleRpc('action', [ 'wps', 'all', '' ])
-			.then(L.bind(function(res) {
-				btn.classList.remove('spinning');
-				btn.disabled = false;
-				this.report(res, _('WPS request accepted on %s. Check topology for the join result.').format(res.ifname || 'all radios'));
-			}, this));
+		var self = this;
+		return meshUI.busy(ev.currentTarget, function() {
+			return self.handleRpc('action', [ 'wps', 'all', '' ]).then(function(r) {
+				self.report(r, _('WPS requested. Start WPS on the other node, then check Overview.'), self.wpsNotice);
+			});
+		});
 	},
 
 	handleDppUri: function(ev) {
-		var btn = ev.currentTarget;
-		btn.classList.add('spinning');
-		btn.disabled = true;
-		return this.handleRpc('get_uri', [ '' ])
-			.then(L.bind(function(res) {
-				btn.classList.remove('spinning');
-				btn.disabled = false;
+		var self = this;
+		return meshUI.busy(ev.currentTarget, function() {
+			return self.handleRpc('get_uri', [ '' ]).then(function(r) {
 				var out = document.getElementById('easymesh_dpp_uri');
-
-				if (out)
-					out.value = res.uri || '';
-
-				this.report(res.uri ? { ok: true } : { ok: false, error: res.error || _('no DPP URI available') },
-					_('DPP bootstrap URI retrieved, copy it to the controller.'));
-			}, this));
+				if (r.uri && out) { out.value = r.uri; if (self.copyButton) self.copyButton.disabled = false; }
+				self.report(r.uri ? { ok: true } : { ok: false, error: r.error || _('No onboarding code available.') },
+					_('Code generated. Copy it to the controller to add this node.'), self.dppNotice);
+			});
+		});
 	},
 
 	handleDppEnroll: function(ev) {
-		var uri = (document.getElementById('easymesh_dpp_uri') || {}).value || '';
+		var self = this, uri = ((document.getElementById('easymesh_dpp_uri') || {}).value || '').trim();
+		if (!/^DPP:/.test(uri)) { this.report({ ok: false, error: _('Paste the agent onboarding code first.') }, '', this.dppNotice); return Promise.resolve(); }
+		return meshUI.busy(ev.currentTarget, function() {
+			return self.handleRpc('action', [ 'dpp_enroll', '', uri ]).then(function(r) {
+				self.report(r, _('Node request accepted. Check Overview for the join result.'), self.dppNotice);
+			});
+		});
+	},
 
-		if (!/^DPP:/.test(uri.trim())) {
-			ui.addNotification(null, E('p', {}, _('Paste a DPP URI (starting with "DPP:") first.')), 'warning');
-			return;
-		}
-
-		var btn = ev.currentTarget;
-		btn.classList.add('spinning');
-		btn.disabled = true;
-		return this.handleRpc('action', [ 'dpp_enroll', '', uri.trim() ])
-			.then(L.bind(function(res) {
-				btn.classList.remove('spinning');
-				btn.disabled = false;
-				this.report(res, _('DPP request accepted by the controller. Check topology for the join result.'));
-			}, this));
+	handleCopy: function(ev) {
+		var self = this, out = document.getElementById('easymesh_dpp_uri');
+		return meshUI.busy(ev.currentTarget, function() {
+			var copy = navigator.clipboard && window.isSecureContext ? navigator.clipboard.writeText(out.value) : Promise.resolve().then(function() {
+				out.focus(); out.select();
+				if (!document.execCommand('copy')) throw new Error(_('Select and copy the code manually.'));
+			});
+			return copy.then(function() { self.report({ ok: true }, _('Onboarding code copied.'), self.dppNotice); })
+				.catch(function(e) { self.report({ ok: false, error: e.message }, '', self.dppNotice); });
+		});
 	},
 
 	handleRestart: function(ev) {
-		var btn = ev.currentTarget;
-		btn.classList.add('spinning');
-		btn.disabled = true;
-		return this.handleRpc('restart', [])
-			.then(L.bind(function(res) {
-				btn.classList.remove('spinning');
-				btn.disabled = false;
-				this.report(res, _('EasyMesh daemons are restarting, this may take a few seconds.'));
-			}, this));
+		var self = this;
+		return meshUI.busy(ev.currentTarget, function() {
+			return self.handleRpc('restart', []).then(function(r) { self.report(r, _('Restart requested. Check Overview for service status.')); });
+		});
 	},
 
 	handlePresence: function(ev) {
-		var select = ev.currentTarget;
-		return this.handleRpc('set', [ 'presence_band_priority', select.value ])
-			.then(L.bind(function(res) {
-				this.report(res, _('DPP presence band saved. Restart EasyMesh to apply.'));
-			}, this));
+		var self = this, select = ev.currentTarget, previous = this.presence;
+		return meshUI.busy(select, function() {
+			return self.handleRpc('set', [ 'presence_band_priority', select.value ]).then(function(r) {
+				if (r.ok) self.presence = select.value; else select.value = previous;
+				self.report(r, _('Band saved. Restart EasyMesh to apply.'), self.dppNotice);
+			});
+		});
 	},
 
 	render: function() {
-		var self = this;
-		var role = uci.get('mapd', 'mapd_cfg', 'DeviceRole') || '2';
-		var presence = uci.get('mapd', 'dpp_cfg', 'presence_band_priority') || '5g';
-
-		var body = E([
-			E('h3', {}, _('WPS push button')),
-			E('p', { 'class': 'cbi-section-descr' },
-				_('Start WPS on both the controller and the agent. The agent scans 5 GHz first, ' +
-				  'keep at least one non-hidden 2.4 GHz or 5 GHz fronthaul BSS for WPS.')),
-			E('div', { 'class': 'cbi-page-actions' }, [
-				E('button', {
-					'class': 'btn cbi-button cbi-button-apply',
-					'click': function(ev) { return self.handleWps(ev); }
-				}, _('Start WPS push button'))
-			]),
-
-			E('h3', {}, _('DPP (Wi-Fi Easy Connect)')),
-			E('p', { 'class': 'cbi-section-descr' },
-				_('DPP requires MAP version R3. On the agent press "Retrieve DPP URI", then paste ' +
-				  'that URI on the controller and press "Add DPP URI & start". Multiple URIs can be ' +
-				  'added one after another.')),
-
-			E('div', { 'class': 'cbi-value' }, [
-				E('label', { 'class': 'cbi-value-title' }, _('DPP presence band')),
-				E('div', { 'class': 'cbi-value-field' }, [
-					E('select', { 'class': 'cbi-input-select', 'change': function(ev) { return self.handlePresence(ev); } },
-						[ '5g', '2g' ].map(function(b) {
-							return E('option', { 'value': b, 'selected': b === presence ? 'selected' : null },
-								b === '5g' ? _('5 GHz first') : _('2.4 GHz first'));
-						})),
-					E('div', { 'class': 'cbi-value-description' },
-						_('Band on which DPP presence announcements are sent. Takes effect after a restart.'))
-				])
-			]),
-
-			E('div', { 'class': 'cbi-value' }, [
-				E('label', { 'class': 'cbi-value-title' }, _('DPP URI')),
-				E('div', { 'class': 'cbi-value-field' }, [
-					E('textarea', {
-						'id': 'easymesh_dpp_uri',
-						'rows': 4,
-						'style': 'width:100%',
-						'placeholder': 'DPP:V:2;K:...'
-					}),
-					E('div', { 'class': 'cbi-value-description' },
-						_('Current device role: %s').format(
-							role === '1' ? _('Controller') : (role === '2' ? _('Agent') : _('Auto'))))
-				])
-			]),
-			E('div', { 'class': 'cbi-page-actions' }, [
-				E('button', {
-					'class': 'btn cbi-button cbi-button-action',
-					'click': function(ev) { return self.handleDppUri(ev); }
-				}, _('Retrieve DPP URI')),
-				' ',
-				E('button', {
-					'class': 'btn cbi-button cbi-button-apply',
-					'click': function(ev) { return self.handleDppEnroll(ev); }
-				}, _('Add DPP URI & start'))
-			]),
-
-			E('h3', {}, _('Restart')),
-			E('p', { 'class': 'cbi-section-descr' },
-				_('Re-run the MAP Turnkey bring-up script. Required after a device role or ' +
-				  'MAP version change, and after changing more than four MBSS.')),
-			E('div', { 'class': 'cbi-page-actions' }, [
-				E('button', {
-					'class': 'btn cbi-button cbi-button-reset',
-					'click': function(ev) { return self.handleRestart(ev); }
-				}, _('Restart EasyMesh'))
-			])
+		var self = this, role = uci.get('mapd', 'mapd_cfg', 'DeviceRole') || '2';
+		var controller = role === '1', version = uci.get('1905d_cfg', 'map', 'map_ver') || 'R3';
+		var enabled = uci.get('mapd', 'mapd_cfg', 'enable') === '1';
+		this.presence = uci.get('mapd', 'dpp_cfg', 'presence_band_priority') || '5g';
+		this.notice = E('div', { 'class': 'em-notice', 'role': 'status', 'aria-live': 'polite' });
+		this.wpsNotice = E('div', { 'class': 'em-notice em-inline-notice', 'role': 'status', 'aria-live': 'polite' });
+		this.dppNotice = E('div', { 'class': 'em-notice em-inline-notice', 'role': 'status', 'aria-live': 'polite' });
+		if (!enabled) dom.content(this.notice, _('Enable EasyMesh in Settings'));
+		var wpsButton = meshUI.button(_('Start WPS'), function(ev) { return self.handleWps(ev); }, 'primary', 'wifi');
+		wpsButton.disabled = !enabled;
+		var wps = meshUI.card(_('WPS quick pairing'), [
+			E('div', { 'class': 'em-join-intro' }, [ meshUI.icon('wifi'), E('div', {}, [ E('h3', {}, _('Pair with one button')),
+				E('p', {}, _('Use a visible 2.4 or 5 GHz network. WPS is unavailable on 6 GHz.')) ]) ]),
+			E('ol', { 'class': 'em-steps' }, [ _('Enable Mesh on both nodes'), _('Start WPS on both nodes'), _('Check the connection in Overview') ].map(function(step) { return E('li', {}, step); })),
+			wpsButton, this.wpsNotice
 		]);
-
-		return E('div', { 'class': 'cbi-map' }, [
-			E('h2', {}, _('EasyMesh onboarding')),
-			E('div', { 'class': 'cbi-map-descr' },
-				_('Onboarding joins an agent to the mesh. Use WPS for a quick setup or DPP for a ' +
-				  'secure QR-code based setup.')),
-			body
-		]);
+		var dppBody;
+		if (version !== 'R3') dppBody = E('div', { 'class': 'em-notice' }, _('DPP requires MAP R3. Change the MAP version in Settings first.'));
+		else {
+			var field = E('textarea', { 'id': 'easymesh_dpp_uri', 'class': 'em-uri', 'rows': 4,
+				'readonly': controller ? null : true, 'spellcheck': 'false', 'autocomplete': 'off',
+				'placeholder': controller ? _('Paste the agent DPP code here') : _('Generate a code to share with the controller'),
+				'aria-label': _('Onboarding code') });
+			var actions = [];
+			if (controller) actions.push(meshUI.button(_('Add node'), function(ev) { return self.handleDppEnroll(ev); }, 'primary', 'link'));
+			else {
+				actions.push(meshUI.button(_('Generate code'), function(ev) { return self.handleDppUri(ev); }, 'primary', 'link'));
+				this.copyButton = meshUI.button(_('Copy code'), function(ev) { return self.handleCopy(ev); }, 'secondary', 'copy');
+				this.copyButton.disabled = true;
+				actions.push(this.copyButton);
+			}
+			if (!enabled) actions.forEach(function(button) { button.disabled = true; });
+			dppBody = [ E('p', { 'class': 'em-note' }, controller ? _('Paste a code generated by the agent, then add the node.') :
+				_('Generate a code on this node, then paste it on the controller.')),
+				E('div', { 'class': 'em-field em-code-field' }, [ E('label', { 'for': 'easymesh_dpp_uri' }, _('Onboarding code')), field ]),
+				E('div', { 'class': 'em-actions' }, actions), this.dppNotice ];
+			if (!controller) dppBody.push(E('div', { 'class': 'em-field em-presence-field' }, [
+				E('label', { 'for': 'em-presence' }, _('Discovery band')),
+				E('select', { 'id': 'em-presence', 'change': function(ev) { return self.handlePresence(ev); } }, [
+					[ '5g', '5 GHz' ], [ '2g', '2.4 GHz' ], [ '6g', '6 GHz' ]
+				].map(function(band) { return E('option', { 'value': band[0], 'selected': band[0] === self.presence ? true : null }, band[1]); }))
+			]));
+		}
+		return meshUI.page('onboarding', _('Connect another node to your Mesh'), [ this.notice, wps,
+			meshUI.details(_('DPP code pairing'), dppBody, _('Use an onboarding code · MAP R3'))
+		], [ meshUI.badge(meshUI.role(role), 'neutral'), meshUI.button(_('Restart'), function(ev) { return self.handleRestart(ev); }, 'secondary', 'refresh') ]);
 	}
 });

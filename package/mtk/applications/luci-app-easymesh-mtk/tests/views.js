@@ -37,7 +37,7 @@ const form = { Map, NamedSection: 'named', GridSection: 'grid', Flag: 'flag', Li
 function E(tag, attrs, children) {
 	if (Array.isArray(tag)) return E('fragment', {}, tag);
 	if (attrs != null && (Array.isArray(attrs) || typeof attrs !== 'object')) { children = attrs; attrs = {}; }
-	return { tag, attrs: attrs || {}, children: children == null ? [] : Array.isArray(children) ? children : [children], appendChild(node) { this.children.push(node); } };
+	return { tag, attrs: attrs || {}, children: children == null ? [] : Array.isArray(children) ? children : [children], appendChild(node) { this.children.push(node); }, querySelectorAll(selector) { const out = []; function walk(n) { if (!n || typeof n !== 'object') return; if (n.tag === selector) out.push(n); (n.children || []).forEach(walk); } this.children.forEach(walk); return out; } };
 }
 String.prototype.format = function(...args) { let i = 0; return this.replace(/%[sd]/g, () => String(args[i++])); };
 const status = { ok: true, running: false, enable: '1', role: '2', svc_enabled: '1', mapd: 'stopped', p1905: 'stopped', wapp: 'stopped', socket: 'down' };
@@ -55,13 +55,31 @@ const rpc = { declare: declaration => (...values) => {
 	return Promise.resolve(expect(reply, declaration.expect));
 } };
 const ui = { addNotification() {}, createHandlerFn: (ctx, fn) => fn.bind(ctx) };
-const dom = { content: (node, children) => { node.children = children; } };
+const dom = { content: (node, children) => { node.children = Array.isArray(children) ? children : [children]; } };
 const poll = { add: fn => { polls.push(fn); } };
 const document = { getElementById: () => ({ value: 'DPP:V:2;K:public;;' }) };
+// The visual shell is exercised by the native LuCI/Argon preview. Keep these
+// fixtures focused on the existing form and RPC contracts.
+const meshUI = {
+ page: (name, subtitle, children) => E('div', {}, children),
+ card: (title, children) => E('section', {}, [E('h3', {}, title)].concat(children)),
+ details: (title, children) => E('details', {}, [E('summary', {}, title)].concat(children)),
+ icon: () => E('span'), badge: label => E('span', {}, label),
+ metric: (label, value) => E('div', {}, [label, value]),
+ empty: label => E('div', {}, label), output: value => E('pre', {}, value || ''),
+ button: (label, click) => E('button', { click }, label),
+ busy: (button, task) => Promise.resolve().then(task),
+ role: value => value === '1' ? 'Controller' : value === '2' ? 'Agent' : 'Auto',
+ band: value => value || ''
+};
+function loadClients() {
+ const code = fs.readFileSync(path.join(root, 'htdocs/luci-static/resources/easymesh-mtk/clients.js'), 'utf8');
+ return new Function('baseclass', 'meshUI', 'E', '_', code)({ extend: value => value }, meshUI, E, x => x);
+}
 function load(name) {
 	const code = fs.readFileSync(path.join(root, 'htdocs/luci-static/resources/view/easymesh-mtk', name + '.js'), 'utf8');
-	return new Function('view', 'form', 'uci', 'rpc', 'ui', 'dom', 'poll', 'E', '_', 'L', 'document', 'window', code)(
-		{ extend: value => value }, form, uci, rpc, ui, dom, poll, E, x => x, { bind: (fn, ctx) => fn.bind(ctx) }, document, { location: { reload() {} } });
+	return new Function('view', 'form', 'uci', 'rpc', 'ui', 'dom', 'poll', 'E', '_', 'L', 'document', 'window', 'meshUI', 'clientUI', code)(
+		{ extend: value => value }, form, uci, rpc, ui, dom, poll, E, x => x, { bind: (fn, ctx) => fn.bind(ctx), url: (...parts) => '/' + parts.join('/') }, document, { location: { reload() {} } }, meshUI, loadClients());
 }
 const button = () => ({ currentTarget: { classList: { add() {}, remove() {} }, disabled: false } });
 let checks = 0;
@@ -91,17 +109,17 @@ function text(node) { return typeof node === 'string' ? node : (node?.children |
 	check(calls.at(-1).method === 'get_uri' && calls.at(-1).params.ifname === '', 'URI retrieval follows the ubus method signature');
 	const view = load('status'), data = await view.load(), node = view.render(data);
 	check(typeof data[0] === 'object' && data[0].enable === '1', 'status retains the complete RPC reply');
-	const overview = node.children.find(child => child.tag === 'table');
-	check(text(overview.children[0]).includes('stopped'), 'configured enable does not fabricate a running service');
-	const clients = load('clients'); const stations = await clients.load(); clients.render(stations);
-	check(Array.isArray(stations) && polls.length === 1, 'client polling consumes structured arrays');
+	check(text(view.panel).includes('Not ready') && !text(view.panel).includes('Running'), 'configured enable does not fabricate a running service');
+	const clients = loadClients();
+	check(Array.isArray(data[1].clients) && polls.length === 1, 'overview polls status and clients together');
 	check(!text(clients.renderType({ is_mlo: 'No', is_backhaul: 'Unknown' })).includes('MLO'), 'a No string does not label a station as MLO');
 	check(text(clients.renderType({ is_mlo: 'Yes', is_backhaul: 'Unknown' })).includes('MLO'), 'observed MLD stations retain the MLO label');
-	check(text(clients.renderType({ is_backhaul: 'Unknown' })).includes('Unknown'), 'unknown backhaul identity stays unknown');
-	check(text(clients.renderSignalBar('')) === '-', 'missing RSSI is not rendered as a measured signal');
+	check(text(clients.renderType({ is_backhaul: 'Unknown' })) === '—', 'unknown backhaul identity stays unclassified');
+	check(text(clients.renderSignalBar('')) === '—', 'missing RSSI is not rendered as a measured signal');
+	db.mapd.mapd_cfg.DeviceRole = '1';
 	const previous = maps.length; const mlo = load('mlo'); await mlo.load(); await mlo.render();
 	const added = maps.slice(previous), remote = added.find(map => map.config === 'mapd');
 	check(remote.sections.some(section => section.kind === 'grid' && section.name === 'iface') && remote.sections.some(section => section.name === 'bh_sta'), 'MLO settings write the schemas consumed by the daemon adapter');
-	check(!remote.sections.some(section => section.name === 'mld_ap' || section.name === 'mld_sta'), 'unused MLD pseudo-sections are absent');
+	check(!added.some(map => map.config === 'wireless') && !remote.sections.some(section => section.name === 'mld_ap' || section.name === 'mld_sta'), 'Mesh MLO profiles do not create a local wireless editor');
 	console.log(`1..${checks}`);
 })().catch(error => { console.error(error); process.exitCode = 1; });
