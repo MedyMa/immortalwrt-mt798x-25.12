@@ -69,8 +69,6 @@ static int tunnels_show(struct seq_file *s, void *unused)
 		spin_unlock_irqrestore(&info->lock, flags);
 		if (params.params.network.type != NPU_NETWORK_IP)
 			continue;
-		/* Context identity only; a nonzero CDRT is not a packet counter. */
-		seq_printf(s, "# crypto %u 0 %u\n", i, params.cdrt_idx);
 		seq_printf(s, "%u 0 %u %u %u %pI4 %u %pI4 %u %u %u %u\n",
 			i, ifindex, params.params.tunnel.type,
 			params.params.network.ip.proto, &params.params.network.ip.sip,

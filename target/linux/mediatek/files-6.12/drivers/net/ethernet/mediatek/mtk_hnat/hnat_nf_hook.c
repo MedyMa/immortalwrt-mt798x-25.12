@@ -16,7 +16,6 @@
 #include <linux/if_bridge.h>
 
 #include <net/arp.h>
-#include <net/xfrm.h>
 #include <net/neighbour.h>
 #include <net/netfilter/nf_conntrack_helper.h>
 #include <net/netfilter/nf_flow_table.h>
@@ -2341,25 +2340,19 @@ int hnat_bind_crypto_entry(struct sk_buff *skb, const struct net_device *dev, in
 	const struct tcpudphdr *pptr;
 	u32 gmac = NR_DISCARD;
 	int port_id = 0;
-	unsigned int mac_idx;
 	int udp = 0;
 	u32 qid;
-	struct mtk_mac *mac = NULL;
+	struct mtk_mac *mac;
 	struct flow_offload_hw_path hw_path = { .dev = (struct net_device *) dev,
 						.virt_dev = (struct net_device *) dev };
 	u16 h_proto = 0;
-
-	if (!skb || !dev || !hnat_priv || !hnat_priv->eth)
-		return 0;
 
 	if (!tnl_toggle) {
 		pr_notice("tnl_toggle is disable now!|\n");
 		return -1;
 	}
 
-	if (!skb_hnat_is_hashed(skb) || skb_hnat_ppe(skb) >= CFG_PPE_NUM ||
-	    skb_hnat_entry(skb) >= hnat_priv->foe_etry_num ||
-	    !hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)])
+	if (!skb_hnat_is_hashed(skb) || skb_hnat_ppe(skb) >= CFG_PPE_NUM)
 		return 0;
 
 	foe = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
@@ -2376,36 +2369,10 @@ int hnat_bind_crypto_entry(struct sk_buff *skb, const struct net_device *dev, in
 
 	hnat_get_filled_unbind_entry(skb, &entry);
 
-	/* The XFRM inline provider has resolved the real outer Ethernet header.
-	 * Native bridge path lookup requires that destination and ETH flag before
-	 * ndo_flow_offload_check, otherwise a WAN bridge remains a virtual netdev.
-	 */
-	if (dev->type == ARPHRD_ETHER) {
-		if (!skb_mac_header_was_set(skb) ||
-		    skb_mac_header(skb) < skb->head ||
-		    skb_mac_header(skb) + ETH_HLEN > skb_tail_pointer(skb) ||
-		    !is_valid_ether_addr(eth_hdr(skb)->h_dest))
-			return 0;
-		hw_path.flags |= BIT(DEV_PATH_ETHERNET);
-		ether_addr_copy(hw_path.eth_dest, eth_hdr(skb)->h_dest);
-		ether_addr_copy(hw_path.eth_src, eth_hdr(skb)->h_source);
-	}
 	if (dev->netdev_ops->ndo_flow_offload_check) {
-		bool bridge = netif_is_bridge_master(dev);
-		int ret;
-
-		if (bridge)
-			rcu_read_lock_bh();
-		ret = dev->netdev_ops->ndo_flow_offload_check(&hw_path);
-		if (bridge)
-			rcu_read_unlock_bh();
-		if (ret)
-			return 0;
+		dev->netdev_ops->ndo_flow_offload_check(&hw_path);
 		dev = (IS_GMAC1_MODE) ? hw_path.virt_dev : hw_path.dev;
 	}
-
-	if (!dev)
-		return 0;
 
 	if (hw_path.flags & BIT(DEV_PATH_PPPOE)) {
 		memcpy(eth.h_dest, hw_path.eth_dest, ETH_ALEN);
@@ -2573,15 +2540,7 @@ hnat_skip_fill_inner:
 				return -1;
 		}
 
-		/* Only the driver's own physical netdevs have mtk_mac storage. */
-		for (mac_idx = 0; mac_idx < MTK_MAX_DEVS; mac_idx++) {
-			if (hnat_priv->eth->netdev[mac_idx] != master_dev)
-				continue;
-			mac = hnat_priv->eth->mac[mac_idx];
-			break;
-		}
-		if (!mac)
-			return -EOPNOTSUPP;
+		mac = netdev_priv(master_dev);
 		gmac = HNAT_GMAC_FP(mac->id);
 	} else {
 		pr_notice("Unknown case of dp, iif=%x --> %s\n", skb_hnat_iface(skb), dev->name);
@@ -4565,65 +4524,6 @@ static int check_vlan(u16 vid)
 }	
 #endif
 
-/* Tunnel outer headers still have their inner Ethernet header at this
- * point. Resolve the real underlay neighbour, including the XFRM path,
- * into a separate copy before the native bridge FDB callback.
- */
-static bool hnat_npu_bridge_neighbour(struct sk_buff *skb,
-				      const struct net_device *out,
-				      struct flow_offload_hw_path *path)
-{
-	struct dst_entry *dst = skb_dst(skb);
-	struct neighbour *neigh;
-	bool valid;
-
-	if (!dst || skb->protocol != htons(ETH_P_IP))
-		return false;
-	dst = xfrm_dst_path(dst);
-	if (!dst || !dst->ops || dst->ops->family != AF_INET || dst->dev != out)
-		return false;
-	neigh = dst_neigh_lookup_skb(dst, skb);
-	if (!neigh)
-		return false;
-	neigh_ha_snapshot(path->eth_dest, neigh, out);
-	valid = (READ_ONCE(neigh->nud_state) & NUD_VALID) &&
-		is_valid_ether_addr(path->eth_dest) && is_valid_ether_addr(out->dev_addr);
-	if (valid) {
-		ether_addr_copy(path->eth_src, out->dev_addr);
-		path->flags |= BIT(DEV_PATH_ETHERNET);
-	}
-	neigh_release(neigh);
-	return valid;
-}
-
-static bool hnat_npu_bridge_path(const struct net_device *out,
-				 const struct flow_offload_hw_path *path)
-{
-	struct net_device *bridge = (struct net_device *)out;
-	struct net_device *lower;
-	struct list_head *iter;
-	unsigned int ports = 0, i;
-	bool valid = true, physical = false;
-
-	if (br_vlan_enabled(out) || path->flags != BIT(DEV_PATH_ETHERNET) ||
-	    path->virt_dev != out || !hnat_priv->eth)
-		return false;
-	for (i = 0; i < MTK_MAX_DEVS; i++)
-		if (path->dev == hnat_priv->eth->netdev[i] && hnat_priv->eth->mac[i])
-			physical = true;
-	if (!physical)
-		return false;
-	rcu_read_lock();
-	iter = &bridge->adj_list.lower;
-	while ((lower = netdev_next_lower_dev_rcu(bridge, &iter))) {
-		ports++;
-		if (lower != path->dev || br_port_get_stp_state(lower) != BR_STATE_FORWARDING)
-			valid = false;
-	}
-	rcu_read_unlock();
-	return valid && ports == 1;
-}
-
 static unsigned int mtk_hnat_nf_post_routing(
 	struct sk_buff *skb, const struct net_device *out,
 	int (*fn)(struct sk_buff *, const struct net_device *,
@@ -4634,7 +4534,7 @@ static unsigned int mtk_hnat_nf_post_routing(
 	struct foe_entry *entry;
 	struct flow_offload_hw_path hw_path = { .virt_dev = (struct net_device *)out };
 	const struct net_device *arp_dev = out;
-	bool is_virt_dev = false, npu_bridge = false;
+	bool is_virt_dev = false;
 
 	if (xlat_toggle && !mtk_464xlat_post_process(skb, out))
 		return 0;
@@ -4666,21 +4566,9 @@ static unsigned int mtk_hnat_nf_post_routing(
 	}
 
 	hw_path.dev = (struct net_device *)out;
-	npu_bridge = netif_is_bridge_master(out) &&
-		skb_hnat_tops(skb) && skb_hnat_is_encap(skb);
-	if (npu_bridge && !hnat_npu_bridge_neighbour(skb, out, &hw_path))
-		return 0;
 
 	if (out->netdev_ops->ndo_flow_offload_check) {
-		int ret;
-
-		if (npu_bridge)
-			rcu_read_lock_bh();
-		ret = out->netdev_ops->ndo_flow_offload_check(&hw_path);
-		if (npu_bridge)
-			rcu_read_unlock_bh();
-		if (npu_bridge && ret)
-			return 0;
+		out->netdev_ops->ndo_flow_offload_check(&hw_path);
 
 		out = (IS_GMAC1_MODE) ? hw_path.virt_dev : hw_path.dev;
 		if (hw_path.flags & BIT(DEV_PATH_TNL) && mtk_tnl_encap_offload) {
@@ -4695,9 +4583,6 @@ static unsigned int mtk_hnat_nf_post_routing(
 			}
 		}
 	}
-
-	if (npu_bridge && !hnat_npu_bridge_path(arp_dev, &hw_path))
-		return 0;
 
 	if (!IS_LAN_GRP(out) && !IS_WAN(out) && !IS_EXT(out))
 		is_virt_dev = true;
