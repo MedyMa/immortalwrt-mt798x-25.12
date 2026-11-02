@@ -286,6 +286,8 @@ local function find_first_card_profile()
 end
 
 function mtwifi_service_misc()
+    -- The native MAP service is started after hostapd/netifd setup completes.
+    if utils.exists("/usr/libexec/mtk-easymesh") then return end
     local mapd_default = utils.load_profile("/etc/map/mapd_default.cfg") or {}
     local mapd_user    = utils.load_profile("/etc/map/mapd_user.cfg") or {}
     local first_card   = find_first_card_profile()
@@ -318,6 +320,10 @@ function mtwifi_service_misc()
 end
 
 function mtwifi_service_misc_clean()
+    if utils.exists("/usr/libexec/mtk-easymesh") then
+        os.execute("/etc/init.d/easymesh stop >/dev/null 2>&1")
+        return
+    end
     os.execute("rm -rf /tmp/wapp_ctrl")
     os.execute("killall -15 mapd 2>/dev/null")
     os.execute("killall -15 wapp 2>/dev/null")
@@ -527,12 +533,17 @@ function mtwifi_cfg_cfg80211_tool_hook(cfg)
                 end
                 __exec_cfg80211_tool(vif, j[1], val)
             end
-            if v.config.multi_ap == "1" or v.config.multi_ap == "2" then
+            local multi_ap = tonumber(v.config.multi_ap or "0") or 0
+            if tostring(cfg.config.map_mode or "0") == "1" and multi_ap == 0 then
+                local encryption = v.config.encryption or "none"
+                multi_ap = (encryption:match("^psk2") or encryption:match("^sae")) and 3 or 2
+            end
+            if multi_ap > 0 then
                 if v.config.isolate == "1" then
                     nixio.syslog("err", "mtwifi-cfg: multi_ap backhaul cannot combine with isolate_clients; ignoring multi_ap for "..vif)
                 else
-                    __exec_cfg80211_tool(vif, "fhbss", (v.config.multi_ap == "2") and "0" or "1")
-                    __exec_cfg80211_tool(vif, "bhbss", (v.config.multi_ap == "2") and "1" or "0")
+                    __exec_cfg80211_tool(vif, "fhbss", multi_ap >= 2 and "1" or "0")
+                    __exec_cfg80211_tool(vif, "bhbss", multi_ap % 2 == 1 and "1" or "0")
                 end
             end
         end
@@ -550,6 +561,21 @@ function mtwifi_cfg_cfg80211_tool_hook(cfg)
 
     mtwifi_cfg_foreach_vif(cfg, "ap", ap_hook)
     mtwifi_cfg_foreach_vif(cfg, "sta", apcli_hook)
+end
+
+function set_map_cfg(cfg, dats)
+    -- Device options must survive netifd JSON parsing and reach the DAT profile.
+    local map_mode = tostring(cfg.config.map_mode or "0")
+    if not map_mode:match("^[0-4]$") then
+        nixio.syslog("err", "mtwifi-cfg: invalid MAP mode")
+        return false
+    end
+    dats.MapMode = map_mode
+    for _, key in ipairs({ "SRMeshUlMode", "MapStatsDisable", "MapAccept3Addr", "MapBalance", "SREnable", "SRMode", "SRDPDEnable" }) do
+        if cfg.config[key] ~= nil then set_dev_dat(dats, key, cfg.config[key]) end
+    end
+
+    return true
 end
 
 function set_chip_cfg(cfg, dats)
@@ -871,6 +897,8 @@ function mtwifi_cfg_setup(argv)
         nixio.syslog("err", "mtwifi-cfg: invalid htmode!")
         return
     end
+
+    if not set_map_cfg(cfg, dats) then return false end
 
     local WirelessMode
     local band = cfg.config.band

@@ -1,3 +1,4 @@
 {
-	"mapd": [ [ "network" ] ]
+	"config": "mapd",
+	"init": "easymesh"
 }

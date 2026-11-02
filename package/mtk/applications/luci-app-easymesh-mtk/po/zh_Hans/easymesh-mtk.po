@@ -663,3 +663,129 @@ msgstr "MLD CLI 命令"
 
 msgid "Useful commands for MLD debugging:"
 msgstr "用于 MLD 调试的常用命令："
+
+msgid "0 disables grouping; groups 1–16 are multi-link and 17–48 are single-link profiles. Members of a multi-link group need matching SSID and security."
+msgstr "0 表示不分组；1–16 为多链路组，17–48 为单链路配置。同一多链路组必须使用相同的 SSID 和安全设置。"
+
+msgid "0 disables local MLO. Matching groups from 1 to 16 share one MLD."
+msgstr "0 表示关闭本机 MLO。1–16 中相同的组 ID 组成一个 MLD。"
+
+msgid "2.4 GHz"
+msgstr "2.4 GHz"
+
+msgid "5 GHz high"
+msgstr "5 GHz 高频段"
+
+msgid "5 GHz low"
+msgstr "5 GHz 低频段"
+
+msgid "6 GHz"
+msgstr "6 GHz"
+
+msgid "Agent AL MAC"
+msgstr "Agent AL MAC"
+
+msgid "Agent backhaul MLD profiles"
+msgstr "Agent 回程 MLD 配置"
+
+msgid "All devices in the mesh must use the same MAP version. DPP onboarding requires R3. This build enables MAP R1, R2 and R3."
+msgstr "Mesh 内所有设备必须使用相同的 MAP 版本。DPP 入网需要 R3。本固件启用 MAP R1、R2、R3。"
+
+msgid "Authentication"
+msgstr "认证方式"
+
+msgid "BSS profiles"
+msgstr "BSS 配置"
+
+msgid "Backhaul BSS"
+msgstr "回程 BSS"
+
+msgid "Clients currently associated to this router. Remote agent clients are not included. Signal bars reflect RSSI. Rates show RX/TX in Mbps. This list refreshes automatically every 10 seconds."
+msgstr "仅展示当前连接本机的客户端，不含远端 Agent 的客户端。信号条表示 RSSI，速率为 RX/TX（Mbps）。每 10 秒自动刷新。"
+
+msgid "Controller BSS profiles"
+msgstr "Controller BSS 配置"
+
+msgid "DPP request accepted by the controller. Check topology for the join result."
+msgstr "Controller 已接受 DPP 请求，请在拓扑中确认入网结果。"
+
+msgid "Distributed MLD group ID"
+msgstr "分发的 MLD 组 ID"
+
+msgid "Driver Configuration"
+msgstr "驱动设置"
+
+msgid "Driver MAP parameters are stored in /etc/config/wireless."
+msgstr "驱动 MAP 参数保存在 /etc/config/wireless 中。"
+
+msgid "Enter one radio MAC or band ID per link, separated by spaces."
+msgstr "每条链路填写一个无线电 MAC 或频段 ID，以空格分隔。"
+
+msgid "Fronthaul BSS"
+msgstr "前端接入 BSS"
+
+msgid "Hide SSID"
+msgstr "隐藏 SSID"
+
+msgid "LAN bridge"
+msgstr "LAN 桥"
+
+msgid "LAN network"
+msgstr "LAN 网络"
+
+msgid "Local APs use the same MLD group, SSID and security on all participating EHT radios. Applying changes disconnects associated stations."
+msgstr "参与 MLO 的本机 EHT 无线电须使用相同的 MLD 组、SSID 和安全设置。应用修改会断开已关联的终端。"
+
+msgid "Local MLO groups"
+msgstr "本机 MLO 分组"
+
+msgid "No"
+msgstr "否"
+
+msgid "No wifi-device section found in /etc/config/wireless."
+msgstr "/etc/config/wireless 中没有 wifi-device 配置。"
+
+msgid "Number of links"
+msgstr "链路数"
+
+msgid "Password"
+msgstr "密码"
+
+msgid "Radio IDs or bands"
+msgstr "无线电 ID 或频段"
+
+msgid "Radio MAC"
+msgstr "无线电 MAC"
+
+msgid "Select the radios participating in EasyMesh. Applying a mode change reloads the vendor driver."
+msgstr "选择参与 EasyMesh 的无线电。应用模式变更会重新加载私有驱动。"
+
+msgid "Service errors"
+msgstr "服务错误"
+
+msgid "The broadcast MAC applies the profile to every agent radio in this band."
+msgstr "广播 MAC 表示将配置应用到该频段的所有 Agent 无线电。"
+
+msgid "The controller distributes these profiles to agents. With no entries, profiles are derived from the active local APs. Configure WPA2/WPA3 credentials before wireless onboarding."
+msgstr "Controller 将这些配置分发给 Agent。无条目时，从本机活动 AP 生成配置。无线入网前请配置 WPA2/WPA3 凭据。"
+
+msgid "Unable to read associated stations."
+msgstr "无法读取关联终端。"
+
+msgid "Use an existing bridged LAN network. Configure addressing and DHCP under Network and Interfaces."
+msgstr "使用已有的桥接 LAN 网络。地址与 DHCP 请在“网络 → 接口”中配置。"
+
+msgid "WPA2/WPA3 mixed"
+msgstr "WPA2/WPA3 混合"
+
+msgid "WPS request accepted on %s. Check topology for the join result."
+msgstr "%s 已接受 WPS 请求，请在拓扑中确认入网结果。"
+
+msgid "Yes"
+msgstr "是"
+
+msgid "Unknown"
+msgstr "未知"
+
+msgid "DPP presence band saved. Restart EasyMesh to apply."
+msgstr "DPP 入网频段已保存，重启 EasyMesh 后生效。"

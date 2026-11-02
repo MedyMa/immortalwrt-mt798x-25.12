@@ -9,6 +9,7 @@ include $(INCLUDE_DIR)/kernel.mk
 PKG_NAME:=mapfilter
 PKG_REVISION:=70fcdd
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_REVISION).tar.bz2
+PKG_RELEASE:=2
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -31,7 +32,7 @@ EXTRA_CFLAGS:= \
 	$(patsubst CONFIG_%, -DCONFIG_%=1, $(patsubst %=y,%,$(filter %=y,$(EXTRA_KCONFIG))))
 
 define Build/Compile
-	+$(MAKE) $(PKG_JOBS) -C "$(LINUX_DIR)" \
+	+$(MAKE) $(PKG_JOBS) $(MAKE_FLAGS) -C "$(LINUX_DIR)" \
 		ARCH="$(LINUX_KARCH)" \
 		CROSS_COMPILE="$(TARGET_CROSS)" \
 		M="$(PKG_BUILD_DIR)" \

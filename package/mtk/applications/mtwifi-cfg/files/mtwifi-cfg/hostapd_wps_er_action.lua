@@ -5,6 +5,14 @@ local x = uci.cursor()
 
 local iface = arg[1]
 local event = arg[2]
+if event == "AP-ENABLED" or event == "WPS-NEW-AP-SETTINGS" then
+	local ok, mesh = pcall(require, "mtk.easymesh")
+	if ok and x:get("mapd", "mapd_cfg", "enable") == "1" then
+		local saved, err = pcall(mesh.save_ap, iface, event == "WPS-NEW-AP-SETTINGS")
+		if not saved then require("nixio").syslog("err", "EasyMesh AP credential save failed: " .. tostring(err)) end
+		return
+	end
+end
 local wps_state
 local ssid
 local ssid2

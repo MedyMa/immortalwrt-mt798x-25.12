@@ -1,153 +1,105 @@
-# luci-app-easymesh-mtk 2.0.0 — MediaTek EasyMesh (MAP Turnkey) for OpenWrt 25.12+
+# MediaTek EasyMesh：25.12 原生无线后端集成
 
-A native LuCI 25.12 client application that drives the MediaTek MAP Turnkey stack
-(`mapd`, `1905daemon`, `wapp`) from the LuCI web UI.
+适用于本源码树的 `mt_wifi7` 私有驱动、`mtwifi-cfg`、netifd 和 hostapd 后端。
+LuCI 提供基础设置、入网引导、状态、客户端、MLO 五个页面。
+运行代码和依赖均由源码包安装。
 
-Menu: **Network → EasyMesh** with three sub-pages.
+## 构建与默认状态
 
-| Page | Path | Content |
-|---|---|---|
-| Basic Settings | `network/easymesh/settings` | enable, device role, MAP version, AP-steering RSSI, client steering, channel-load limits, backhaul band priority, network optimization, channel planning, DHCP control |
-| Onboarding | `network/easymesh/onboarding` | WPS push button, DPP URI retrieve / enrol, DPP presence band, EasyMesh restart |
-| Status | `network/easymesh/status` | daemon state, startup state, control socket, AL MAC, backhaul link metric, topology, mapd log |
+先选择完整的 `wpad-openssl`（私有版 defconfig 已有），然后选择：
 
-## Why it was rewritten
-
-The previous `luci-app-easymesh-mtk` 1.1.0 could not build or run on 25.12: its
-Makefile installed `./files/*` and `./www/*` (absent), `luasrc/` used the LuCI-5 Lua
-controller API while `htdocs/` held LuCI-2 JavaScript (never wired together, and the
-package was not declared through `luci.mk`), and the C ubus backend did not compile and
-invented a `mapd.@general[0]` UCI schema no MTK daemon reads.
-
-This package keeps the package name and the UCI option names used by the working
-`luci-app-mtk` EasyMesh page (`mapd.mapd_cfg.*`, `mapd.mapd_user.*`,
-`mapd.dpp_cfg.*`, `1905d_cfg.map.*`).
-
-## Layout
-
-```
-Makefile                                                  luci.mk package definition
-htdocs/luci-static/resources/view/easymesh-mtk/
-    settings.js                                           form.Map('mapd') settings page
-    onboarding.js                                         WPS / DPP action page
-    status.js                                             read-only status page
-root/usr/share/luci/menu.d/luci-app-easymesh-mtk.json      menu entries
-root/usr/share/rpcd/acl.d/luci-app-easymesh-mtk.json       ubus/uci/file ACLs
-root/usr/share/ucitrack/luci-app-easymesh-mtk.json         mapd change tracking
-root/usr/libexec/rpcd/easymesh-mtk                         ubus object "easymesh"
-root/etc/init.d/easymesh                                   MAP bring-up service
-root/etc/uci-defaults/99-easymesh-mtk                      UCI section skeleton
-po/zh_Hans/easymesh-mtk.po                                 Simplified Chinese
+```text
+CONFIG_PACKAGE_luci-app-easymesh-mtk=y
 ```
 
-No Lua, no compiled C helper, no extra daemon: LuCI talks to rpcd directly.
+该包自动选择 MAP R2/R3、6 GHz、MAP hostapd、MBO、WAPP WPA control，以及
+`mapd`、`1905daemon`、`wapp`、`libmapd`、`libwpactrl` 和 `kmod-mapfilter`。
+LuCI 和 RPC 使用的 Lua 运行库由依赖提供。不支持仅复制网页文件安装。
+普通版固件的 defconfig 不需要添加这些私有驱动选项。
 
-## Service lifecycle
+首次安装默认关闭 EasyMesh，`DhcpCtl=0`。升级时保留用户配置；旧配置中显式启用的
+DHCP 控制也会保留，需要在使用前检查。默认 AL MAC 取当前 LAN 桥的 MAC，
+不再为所有节点设置相同的示例 MAC。
 
-`/etc/init.d/easymesh` owns the MAP daemons. The vendor bring-up scripts
-(`map_restart.sh` / `EasyMesh_openwrt.sh` / `EasyMesh_openwrt5x.sh` / `EasyMesh.sh`)
-have no *stop* action and can start a second `mapd`/`wapp`/`1905d` instance when run
-twice, so the init script stops the daemons first, runs the bring-up script and then
-verifies that `wapp`, `p1905_managerd` and `mapd` are up.
+## 部署
 
-* `Enable EasyMesh` → `set Enable 0|1` → daemons stopped/started (runtime).
-* `enable` / `disable` ubus methods → `init.d enable|disable` for `easymesh`, `mapd`,
-  `1905d/1905daemon`, `wappd/wapp`, `easymesh_bridge` → boot state, shown as the
-  *Startup* row on the status page.
-* `restart` → `init.d easymesh restart` (falls back to the bring-up script).
+1. 在“网络”中先配置好每台设备的地址、LAN 桥和 DHCP。Controller 与 Agent
+   使用同一现有桥接 LAN；有线回程连接 LAN 端口。避免网络内出现多个 DHCP 服务器。
+2. 在无线页面设置合法地区、频段和 WPA2/WPA3 密码。无线回程需要加密；
+   6 GHz 不支持 WPS。多链路组的 SSID、密码和认证方式必须一致。
+3. 在 EasyMesh 基础设置中选择 LAN 网络、Controller/Agent 角色和相同的 MAP 版本，
+   启用后保存应用。支持 MAP R1、R2、R3；DPP 需要 R3。
+4. 有线回程先检查拓扑。无线回程可在两端发起 WPS，或在 Agent 获取 DPP URI，
+   再交给 Controller 发起 DPP 入网。按钮成功提示表示控制请求已接受；
+   是否加入成功，以拓扑和实际回程链路为准。
 
-## Backend (rpcd)
+集成使用单个已有 LAN 桥。参与 MAP 的活动 AP/STA 必须只属于所选网络；
+混合访客网络会明确报错。这里没有配置跨 VLAN 的流量隔离。
+服务不会创建 LAN 桥、搬动 WAN 端口或代替“网络”页面配置 DHCP。
 
-```
-ubus call easymesh get_status
-ubus call easymesh get_uri     '{"ifname":"ra0"}'
-ubus call easymesh set         '{"key":"DeviceRole","value":"1"}'
-ubus call easymesh action      '{"action":"wps"}'
-ubus call easymesh action      '{"action":"dpp_enroll","uri":"DPP:V:2;K=..."}'
-ubus call easymesh restart
-ubus call easymesh enable | disable
-```
+## 服务和持久化
 
-`set` accepts only a whitelist of MTK options (each with a value domain), mirrors
-`mapd.mapd_cfg.*` into `mapd.mapd_user.*` (the daemon's user override) and, for
-`DeviceRole`, updates `mapd.dpp_cfg.allowed_role` (controller→2, agent→1, auto→0).
+`mapd` 包安装 `/etc/init.d/easymesh`、`/usr/libexec/mtk-easymesh`
+和共享 Lua 适配层。服务由 procd 管理，按控制套接字就绪顺序启动
+`wapp` → `p1905_managerd` → `mapd`；无线或 LAN 重新就绪后重新准备运行配置。
+不会调用 SDK 中会重建桥和 DHCP 的整机初始化脚本。
 
-Accepted keys: `DeviceRole`, `Enable`, `SteerEnable`, `APSteerRssiTh`,
-`CUOverloadTh_2G/5G_L/5G_H/6G`, `BhPriority2G/5GL/5GH/6G`,
-`NetworkOptimizationEnabled`, `NtwrkOptConnectWaitTime`, `NtwrkOptDisconnectWaitTime`,
-`NtwrkOptPostCACTriggerTime`, `BandSwitchTime`, `NetworkOptPrefer5Gover2G`,
-`NetworkOptPrefer5Gover2GRetryCnt`, `ChPlanningEnable`,
-`ChPlanningUserPreferredChannel2G/5G/6G`, `ChPlanningIdleTime`,
-`ChPlanningIdleByteCount`, `AutoBHSwitching`, `DhcpCtl`, `map_ver`, `allowed_role`,
-`presence_band_priority`.
+适配层根据 L1 profile 和实际接口状态识别 `ra*`、`rai*`、`rax*`、`apcli*`，
+不把 PCI 路径或假定的 PHY 编号传给守护进程。`map_mode` 经 netifd 写入驱动 DAT；
+MAP AP 使用 hostapd 全局控制接口，动态 BSS 采用实际注册的 PHY。
+新增 BSS 必须使用连续的空闲 AP 槽，不能跳号创建。
 
-## Installation
+Agent/Auto 角色按参与的无线电创建受管理的回程 STA。已有用户 STA 保留其配置；
+Controller 或关闭 Mesh 时禁用自动创建的 STA。WPS/DPP 学到的 AP 凭据写回相应
+`wireless` section；受管理 STA 的凭据保存到私有文件并在无线重载时恢复。
+这些文件包含密码，权限为 0600。故障材料请勿公开上传这些配置。
+
+| 配置 | 用途 |
+|---|---|
+| `/etc/config/mapd` | 服务开关、角色、引导、优化、Controller BSS/回程 MLD profiles |
+| `/etc/config/1905d_cfg` | MAP 版本、可选 AL MAC |
+| `/etc/config/wireless` | 本机 AP/STA、MAP 模式、本机 MLO 分组 |
+| `/etc/map/mapd_cfg`、`/etc/map/1905d.cfg` | 根据 UCI 和实际 LAN 生成的守护进程配置 |
+| `/etc/map/wts_bss_info_config` | Controller 分发给 Agent 的 BSS profiles |
+| `/etc/map/wts_bsta_mlo_config` | Agent 回程 MLD profiles |
+| `/var/run/easymesh/platform.json`、`error` | 当前平台状态和最近一次服务错误，不含无线密码 |
+
+MLO 页的本机 `wireless.mldgroup` 范围为 0–16；Controller 分发使用
+`mapd` 的 `iface` sections 和 `mld_groupID`，0 表示不分组，1–16 为多链路组，
+17–48 为单链路 profiles。无显式 BSS profiles 时，从本机活动 AP 生成。
+`bh_sta` sections 的链路数必须与无线电列表相符。配置通过校验不代表设备已建立多链路。
+
+## 诊断
 
 ```sh
-cp -a luci-app-easymesh-mtk /path/to/immortalwrt-openwrt-25.12/package/mtk/applications/
-cd /path/to/immortalwrt-openwrt-25.12
-make menuconfig     # LuCI -> Applications -> luci-app-easymesh-mtk
-make package/luci-app-easymesh-mtk/compile V=s
+ubus call easymesh-mtk get_status
+ubus call easymesh-mtk get_interfaces
+ubus call easymesh-mtk get_clients
+ubus call easymesh-mtk get_uri '{"ifname":"rai0"}'
+ubus call easymesh-mtk action '{"action":"wps","band":"all","uri":""}'
+ubus call easymesh-mtk restart
+logread -e easymesh
 ```
 
-Device-only install (no rebuild): `cp -r htdocs/* /www/; cp -r root/* /` then
-`/etc/init.d/rpcd restart` and `/etc/init.d/uhttpd restart`.
+状态页分别显示配置开关、开机启用状态、三个实际进程、mapd 控制套接字、LAN 桥、
+拓扑和守护进程输出。只有进程及套接字均就绪时才显示运行。
+客户端页仅展示本机 `iw` 查询到的终端，不冒充全网客户端表；无法判断的回程身份
+显示 Unknown。接口速率或 Mesh 状态不作为 NPU、PPE、EIP 硬件加速的证据。
 
-## Coverage of the MTK "Multi-AP Application Note v4.1"
+## 验证
 
-| Documented item | Where it lands |
-|---|---|
-| `mapd.mapd_cfg.DeviceRole` (0/1/2) + `dpp_cfg.allowed_role` mapping | Settings → General |
-| `1905d_cfg.map.map_ver` (R1…R5, R4 ⇒ use R3) | Settings → General |
-| `APSteerRssiTh`, `SteerEnable`, `CUOverloadTh_2G/5G_L/5G_H` | Settings → General |
-| `BhPriority2G/5GL/5GH/6G` (0 = never, 1 = highest) | Settings → Backhaul |
-| `AutoBHSwitching`, `BandSwitchTime` (0 = never retry) | Settings → Backhaul / Advanced |
-| `NetworkOptimizationEnabled`, `NtwrkOpt*WaitTime`, `NetworkOptPrefer5Gover2G` | Settings → Advanced |
-| `ChPlanningEnable`, `ChPlanningUserPreferredChannel2G/5G`, `ChPlanningIdleTime` | Settings → Advanced |
-| `DhcpCtl` | Settings → Advanced |
-| WPS push button (`wappctrl <if> wps_pbc`) | Onboarding |
-| DPP `get_dpp_uri` / `dpp_bootstrap_get_uri`, `dpp_qr_code`, `dpp_start`, `presence_band_priority` | Onboarding |
-| Daemon start order, `/tmp/mapd_ctrl`, bring-up script re-run | `restart`, `init.d easymesh` |
-| `mapd_cli show_bh_link_metric`, `dump_topology_v1`, `/tmp/mapd_log` | Status |
+原生运行回归需要 Lua 5.1、lua-cjson、libuci-lua 和 nixio：
 
-Deliberately **not** implemented: the `mapd_cli` runtime operations of the reference UI
-(`bh_priority`, `steerbh`, `steermand`, `acl_ctrl`, `set_bss_prio`, `metric_policy_set`,
-`mib *`, `sp_*`) — the persistent UCI equivalents are used instead;
-`/etc/mapd_strng.conf` band-steering parameters (different file, not the `mapd` UCI
-package); the `wts_bss_info_config` BSS/MLD editor, traffic separation, DSCP→PCP and
-Mesh SR (vendor `luci-app-mtk` Advanced page); `ThirdPartyConnection` / `BhProfile*`
-(needs a DHCP-control caveat).
+```sh
+lua package/mtk/applications/mapd/tests/runtime.lua "$PWD" /tmp/easymesh-new-test-directory
+node package/mtk/applications/luci-app-easymesh-mtk/tests/views.js
+python3 package/mtk/applications/mapd/tests/netifd.py
+```
 
-## Driver `.dat` / nvram values (not UCI)
+测试目录必须不存在。运行测试会把配置、sysfs 和运行文件重定向到该目录，
+模拟路由器控制命令，不接触真实无线设备。前端测试覆盖 UCI 保存和 RPC 参数契约。
+构建还需验证用户态程序、MAP 驱动和 mapfilter 的交叉编译及最终模块链接。
 
-| Driver value | Purpose | How to set it |
-|---|---|---|
-| `MapMode` | `1` = MAP Turnkey, `2` = standalone band steering | driver `.dat` (all radios) / `nvram_set 2860 MapMode 1`, reboot |
-| `MAP_Turnkey`, `MapEnable` | enable turnkey features / MAP support | `.dat` + `nvram_set`, reboot |
-| `AutoChannelSkipList` / `…6G` | per-radio channel skip list, e.g. `52;56;60;64` | `.dat` (`datconf`), reboot the MAP network |
-| `ChannelGrp` | 5 GHz channel grouping for triband (`0:0:1:1` / `1:1:0:0`) | `.dat`, reboot |
-| `BssidNum` | MBSS count per radio; add/remove requires MAP disabled first | `.dat` / WiFi pages |
-| `SREnable`, `SRMode`, `SRDPDEnable`, `BSSColorValue` | Mesh Spatial Reuse | `.dat`; `MapMode=1` forces `SREnable=0`/`SRMode=0` |
-| `DfsDedicatedZeroWait` / `DfsZeroWaitDefault` | zero-wait DFS | `.dat` / `uci set wireless.<radio>.<opt>`, reboot |
-| `BSEnable`, nvram forms of `APSteerRssiTh`/`SteerEnable`/`CUOverloadTh_*` | standalone band steering (`MapMode=2`) | `nvram_set 2860 …`, reboot |
-
-## Vendor driver interface — checked
-
-`mt_wifi/os/linux/cfg80211/cfg80211_vndr_easy_mesh.c` dispatches 52
-`MTK_NL80211_VENDOR_ATTR_EASYMESH_*` sub-IDs (SSID, wireless mode, channel, HT/VHT/EHT
-BW, MLD create/reconf/destroy/link add/del/transfer, SR enable, BH SR bitmap, hidden
-SSID, auth/encrypt, WPA PSK / PSK / PMK, radio on, disconnect STA, TS BH primary VID /
-PCP / BH VID / FH VID, transparent VID, BCN request, HT BSS coex, PMF, auto roaming,
-DSCP policy, QoS map, DPP frame, assoc-req frame, WAPP IE, ROC, CCE IE, R3 DPP URI, R3
-1905 security, R3 onboarding type, BH/FH BSS, MAP channel, MAP enable, BH assoc ctrl,
-DPP STA MAC, NOP state, channel-preference state). That is the **daemon → driver** RPC
-surface used by `wapp`/`1905daemon`/`mapd`, not a user configuration interface: every
-attribute is derived from the BSS/MAP configuration those daemons already hold.
-
-`mt_wifi/feature/map/map.c` is the MAP protocol implementation and exports no module
-parameter, proc or debugfs entry; its only configuration-looking symbols are read-only
-consumers of driver profile values (`pAd->ApCfg.AutoChannelSkipList`, `BssidNum`).
-
-The user-facing equivalents are the per-BSS `mapd.<idx>` sections /
-`wts_bss_info_config` and the `mapd_cfg` options this package writes; the BSS/MLD editor
-belongs to the vendor `luci-app-mtk` Advanced page and is not duplicated here.
+发布验收需要两台实际支持的设备：检查三频启动、有线发现、WPS/DPP 无线入网、
+重载/重启后凭据恢复、Controller 与 Agent 拓扑一致、客户端漫游和实际 MLO 链路。
+编译及模拟回归不能替代这些设备测试，也不构成 Wi-Fi EasyMesh 认证。

@@ -1,0 +1,21 @@
+From: MedyMa maintainers
+Subject: [PATCH] 1905: bound service priority test configuration strings
+
+The vendor all target builds sp_ut as well as the installed daemons.
+
+--- a/src/ut/sp_ut.c
++++ b/src/ut/sp_ut.c
+@@ -596,11 +596,11 @@
+ 	/*1. add rule */
+ 	for (i = 0; i < 9; i++) {
+ 		memset(tmp, 0, sizeof(tmp));
+-		if (strlen(content[i]) > sizeof(tmp)) {
++		if (strlen(content[i]) >= sizeof(tmp)) {
+ 			ut_assert(0);
+ 			return;
+ 		}
+-		strncpy(tmp, content[i], strlen(content[i]));
++		os_strlcpy(tmp, content[i], sizeof(tmp));
+ 		ret = _1905_sp_add_static_rule(ctx, tmp, strlen(tmp));
+ 		if (ret != 0)
+ 			goto fail;

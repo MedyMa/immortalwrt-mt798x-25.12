@@ -1,0 +1,16 @@
+From: MedyMa maintainers
+Subject: [PATCH] 1905: copy switch interface name with its destination bound
+
+Use the full destination size and guarantee termination under modern GCC.
+
+--- a/ethernet/common/switch_layer.c
++++ b/ethernet/common/switch_layer.c
+@@ -310,7 +310,7 @@
+ 					continue;
+ 				}
+ 
+-				os_strncpy(eth_dev_name, token, os_strlen(token));
++				os_strlcpy(eth_dev_name, token, sizeof(eth_dev_name));
+ 			} else if (os_strcmp(token, "lan_vid") == 0) {
+ 				token = strtok(NULL, "");
+ 				if (token == NULL)

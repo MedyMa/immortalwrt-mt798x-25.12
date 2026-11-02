@@ -1,0 +1,57 @@
+From: MedyMa maintainers
+Subject: [PATCH] 1905: distinguish wire bytes from bounded C strings
+
+Do not ask strncpy to terminate length-prefixed serialized bytes.
+Use destination bounds for stored interface names and MLD SSIDs.
+
+--- a/src/multi_ap.c
++++ b/src/multi_ap.c
+@@ -3483,10 +3483,10 @@
+ 	switch(cmd->cmd_id) {
+ 	case MANAGE_SET_ROLE:
+ 		if (change_role_dynamic(ctx, cmd->content[0]) < 0) {
+-			os_strncpy((char *)buf, "FAIL\n", 5);
++			os_memcpy(buf, "FAIL\n", 5);
+ 			len = 5;
+ 		} else {
+-			os_strncpy((char *)buf, "OK\n", 3);
++			os_memcpy(buf, "OK\n", 3);
+ 			len = 3;
+ 		}
+ 		_1905_notify_raw_data(ctx, buf, len);
+@@ -5362,7 +5362,7 @@
+ 	*p++ = BRIDGE_NUM;
+ 	for (i = 0; i < BRIDGE_NUM; i++) {
+ 		*p++ = os_strlen((char*)ctx->br_name);
+-		os_strncpy((char*)p, (char*)ctx->br_name, os_strlen((char*)ctx->br_name));
++		os_memcpy(p, ctx->br_name, os_strlen((char*)ctx->br_name));
+ 		p += os_strlen((char*)ctx->br_name);
+ 		*p++ = ctx->br_cap[i].interface_num;
+ 		memcpy(p, ctx->br_cap[i].itf_mac_list, ctx->br_cap[i].interface_num * ETH_ALEN);
+@@ -6390,7 +6390,7 @@
+ 	os_memcpy(dm_buf->al_mac, almac, ETH_ALEN);
+ 	dm_buf->wait_for_event = event;
+ 	dm_buf->mid = mid;
+-	os_strncpy(dm_buf->if_name, if_name, os_strlen(if_name));
++	os_strlcpy(dm_buf->if_name, if_name, sizeof(dm_buf->if_name));
+ 	os_get_time(&dm_buf->time);
+ 
+ 	dl_list_add_tail(&ctx->dm_ctx.buf_list_head, &dm_buf->entry);
+@@ -6408,7 +6408,7 @@
+ 		if (dm_buf->wait_for_event == event) {
+ 			os_memcpy(almac, dm_buf->al_mac, ETH_ALEN);
+ 			*mid = dm_buf->mid;
+-			os_strncpy(if_name, dm_buf->if_name,os_strlen(dm_buf->if_name));
++			os_strlcpy(if_name, dm_buf->if_name, IFNAMSIZ);
+ 			if_name[IFNAMSIZ - 1] = '\0';
+ 			dl_list_del(&dm_buf->entry);
+ 			os_free(dm_buf);
+@@ -9039,7 +9039,7 @@
+ 				opbss->ssid, MAC2STR(opbss->mlo_info.mld_addr));
+ 			os_memset(mlo_cfg->ssid, 0, sizeof(mlo_cfg->ssid));
+ 			/* only ssid changed by user, should update ssid in db */
+-			os_strncpy((char *)mlo_cfg->ssid, (char *)opbss->ssid, sizeof(mlo_cfg->ssid));
++			os_strlcpy(mlo_cfg->ssid, (char *)opbss->ssid, sizeof(mlo_cfg->ssid));
+ 			mlo_cfg->ssid[sizeof(mlo_cfg->ssid)-1] = '\0';
+ 
+ 			return mlo_cfg;

@@ -1,45 +1,19 @@
 'use strict';
 'require view';
-'require fs';
+'require rpc';
 'require poll';
 'require ui';
 'require dom';
 
-/*
- * EasyMesh 客户端显示 - 对标原生 LuCI "Associated Stations"
- * 特点：
- *   - 汇总全网 Mesh 内所有 Agent 的关联客户端
- *   - 可视化信号强度条（4 级颜色）
- *   - MLO / Backhaul STA 标签
- *   - poll 每 10 秒自动刷新
- *   - 使用标准 cbi-section-table，与 OpenWrt 25.12 状态页样式一致
- */
-
-var RPC = '/usr/libexec/rpcd/easymesh-mtk';
-
-function rpcExec(method, args) {
-	return fs.exec(RPC, [ 'call', method ].concat(args || []))
-		.then(function(res) {
-			try {
-				var data = JSON.parse(res.stdout || '{}');
-				return data;
-			} catch (e) {
-				return { ok: false, error: res.stdout || res.stderr };
-			}
-		})
-		.catch(function(e) {
-			return { ok: false, error: e.message };
-		});
-}
+// Station counters below come from this router's nl80211 interfaces.
+var callClients = rpc.declare({ object: 'easymesh-mtk', method: 'get_clients', expect: { '': {} } });
 
 return view.extend({
 	load: function() {
-		return rpcExec('get_clients').then(function(r) {
-			if (r.ok) {
-				try { return JSON.parse(r.clients || '[]'); }
-				catch (e) { return []; }
-			}
-			return [];
+		return callClients().then(function(r) {
+			if (!r.ok)
+				throw new Error(r.error || _('Unable to read associated stations.'));
+			return Array.isArray(r.clients) ? r.clients : [];
 		});
 	},
 
@@ -54,6 +28,9 @@ return view.extend({
 
 	/* ---------- 信号条 ---------- */
 	renderSignalBar: function(rssi) {
+		if (rssi == null || rssi === '' || !isFinite(Number(rssi)))
+			return E('span', {}, '-');
+		rssi = Number(rssi);
 		var info = this.signalInfo(rssi);
 		var bars = [];
 		for (var i = 1; i <= 4; i++) {
@@ -120,9 +97,9 @@ return view.extend({
 		} else {
 			tags.push(E('span', {
 				'style': 'display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:#f5f5f5;color:#616161;margin-right:4px'
-			}, _('Client')));
+		}, c.is_backhaul === 'No' ? _('Client') : _('Unknown')));
 		}
-		if (c.is_mlo) {
+		if (c.is_mlo === 'Yes') {
 			tags.push(E('span', {
 				'style': 'display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:bold;background:#e1f5fe;color:#0277bd',
 				'title': c.mld_mac ? 'MLD MAC: ' + c.mld_mac : ''
@@ -175,7 +152,7 @@ return view.extend({
 			var content = [
 				E('h2', {}, _('Connected Clients')),
 				E('div', { 'class': 'cbi-map-descr' },
-					_('All clients currently associated to the EasyMesh network. ' +
+					_('Clients currently associated to this router. Remote agent clients are not included. ' +
 					  'Signal bars reflect RSSI. Rates show RX/TX in Mbps. ' +
 					  'This list refreshes automatically every 10 seconds.'))
 			];

@@ -13,10 +13,7 @@
 var callStatus = rpc.declare({
 	object: 'easymesh-mtk',
 	method: 'get_status',
-	expect: {
-		role: '', enable: '', svc_enabled: '', map_ver: '', mapd: '', p1905: '', wapp: '',
-		socket: '', almac: '', dpp_role: '', bh_status: '', topology: '', mapd_log: ''
-	}
+	expect: { '': {} }
 });
 
 var DAEMONS = [ 'mapd', 'p1905', 'wapp' ];
@@ -63,11 +60,12 @@ return view.extend({
 
 			E('h3', {}, _('Overview')),
 			E('table', { 'class': 'table' }, [
-				row(_('State'), badge(st.enable === '0' ? 'stopped' : 'running')),
+				row(_('State'), badge(st.running ? 'running' : 'stopped')),
 				row(_('Startup'), badge(st.svc_enabled, _('enabled at boot'), _('disabled at boot'))),
 				row(_('Device role'), roleText(st.role)),
 				row(_('MAP version'), st.map_ver || '-'),
 				row(_('AL MAC'), st.almac || '-'),
+				row(_('LAN bridge'), st.bridge || '-'),
 				row(_('Control socket'), badge(st.socket)),
 				row(_('DPP allowed role'), roleText(st.dpp_role === '2' ? '1' : st.dpp_role))
 			]),
@@ -83,7 +81,7 @@ return view.extend({
 			E('h3', {}, _('Topology')),
 			pre(st.topology),
 
-			E('h3', {}, _('mapd log')),
+			E('h3', {}, _('Service errors')),
 			pre(st.mapd_log),
 
 			E('div', { 'class': 'cbi-page-actions' }, [

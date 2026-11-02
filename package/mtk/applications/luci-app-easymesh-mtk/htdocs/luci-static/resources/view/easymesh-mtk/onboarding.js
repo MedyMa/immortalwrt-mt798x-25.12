@@ -1,32 +1,25 @@
 'use strict';
 'require view';
-'require fs';
+'require rpc';
 'require uci';
 'require ui';
 
-/*
- * MediaTek EasyMesh / MAP Turnkey - onboarding (WPS push button and DPP).
- *
- * The buttons run the rpcd backend through fs.exec() so that the rpcd ACL
- * (and not a raw root shell reachable from the browser) polices the commands.
- */
-
-var RPC = '/usr/libexec/rpcd/easymesh-mtk';
+var calls = {
+	get_uri: rpc.declare({ object: 'easymesh-mtk', method: 'get_uri', params: [ 'ifname' ], expect: { '': {} } }),
+	action: rpc.declare({ object: 'easymesh-mtk', method: 'action', params: [ 'action', 'band', 'uri' ], expect: { '': {} } }),
+	set: rpc.declare({ object: 'easymesh-mtk', method: 'set', params: [ 'key', 'value' ], expect: { '': {} } }),
+	restart: rpc.declare({ object: 'easymesh-mtk', method: 'restart', expect: { '': {} } })
+};
 
 return view.extend({
+	load: function() {
+		return uci.load('mapd');
+	},
+
 	handleRpc: function(method, args) {
-		return fs.exec(RPC, [ 'call', method ].concat(args || []))
-			.then(function(res) {
-				try {
-					return JSON.parse(res.stdout || '{}');
-				}
-				catch (e) {
-					return { ok: false, error: res.stdout || res.stderr || _('unexpected reply') };
-				}
-			})
-			.catch(function(e) {
-				return { ok: false, error: e.message };
-			});
+		return calls[method].apply(null, args || []).catch(function(e) {
+			return { ok: false, error: e.message };
+		});
 	},
 
 	report: function(res, okMessage) {
@@ -40,11 +33,11 @@ return view.extend({
 		var btn = ev.currentTarget;
 		btn.classList.add('spinning');
 		btn.disabled = true;
-		return this.handleRpc('action', [ 'wps', 'all' ])
+		return this.handleRpc('action', [ 'wps', 'all', '' ])
 			.then(L.bind(function(res) {
 				btn.classList.remove('spinning');
 				btn.disabled = false;
-				this.report(res, _('WPS push button started on %s.').format(res.ifname || 'all radios'));
+				this.report(res, _('WPS request accepted on %s. Check topology for the join result.').format(res.ifname || 'all radios'));
 			}, this));
 	},
 
@@ -52,7 +45,7 @@ return view.extend({
 		var btn = ev.currentTarget;
 		btn.classList.add('spinning');
 		btn.disabled = true;
-		return this.handleRpc('get_uri', [])
+		return this.handleRpc('get_uri', [ '' ])
 			.then(L.bind(function(res) {
 				btn.classList.remove('spinning');
 				btn.disabled = false;
@@ -77,11 +70,11 @@ return view.extend({
 		var btn = ev.currentTarget;
 		btn.classList.add('spinning');
 		btn.disabled = true;
-		return this.handleRpc('action', [ 'dpp_enroll', uri.trim() ])
+		return this.handleRpc('action', [ 'dpp_enroll', '', uri.trim() ])
 			.then(L.bind(function(res) {
 				btn.classList.remove('spinning');
 				btn.disabled = false;
-				this.report(res, _('DPP onboarding started on the controller.'));
+				this.report(res, _('DPP request accepted by the controller. Check topology for the join result.'));
 			}, this));
 	},
 
@@ -101,7 +94,7 @@ return view.extend({
 		var select = ev.currentTarget;
 		return this.handleRpc('set', [ 'presence_band_priority', select.value ])
 			.then(L.bind(function(res) {
-				this.report(res, _('DPP presence band updated.'));
+				this.report(res, _('DPP presence band saved. Restart EasyMesh to apply.'));
 			}, this));
 	},
 

@@ -46,12 +46,9 @@ return view.extend({
 				var o = s.option(form.ListValue, 'map_mode', _('MAP driver mode'));
 				o.value('0', _('Disabled'));
 				o.value('1', _('MAP Turnkey'));
-				o.value('2', _('BS 2.0'));
-				o.value('3', _('API Mode'));
-				o.value('4', _('Cert'));
-				o.default = '1';
+				o.default = '0';
 				o.rmempty = false;
-				o.description = _('Driver MapMode. 1 = EasyMesh/MAP Turnkey, 2 = Standalone Band Steering (BS 2.0), 3 = API Mode, 4 = Cert. Requires driver reload / reboot.');
+				o.description = _('Select the radios participating in EasyMesh. Applying a mode change reloads the vendor driver.');
 
 				/* SRMeshUlMode */
 				o = s.option(form.ListValue, 'SRMeshUlMode', _('SR Mesh Uplink Mode'));
@@ -121,6 +118,9 @@ return view.extend({
 			_('MediaTek MAP Turnkey. The device role, channel planning and client ' +
 			  'steering settings below are stored in /etc/config/mapd.'));
 
+		m.chain('wireless');
+		m.chain('1905d_cfg');
+
 		var s = m.section(form.NamedSection, 'mapd_cfg', 'mapd_cfg');
 		s.addremove = false;
 
@@ -132,6 +132,21 @@ return view.extend({
 		var o = s.taboption('general', form.Flag, 'enable', _('Enable EasyMesh'));
 		o.default = '0';
 		o.rmempty = false;
+		o.write = function(section_id, value) {
+			var previous = uci.get('mapd', section_id, 'enable') || '0';
+			uci.set('mapd', section_id, 'enable', value);
+			if (value !== previous) {
+				wifi_devices.forEach(function(radio) {
+					if (radio.type === 'mtwifi') uci.set('wireless', radio['.name'], 'map_mode', value);
+				});
+			}
+		};
+
+		o = s.taboption('general', form.Value, 'network', _('LAN network'));
+		o.default = 'lan';
+		o.datatype = 'uciname';
+		o.rmempty = false;
+		o.description = _('Use an existing bridged LAN network. Configure addressing and DHCP under Network and Interfaces.');
 
 		o = s.taboption('general', form.ListValue, 'mode', _('Work Mode'));
 		o.value('0', _('Router'));
@@ -151,8 +166,6 @@ return view.extend({
 		o.value('R1', 'R1');
 		o.value('R2', 'R2');
 		o.value('R3', 'R3');
-		o.value('R4', 'R4');
-		o.value('R5', 'R5');
 		o.default = 'R3';
 		o.cfgvalue = function() {
 			return uci.get('1905d_cfg', 'map', 'map_ver') || 'R3';
@@ -164,7 +177,7 @@ return view.extend({
 			uci.unset('1905d_cfg', 'map', 'map_ver');
 		};
 		o.description = _('All devices in the mesh must use the same MAP version. ' +
-			'Use R3 for MAP R4 capable devices, DPP onboarding requires R3.');
+			'DPP onboarding requires R3. This build enables MAP R1, R2 and R3.');
 
 		o = s.taboption('general', form.Value, 'APSteerRssiTh', _('AP steering RSSI threshold'),
 			_('Minimum RSSI (dBm) below which the controller considers steering a client.'));
@@ -297,7 +310,7 @@ return view.extend({
 		};
 
 		o = s.taboption('advanced', form.Flag, 'DhcpCtl', _('DHCP control'));
-		o.default = '1';
+		o.default = '0';
 		o.rmempty = false;
 		o.description = _('The controller manages the DHCP server setting of its agents.');
 

@@ -1,0 +1,37 @@
+#!/usr/bin/lua
+-- SPDX-License-Identifier: GPL-2.0-only
+local mesh = require "mtk.easymesh"
+local ok, result = pcall(function()
+	if arg[1] == "defaults" then
+		return mesh.defaults()
+	elseif arg[1] == "configure" then
+		os.exit(mesh.configure() and 2 or 0)
+	elseif arg[1] == "prepare" then
+		local result = mesh.prepare()
+		require("nixio.fs").unlink("/var/run/easymesh/error")
+		return result
+	elseif arg[1] == "run" then
+		return mesh.run_daemon(arg[2])
+	elseif arg[1] == "save-backhaul" then
+		return mesh.save_backhaul(arg[2])
+	elseif arg[1] == "save-ap" then
+		return mesh.save_ap(arg[2])
+	elseif arg[1] == "add-bss" then
+		return mesh.add_bss(arg[2])
+	elseif arg[1] == "wps-profile" then
+		mesh.save_ap(arg[2], true)
+		return mesh.prepare()
+	elseif arg[1] == "interfaces" then
+		io.write(mesh.json.encode(mesh.interfaces()), "\n")
+		return true
+	end
+	error("usage: mtk-easymesh {defaults|configure|prepare|run DAEMON|interfaces}")
+end)
+if not ok then
+	io.stderr:write("EasyMesh: ", tostring(result), "\n")
+	local fs = require "nixio.fs"
+	fs.mkdirr("/var/run/easymesh")
+	mesh.atomic("/var/run/easymesh/error", tostring(result) .. "\n")
+	os.exit(1)
+end
+os.exit(result == false and 1 or 0)
