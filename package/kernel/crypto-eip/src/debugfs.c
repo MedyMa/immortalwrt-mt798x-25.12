@@ -8,6 +8,7 @@
 #include <linux/debugfs.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
+#include <linux/module.h>
 
 #include <pce/cdrt.h>
 
@@ -23,6 +24,9 @@ static int mtk_crypto_debugfs_read(struct seq_file *s, void *private)
 	struct mtk_xfrm_params *xfrm_params;
 
 	xfrm_params_list = mtk_xfrm_params_list_get();
+	if (!xfrm_params_list)
+		return 0;
+	seq_puts(s, "Counters: host-observed packets/bytes; not hardware totals\n");
 
 	spin_lock_bh(&xfrm_params_list->lock);
 
@@ -60,6 +64,7 @@ static ssize_t mtk_crypto_debugfs_write(struct file *file,
 }
 
 static const struct file_operations mtk_crypto_debugfs_fops = {
+	.owner = THIS_MODULE,
 	.open = mtk_crypto_debugfs_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
@@ -84,9 +89,10 @@ static ssize_t mtk_crypto_offload_dev_write(struct file *file,
 	char buf[IFNAMSIZ];
 	struct net_device *dev;
 	char *p, *tmp;
+	int ret;
 
-	if (count >= IFNAMSIZ)
-		return -EFAULT;
+	if (!count || count >= IFNAMSIZ)
+		return -EINVAL;
 
 	memset(buf, 0, IFNAMSIZ);
 
@@ -97,16 +103,15 @@ static ssize_t mtk_crypto_offload_dev_write(struct file *file,
 	p = strsep(&tmp, "\n\r ");
 	dev = dev_get_by_name(&init_net, p);
 
-	if (dev) {
-		mtk_crypto_enable_ipsec_dev_features(dev);
-		dev_put(dev);
-	} else
-		pr_notice("no such device found\n");
-
-	return count;
+	if (!dev)
+		return -ENODEV;
+	ret = mtk_crypto_enable_ipsec_dev_features(dev);
+	dev_put(dev);
+	return ret ? ret : count;
 }
 
 static const struct file_operations mtk_crypto_offload_dev_fops = {
+	.owner = THIS_MODULE,
 	.open = mtk_crypto_offload_dev_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
@@ -116,8 +121,7 @@ static const struct file_operations mtk_crypto_offload_dev_fops = {
 
 static int mtk_crypto_mac_filter_read(struct seq_file *m, void *private)
 {
-	pr_info("value=%d, mac filter is %s now!\n",
-		mac_filter_enable, (mac_filter_enable) ? "enabled" : "disabled");
+	seq_printf(m, "%d\n", READ_ONCE(mac_filter_enable));
 
 	return 0;
 }
@@ -131,24 +135,18 @@ static ssize_t mtk_crypto_mac_filter_enable_write(struct file *file,
 						  const char __user *buffer,
 						  size_t count, loff_t *data)
 {
-	char buf[8] = {0};
-	int len = count;
+	bool enabled;
+	int ret;
 
-	if ((len > 8) || copy_from_user(buf, buffer, len))
-		return -EFAULT;
-
-	if (buf[0] == '1' && !mac_filter_enable) {
-		pr_info("mac filter is going to be enabled !\n");
-		mac_filter_enable = 1;
-	} else if (buf[0] == '0' && mac_filter_enable) {
-		pr_info("mac filter is going to be disabled !\n");
-		mac_filter_enable = 0;
-	}
-
-	return len;
+	ret = kstrtobool_from_user(buffer, count, &enabled);
+	if (ret)
+		return ret;
+	WRITE_ONCE(mac_filter_enable, enabled);
+	return count;
 }
 
 static const struct file_operations mtk_crypto_mac_filter_enable_fops = {
+	.owner = THIS_MODULE,
 	.open = mtk_crypto_mac_filter_enable_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
@@ -159,6 +157,8 @@ static const struct file_operations mtk_crypto_mac_filter_enable_fops = {
 int mtk_crypto_debugfs_init(void)
 {
 	mtk_crypto_debugfs_root = debugfs_create_dir("mtk_crypto", NULL);
+	if (IS_ERR_OR_NULL(mtk_crypto_debugfs_root))
+		return -ENODEV;
 
 	debugfs_create_file("xfrm_params", 0644, mtk_crypto_debugfs_root, NULL,
 			    &mtk_crypto_debugfs_fops);
@@ -175,4 +175,5 @@ int mtk_crypto_debugfs_init(void)
 void mtk_crypto_debugfs_exit(void)
 {
 	debugfs_remove_recursive(mtk_crypto_debugfs_root);
+	mtk_crypto_debugfs_root = NULL;
 }

@@ -9,6 +9,10 @@
 #include <linux/bitops.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
+#include <linux/module.h>
+#include <net/gso.h>
+#include <net/icmp.h>
+#include <net/neighbour.h>
 #include <net/ip6_route.h>
 
 #include <mtk_eth_soc.h>
@@ -65,9 +69,11 @@ int mtk_crypto_xfrm_get_cdrt(struct xfrm_state *xs)
 
 	spin_lock_bh(&xfrm_params_list.lock);
 	list_for_each_entry(temp, &xfrm_params_list.list, node) {
-		if (xfrm_params == temp) {
+		if (xfrm_params == temp && temp->xs == xs) {
+			int idx = temp->active ? temp->cdrt->idx : 0;
+
 			spin_unlock_bh(&xfrm_params_list.lock);
-			return xfrm_params->cdrt->idx;
+			return idx;
 		}
 	}
 	spin_unlock_bh(&xfrm_params_list.lock);
@@ -89,7 +95,8 @@ void mtk_crypto_decrypt_sec_path_setup(struct sk_buff *skb, u16 cdrt)
 	spin_lock_bh(&xfrm_params_list.lock);
 	list_for_each_entry(xfrm_params, &xfrm_params_list.list, node) {
 		if (cdrt == xfrm_params->cdrt->idx) {
-			if (xfrm_params->xs->km.state == XFRM_STATE_VALID &&
+			if (xfrm_params->active &&
+			    xfrm_params->xs->km.state == XFRM_STATE_VALID &&
 			    xfrm_params->xs->xso.type == XFRM_DEV_OFFLOAD_PACKET &&
 			    xfrm_params->xs->xso.dir == XFRM_DEV_OFFLOAD_IN) {
 				x = xfrm_params->xs;
@@ -145,8 +152,8 @@ static int mtk_xfrm_offload_cdrt_setup(struct mtk_xfrm_params *xfrm_params)
 	cdesc->desc1.common.type = 3;
 	cdesc->desc1.token_len = 48;
 	/* All use small transform record now */
-	cdesc->desc1.p_tr[0] = __pa(xfrm_params->p_tr) | xfrm_params->tr_type;
-	cdesc->desc1.p_tr[1] = __pa(xfrm_params->p_tr) >> 32 & 0xFFFFFFFF;
+	cdesc->desc1.p_tr[0] = lower_32_bits(xfrm_params->tr_dma) | xfrm_params->tr_type;
+	cdesc->desc1.p_tr[1] = upper_32_bits(xfrm_params->tr_dma);
 
 	cdesc->desc2.hw_srv = 3;
 	cdesc->desc2.allow_pad = 1;
@@ -165,21 +172,25 @@ static void mtk_xfrm_offload_cls_entry_tear_down(struct mtk_xfrm_params *xfrm_pa
 	mtk_pce_cls_entry_write(xfrm_params->cdrt->cls);
 
 	mtk_pce_cls_entry_free(xfrm_params->cdrt->cls);
+	xfrm_params->cdrt->cls = NULL;
 }
 
 static int mtk_xfrm_offload_cls_entry_setup(struct mtk_xfrm_params *xfrm_params)
 {
 	struct cls_desc *cdesc;
 	struct xfrm_state *xs = xfrm_params->xs;
-	int ppe_port;
+	int ppe_port, ret;
 
 	xfrm_params->cdrt->cls = mtk_pce_cls_entry_alloc();
-	if (IS_ERR(xfrm_params->cdrt->cls))
-		return PTR_ERR(xfrm_params->cdrt->cls);
+	if (IS_ERR(xfrm_params->cdrt->cls)) {
+		ret = PTR_ERR(xfrm_params->cdrt->cls);
+		xfrm_params->cdrt->cls = NULL;
+		return ret;
+	}
 
 	cdesc = &xfrm_params->cdrt->cls->cdesc;
 
-	if (mac_filter_enable) {
+	if (READ_ONCE(mac_filter_enable)) {
 		CLS_DESC_DATA(cdesc, fport, PSE_PORT_TDMA);
 		CLS_DESC_DATA(cdesc, tport_idx, 0x3);
 	} else {
@@ -223,14 +234,34 @@ static int mtk_xfrm_offload_cls_entry_setup(struct mtk_xfrm_params *xfrm_params)
 	CLS_DESC_MASK_DATA(cdesc, l4_hdr_usr_data,
 					0xFFFFFFFF, be32_to_cpu(xfrm_params->xs->id.spi));
 
-	return mtk_pce_cls_entry_write(xfrm_params->cdrt->cls);
+	ret = mtk_pce_cls_entry_write(xfrm_params->cdrt->cls);
+	if (ret)
+		mtk_xfrm_offload_cls_entry_tear_down(xfrm_params);
+	return ret;
 }
 
 static void mtk_xfrm_offload_context_tear_down(struct mtk_xfrm_params *xfrm_params)
 {
 	mtk_xfrm_offload_cdrt_tear_down(xfrm_params);
-	mtk_ddk_invalidate_rec((void *) xfrm_params->p_handle, true);
-	crypto_free_sa((void *) xfrm_params->p_handle, 0);
+	if (xfrm_params->p_handle) {
+		mtk_ddk_invalidate_rec(xfrm_params->p_handle, true);
+		crypto_free_sa(xfrm_params->p_handle, 0);
+		xfrm_params->p_handle = NULL;
+	}
+}
+
+/* Policies and in-flight submitters keep the CDRT index reserved until
+ * their last reference is released, including during device flush/rekey.
+ */
+static void mtk_xfrm_params_put(struct mtk_xfrm_params *params)
+{
+	if (!refcount_dec_and_test(&params->refs))
+		return;
+	mtk_xfrm_offload_cls_entry_tear_down(params);
+	mtk_xfrm_offload_context_tear_down(params);
+	mtk_pce_cdrt_entry_free(params->cdrt);
+	kfree(params);
+	module_put(THIS_MODULE);
 }
 
 static int mtk_xfrm_offload_context_setup(struct mtk_xfrm_params *xfrm_params)
@@ -257,7 +288,10 @@ static int mtk_xfrm_offload_context_setup(struct mtk_xfrm_params *xfrm_params)
 
 	xfrm_params->p_tr = tr;
 
-	return mtk_xfrm_offload_cdrt_setup(xfrm_params);
+	ret = mtk_xfrm_offload_cdrt_setup(xfrm_params);
+	if (ret)
+		mtk_xfrm_offload_context_tear_down(xfrm_params);
+	return ret;
 
 err_out:
 	return ret;
@@ -329,7 +363,12 @@ int mtk_xfrm_offload_state_add(struct xfrm_state *xs)
 	if (mtk_crypto_ppe_get_num(xs->xso.dev) < 0)
 		return -EOPNOTSUPP;
 
-	/* TODO: maybe support IPv6 in the future? */
+	if (xs->xso.type != XFRM_DEV_OFFLOAD_PACKET ||
+	    (xs->xso.dir != XFRM_DEV_OFFLOAD_IN && xs->xso.dir != XFRM_DEV_OFFLOAD_OUT) ||
+	    xs->props.flags & XFRM_STATE_ESN)
+		return -EOPNOTSUPP;
+
+	/* Both supported families use full packet offload. */
 	if (xs->props.family != AF_INET && xs->props.family != AF_INET6) {
 		CRYPTO_NOTICE("Only IPv4 and IPv6 xfrm states may be offloaded\n");
 		return -EINVAL;
@@ -348,11 +387,13 @@ int mtk_xfrm_offload_state_add(struct xfrm_state *xs)
 		return -EINVAL;
 	}
 
-	xfrm_params = devm_kzalloc(crypto_dev,
-				   sizeof(struct mtk_xfrm_params),
-				   GFP_KERNEL);
+	xfrm_params = kzalloc(sizeof(*xfrm_params), GFP_KERNEL);
 	if (!xfrm_params)
 		return -ENOMEM;
+	if (!try_module_get(THIS_MODULE)) {
+		kfree(xfrm_params);
+		return -ENODEV;
+	}
 
 	xfrm_params->xs = xs;
 	INIT_LIST_HEAD(&xfrm_params->node);
@@ -369,15 +410,20 @@ int mtk_xfrm_offload_state_add(struct xfrm_state *xs)
 		ret = mtk_xfrm_offload_state_add_outbound(xs, xfrm_params);
 
 	if (ret) {
-		devm_kfree(crypto_dev, xfrm_params);
+		kfree(xfrm_params);
+		module_put(THIS_MODULE);
 		goto out;
 	}
 
+	refcount_set(&xfrm_params->refs, 1);
+	xfrm_params->active = true;
 	xs->xso.offload_handle = (unsigned long)xfrm_params;
 
 #if KERNEL_VERSION(6, 3, 0) < LINUX_VERSION_CODE
-	memcpy(extack->cookie, &xfrm_params->cdrt->idx, sizeof(xfrm_params->cdrt->idx));
-	extack->cookie_len = sizeof(xfrm_params->cdrt->idx);
+	if (extack) {
+		memcpy(extack->cookie, &xfrm_params->cdrt->idx, sizeof(xfrm_params->cdrt->idx));
+		extack->cookie_len = sizeof(xfrm_params->cdrt->idx);
+	}
 #endif
 
 	spin_lock_bh(&xfrm_params_list.lock);
@@ -390,50 +436,53 @@ out:
 	return ret;
 }
 
+static void mtk_xfrm_clear_flows(struct mtk_xfrm_params *params)
+{
+#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
+	foe_clear_crypto_entry(params->cdrt->idx);
+#elif defined(CONFIG_CRYPTO_OFFLOAD_INLINE_FLOWBLOCK)
+	mtk_flow_offload_teardown_by_tnl(mcrypto.eth, MTK_FOE_CRYPTO_DEL,
+					 params->cdrt->idx);
+#endif
+}
+
 void mtk_xfrm_offload_state_delete(struct xfrm_state *xs)
 {
+	struct mtk_xfrm_params *params = (void *)xs->xso.offload_handle;
+
+	if (!params)
+		return;
+	WRITE_ONCE(params->active, false);
+	if (params->cdrt->cls) {
+		memset(&params->cdrt->cls->cdesc, 0, sizeof(struct cls_desc));
+		mtk_pce_cls_entry_write(params->cdrt->cls);
+	}
+	mtk_xfrm_clear_flows(params);
 }
 
 void mtk_xfrm_offload_state_free(struct xfrm_state *xs)
 {
-	struct mtk_xfrm_params *xfrm_params;
+	struct mtk_xfrm_params *params;
 
-	if (!xs->xso.offload_handle)
+	spin_lock_bh(&xfrm_params_list.lock);
+	params = (void *)xs->xso.offload_handle;
+	if (!params) {
+		spin_unlock_bh(&xfrm_params_list.lock);
 		return;
-
-	xfrm_params = (struct mtk_xfrm_params *)xs->xso.offload_handle;
+	}
+	WRITE_ONCE(params->active, false);
 	xs->xso.offload_handle = 0;
-
-	spin_lock_bh(&xfrm_params_list.lock);
-	list_del(&xfrm_params->node);
+	list_del(&params->node);
 	spin_unlock_bh(&xfrm_params_list.lock);
 
-#if KERNEL_VERSION(6, 3, 0) < LINUX_VERSION_CODE
-	if (xs->xso.dir == XFRM_DEV_OFFLOAD_IN)
-#else
-	if (xs->xso.flags & XFRM_OFFLOAD_INBOUND)
-#endif
-		mtk_xfrm_offload_cls_entry_tear_down(xfrm_params);
-
-	mtk_xfrm_offload_context_tear_down(xfrm_params);
-
-	if (xfrm_params->cdrt)
-		mtk_pce_cdrt_entry_free(xfrm_params->cdrt);
-
-	devm_kfree(crypto_dev, xfrm_params);
+	mtk_xfrm_clear_flows(params);
+	mtk_xfrm_params_put(params);
 }
 
-void mtk_xfrm_offload_state_tear_down(void)
-{
-	struct mtk_xfrm_params *xfrm_params, *tmp;
-
-	spin_lock_bh(&xfrm_params_list.lock);
-
-	list_for_each_entry_safe(xfrm_params, tmp, &xfrm_params_list.list, node)
-		mtk_xfrm_offload_state_free(xfrm_params->xs);
-
-	spin_unlock_bh(&xfrm_params_list.lock);
-}
+struct mtk_xfrm_policy {
+	struct xfrm_state *state;
+	struct mtk_xfrm_params *params;
+};
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 int mtk_xfrm_offload_policy_add(struct xfrm_policy *xp, struct netlink_ext_ack *extack)
@@ -441,245 +490,225 @@ int mtk_xfrm_offload_policy_add(struct xfrm_policy *xp, struct netlink_ext_ack *
 int mtk_xfrm_offload_policy_add(struct xfrm_policy *xp)
 #endif
 {
-	struct mtk_xfrm_params *xfrm_params;
-	struct xfrm_state *xs;
-	struct xfrm_tmpl xt = xp->xfrm_vec[0];
+	struct mtk_xfrm_policy *policy;
+	struct mtk_xfrm_params *params;
 
-	if (xt.id.spi) {
-		xs = xfrm_state_lookup_byspi(&init_net, xt.id.spi, xt.encap_family);
-		if (!xs)
-			return 0;
-
-		xfrm_params = (struct mtk_xfrm_params *)xs->xso.offload_handle;
-		if (!xfrm_params) {
-			xfrm_state_put(xs);
-			return 0;
-		}
-
-		xp->xdo.offload_handle = (unsigned long) xfrm_params;
-		xfrm_state_put(xs);
+	if (xp->xdo.type != XFRM_DEV_OFFLOAD_PACKET ||
+	    mtk_crypto_ppe_get_num(xp->xdo.dev) < 0 || xp->xfrm_nr > 1)
+		return -EOPNOTSUPP;
+	policy = kzalloc(sizeof(*policy), GFP_KERNEL);
+	if (!policy)
+		return -ENOMEM;
+	if (!try_module_get(THIS_MODULE)) {
+		kfree(policy);
+		return -ENODEV;
 	}
-
+	if (xp->xfrm_nr && xp->xfrm_vec[0].id.spi)
+		policy->state = xfrm_state_lookup_byspi(&init_net,
+				xp->xfrm_vec[0].id.spi, xp->xfrm_vec[0].encap_family);
+	if (policy->state) {
+		spin_lock_bh(&xfrm_params_list.lock);
+		list_for_each_entry(params, &xfrm_params_list.list, node)
+			if (params->xs == policy->state && params->active) {
+				refcount_inc(&params->refs);
+				policy->params = params;
+				break;
+			}
+		spin_unlock_bh(&xfrm_params_list.lock);
+	}
+	xp->xdo.offload_handle = (unsigned long)policy;
 	return 0;
 }
 
 void mtk_xfrm_offload_policy_delete(struct xfrm_policy *xp)
 {
-#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT) || defined(CONFIG_CRYPTO_OFFLOAD_INLINE_FLOWBLOCK)
-	struct mtk_xfrm_params *xfrm_params;
+	struct mtk_xfrm_policy *policy = (void *)xp->xdo.offload_handle;
 
-	if (!xp->xdo.offload_handle)
-		return;
-
-	xfrm_params = (struct mtk_xfrm_params *)xp->xdo.offload_handle;
-	xp->xdo.offload_handle = 0;
-
-	if (xfrm_params->cdrt)
-#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
-		foe_clear_crypto_entry(xfrm_params->cdrt->idx);
-#elif defined(CONFIG_CRYPTO_OFFLOAD_INLINE_FLOWBLOCK)
-		mtk_flow_offload_teardown_by_tnl(mcrypto.eth, MTK_FOE_CRYPTO_DEL,
-						 xfrm_params->cdrt->idx);
-#endif
-
-	return;
-#endif // hnat or flowblock
+	if (policy && policy->params)
+		mtk_xfrm_clear_flows(policy->params);
 }
 
 void mtk_xfrm_offload_policy_free(struct xfrm_policy *xp)
 {
+	struct mtk_xfrm_policy *policy = (void *)xp->xdo.offload_handle;
+
+	if (!policy)
+		return;
+	xp->xdo.offload_handle = 0;
+	if (policy->params)
+		mtk_xfrm_params_put(policy->params);
+	if (policy->state)
+		xfrm_state_put(policy->state);
+	kfree(policy);
+	module_put(THIS_MODULE);
 }
 
-static inline struct neighbour *mtk_crypto_find_ipv6_dst_mac(struct sk_buff *skb,
-					struct xfrm_state *xs)
+bool mtk_xfrm_offload_ok(struct sk_buff *skb, struct xfrm_state *xs)
 {
-	struct neighbour *neigh;
+	struct mtk_xfrm_params *params;
+	bool ok;
 	struct dst_entry *dst = skb_dst(skb);
-	struct rt6_info *rt = (struct rt6_info *) dst;
-	struct sk_buff *skbn;
-	const struct in6_addr *nexthop;
 
-	if (!netif_carrier_ok(dst->dev) || !(dst->dev->flags & IFF_UP))
-		return NULL;
-
-	nexthop = rt6_nexthop(rt, (struct in6_addr *) &xs->id.daddr.a6);
-	neigh = __ipv6_neigh_lookup_noref(dst->dev, nexthop);
-	if (unlikely(!neigh)) {
-		CRYPTO_INFO("%s: %s No neigh (daddr=%pI6)\n", __func__, dst->dev->name,
-				nexthop);
-		neigh = __neigh_create(&nd_tbl, nexthop, dst->dev, false);
-		if (IS_ERR(neigh))
-			return NULL;
-
-		skbn = skb_clone(skb, GFP_ATOMIC);
-		if (skbn)
-			neigh_output(neigh, skbn, false);
-		return NULL;
-	}
-
-	if (is_zero_ether_addr(neigh->ha)) {
-		neigh = __ipv6_neigh_lookup_noref(dst->dev, &xs->id.daddr.a6);
-		if (unlikely(!neigh)) {
-			CRYPTO_INFO("%s: %s No neigh (daddr=%pI6)\n", __func__, dst->dev->name,
-					&xs->id.daddr.a6);
-			neigh = __neigh_create(&nd_tbl, &xs->id.daddr.a6, dst->dev, false);
-			if (IS_ERR(neigh))
-				return NULL;
-
-			skbn = skb_clone(skb, GFP_ATOMIC);
-			if (skbn)
-				neigh_output(neigh, skbn, false);
-			return NULL;
-		}
-	}
-
-	/* For the case that neighbour is found, but no MAC address is set */
-	if (is_zero_ether_addr(neigh->ha))
-		return NULL;
-
-	return neigh;
+	/* This callback must never consume or modify skb. */
+	spin_lock_bh(&xfrm_params_list.lock);
+	params = (void *)xs->xso.offload_handle;
+	ok = params && READ_ONCE(params->active) && dst &&
+	       xs->xso.type == XFRM_DEV_OFFLOAD_PACKET &&
+	       xs->xso.dir == XFRM_DEV_OFFLOAD_OUT && xs->xso.dev &&
+	       xfrm_dst_path(dst)->dev == xs->xso.dev &&
+	       xs->xso.dev->type == ARPHRD_ETHER &&
+	       ((xs->props.family == AF_INET && skb->protocol == htons(ETH_P_IP)) ||
+		(xs->props.family == AF_INET6 && skb->protocol == htons(ETH_P_IPV6)));
+	spin_unlock_bh(&xfrm_params_list.lock);
+	return ok;
 }
 
-static inline struct neighbour *mtk_crypto_find_ipv4_dst_mac(struct sk_buff *skb,
-					struct xfrm_state *xs)
+/* The kernel's explicit packet-xmit op transfers ownership on every return,
+ * including failed neighbour resolution, segmentation and fragmentation.
+ */
+static int mtk_xfrm_fragment_output(struct net *net, struct sock *sk,
+				   struct sk_buff *skb)
 {
-	struct neighbour *neigh;
-	struct dst_entry *dst = skb_dst(skb);
-	struct rtable *rt = (struct rtable *) dst;
-	struct sk_buff *skbn;
-	__be32 nexthop;
-
-	if (!netif_carrier_ok(dst->dev) || !(dst->dev->flags & IFF_UP))
-		return NULL;
-
-	/*
-	 * First get the nexthop from the routing table.
-	 * Then try to get neighbour for MAC address.
-	 */
-	nexthop = rt_nexthop(rt, xs->id.daddr.a4);
-	neigh = __ipv4_neigh_lookup_noref(dst->dev, nexthop);
-	if (unlikely(!neigh)) {
-		CRYPTO_INFO("%s: %s No neigh (nexthop=%pI4)\n", __func__, dst->dev->name,
-			&nexthop);
-		neigh = __neigh_create(&arp_tbl, &nexthop, dst->dev, false);
-		if (IS_ERR(neigh))
-			return NULL;
-
-		skbn = skb_clone(skb, GFP_ATOMIC);
-		if (skbn)
-			neigh_output(neigh, skbn, false);
-		return NULL;
-	}
-
-	/*
-	 * If the nexthop has no dst MAC, arp may failed on that IP.
-	 * Use tunnel destination IP and try to find MAC address again.
-	 */
-	if (is_zero_ether_addr(neigh->ha)) {
-		neigh = __ipv4_neigh_lookup_noref(dst->dev, xs->id.daddr.a4);
-		if (unlikely(!neigh)) {
-			CRYPTO_INFO("%s: %s No neigh (nexthop=%pI4)\n", __func__, dst->dev->name,
-						&xs->id.daddr.a4);
-			neigh = __neigh_create(&arp_tbl, &xs->id.daddr.a4, dst->dev, false);
-			if (IS_ERR(neigh))
-				return NULL;
-
-			skbn = skb_clone(skb, GFP_ATOMIC);
-			if (skbn)
-				neigh_output(neigh, skbn, false);
-			return NULL;
-		}
-	}
-
-	/* For the case that neighbour is found, but no MAC address is set */
-	if (is_zero_ether_addr(neigh->ha))
-		return NULL;
-
-	return neigh;
+	return xfrm_output(sk, skb);
 }
 
-bool mtk_xfrm_offload_ok(struct sk_buff *skb,
-			 struct xfrm_state *xs)
+int mtk_xfrm_offload_packet_xmit(struct sk_buff *skb, struct xfrm_state *xs)
 {
-	struct mtk_xfrm_params *xfrm_params;
-	struct neighbour *neigh;
+	struct mtk_xfrm_params *params = NULL;
 	struct dst_entry *dst = skb_dst(skb);
-	int fill_inner_info = 0;
+	struct net_device *dev = xs->xso.dev;
+	struct neighbour *neigh;
+	struct net *net = xs_net(xs);
+	unsigned int payload_len;
+	int mtu, ret = -EHOSTUNREACH;
+#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
+	int fill_inner_info;
+#endif
+	u8 mac[ETH_ALEN];
 
-	if (dst->dev->type != ARPHRD_PPP) {
-		rcu_read_lock_bh();
+	if (!mtk_xfrm_offload_ok(skb, xs) ||
+	    !netif_carrier_ok(dev) || !(dev->flags & IFF_UP))
+		goto drop;
 
-		if (xs->props.family == AF_INET)
-			neigh = mtk_crypto_find_ipv4_dst_mac(skb, xs);
-		else
-			neigh = mtk_crypto_find_ipv6_dst_mac(skb, xs);
-		if (!neigh) {
-			rcu_read_unlock_bh();
-			/* This is just a workaround to mark the packet which needs to be free */
-			skb->inner_protocol = IPPROTO_RSVP;
-			return true;
+	spin_lock_bh(&xfrm_params_list.lock);
+	params = (void *)xs->xso.offload_handle;
+	if (params && params->active)
+		refcount_inc(&params->refs);
+	else
+		params = NULL;
+	spin_unlock_bh(&xfrm_params_list.lock);
+	if (!params)
+		goto drop;
+
+	if (skb_is_gso(skb)) {
+		struct sk_buff *segs, *next;
+
+		segs = skb_gso_segment(skb, 0);
+		if (IS_ERR_OR_NULL(segs)) {
+			ret = segs ? PTR_ERR(segs) : -EINVAL;
+			goto drop;
 		}
-
-		/*
-		* For packet has pass through VTI (route-based VTI)
-		* The 'dev_queue_xmit' function called at network layer will cause both
-		* skb->mac_header and skb->network_header to point to the IP header
-		*/
-		if (skb->mac_header == skb->network_header)
-			fill_inner_info = 1;
-
-		skb_push(skb, sizeof(struct ethhdr));
-		skb_reset_mac_header(skb);
-
-		if (xs->props.family == AF_INET)
-			eth_hdr(skb)->h_proto = htons(ETH_P_IP);
-		else
-			eth_hdr(skb)->h_proto = htons(ETH_P_IPV6);
-		memcpy(eth_hdr(skb)->h_dest, neigh->ha, ETH_ALEN);
-		memcpy(eth_hdr(skb)->h_source, dst->dev->dev_addr, ETH_ALEN);
-
-		rcu_read_unlock_bh();
+		consume_skb(skb);
+		while (segs) {
+			next = segs->next;
+			skb_mark_not_on_list(segs);
+			ret = mtk_xfrm_offload_packet_xmit(segs, xs);
+			if (ret) {
+				kfree_skb_list(next);
+				goto out;
+			}
+			segs = next;
+		}
+		ret = 0;
+		goto out;
 	}
 
-	xfrm_params = (struct mtk_xfrm_params *)xs->xso.offload_handle;
+	mtu = xfrm_state_mtu(xs, ((struct xfrm_dst *)dst)->child_mtu_cached);
+	if (mtu <= 0) {
+		ret = -EMSGSIZE;
+		goto drop;
+	}
+	if (skb->len > mtu) {
+		if (skb->protocol == htons(ETH_P_IP) &&
+		    (!(ip_hdr(skb)->frag_off & htons(IP_DF)) || skb->ignore_df)) {
+			IPCB(skb)->frag_max_size = mtu;
+			ret = ip_do_fragment(net, skb->sk, skb, mtk_xfrm_fragment_output);
+			goto out;
+		}
+		if (skb->protocol == htons(ETH_P_IP))
+			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED, htonl(mtu));
+#if IS_ENABLED(CONFIG_IPV6)
+		else {
+			skb->dev = dev;
+			icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
+		}
+#endif
+		ret = -EMSGSIZE;
+		goto drop;
+	}
 
-	/* Make sure we have enough skb headroom for cdrt_idx */
-	if (skb_cow_head(skb, NET_SKB_PAD + NET_IP_ALIGN))
-		return true;
+	if (skb->ip_summed == CHECKSUM_PARTIAL) {
+		ret = skb_checksum_help(skb);
+		if (ret)
+			goto drop;
+	}
+	/* Reserve metadata AND Ethernet headroom before skb_push(). */
+	ret = skb_cow_head(skb, NET_SKB_PAD + NET_IP_ALIGN + ETH_HLEN);
+	if (ret)
+		goto drop;
+
+	neigh = dst_neigh_lookup(xfrm_dst_path(dst), &xs->id.daddr);
+	if (!neigh) {
+		ret = -EHOSTUNREACH;
+		goto drop;
+	}
+	if (!(READ_ONCE(neigh->nud_state) & NUD_VALID)) {
+		/* Trigger ARP/ND without queueing an unencrypted clone to WAN. */
+		neigh_event_send(neigh, NULL);
+		neigh_release(neigh);
+		ret = -EAGAIN;
+		goto drop;
+	}
+	neigh_ha_snapshot(mac, neigh, dev);
+	neigh_release(neigh);
+	if (!is_valid_ether_addr(mac)) {
+		ret = -EHOSTUNREACH;
+		goto drop;
+	}
 
 #if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
-	skb_hnat_cdrt(skb) = xfrm_params->cdrt->idx;
+	fill_inner_info = skb->mac_header == skb->network_header;
+#endif
+	payload_len = skb->len;
+	skb_push(skb, ETH_HLEN);
+	skb_reset_mac_header(skb);
+	ether_addr_copy(eth_hdr(skb)->h_dest, mac);
+	ether_addr_copy(eth_hdr(skb)->h_source, dev->dev_addr);
+	eth_hdr(skb)->h_proto = skb->protocol;
 
+#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
+	skb_hnat_cdrt(skb) = params->cdrt->idx;
 	if (ra_sw_nat_hook_tx && is_hnat_rate_reach(skb))
-		hnat_bind_crypto_entry(skb, dst->dev, fill_inner_info);
-
-	/* Set magic tag for tport setting, reset to 0 after tport is set */
+		hnat_bind_crypto_entry(skb, dev, fill_inner_info);
 	skb_hnat_magic_tag(skb) = HNAT_MAGIC_TAG;
 #else
-	skb_tnl_cdrt(skb) = xfrm_params->cdrt->idx;
+	skb_tnl_cdrt(skb) = params->cdrt->idx;
 	skb_tnl_magic_tag(skb) = TNL_MAGIC_TAG;
-#endif // HNAT
-
-	atomic64_add(skb->len - ETH_HLEN, &xfrm_params->bytes);
-	atomic64_inc(&xfrm_params->packets);
-
-	/*
-	 * Since skb headroom may not be copy when segment, we cannot rely on
-	 * headroom data (ex. cdrt) to decide packets should send to EIP197.
-	 * Here is a workaround that only skb with inner_protocol = ESP will
-	 * be sent to EIP197.
-	 */
+#endif
+	atomic64_add(payload_len, &params->bytes);
+	atomic64_inc(&params->packets);
 	skb->inner_protocol = IPPROTO_ESP;
+	skb->dev = dev;
+	nf_reset_ct(skb);
+	ret = dev_queue_xmit(skb);
+	ret = net_xmit_eval(ret) ? -ENOBUFS : 0;
+	goto out;
 
-	/* Since we're going to tx directly, set skb->dev to dst->dev */
-	skb->dev = dst->dev;
-
-	/*
-	 * Tx packet to EIP197.
-	 * To avoid conflict of SW and HW sequence number
-	 * All offloadable packets send to EIP197
-	 */
-	dev_queue_xmit(skb);
-
-	return true;
+drop:
+	XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
+	kfree_skb(skb);
+out:
+	if (params)
+		mtk_xfrm_params_put(params);
+	return ret;
 }

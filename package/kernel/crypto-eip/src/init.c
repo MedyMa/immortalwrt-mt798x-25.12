@@ -39,6 +39,8 @@
 #include "crypto-eip/debugfs.h"
 
 #include <pce/netsys.h>
+#include <pce/pce.h>
+#include <crypto-eip/ddk/umdevxs/umdevxs_ofdev.h>
 
 #define DRIVER_AUTHOR	"Ren-Ting Wang <ren-ting.wang@mediatek.com, " \
 			"Chris.Chou <chris.chou@mediatek.com"
@@ -146,21 +148,39 @@ static void mtk_crypto_unregister_algorithms(void)
 	}
 }
 
-static int __init mtk_crypto_lookaside_data_init(struct platform_device *pdev)
+static void mtk_crypto_lookaside_data_deinit(void)
 {
-	struct device *dev = &pdev->dev;
 	int i;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return;
+	if (priv->mtk_eip_ring)
+		for (i = 0; i < PEC_MAX_INTERFACE_NUM; i++) {
+			if (priv->mtk_eip_ring[i].irq >= 0)
+				irq_set_affinity_hint(priv->mtk_eip_ring[i].irq, NULL);
+			if (priv->mtk_eip_ring[i].workqueue)
+				destroy_workqueue(priv->mtk_eip_ring[i].workqueue);
+		}
+	kfree(priv->mtk_eip_ring);
+	kfree(priv);
+	priv = NULL;
+}
+
+static int __init mtk_crypto_lookaside_data_init(struct platform_device *pdev)
+{
+	int i;
+
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
-	platform_set_drvdata(pdev, priv);
-
-	priv->mtk_eip_ring = devm_kcalloc(dev, PEC_MAX_INTERFACE_NUM,
+	priv->mtk_eip_ring = kcalloc(PEC_MAX_INTERFACE_NUM,
 							sizeof(*priv->mtk_eip_ring), GFP_KERNEL);
 	if (!priv->mtk_eip_ring)
 		return -ENOMEM;
+
+	for (i = 0; i < PEC_MAX_INTERFACE_NUM; i++)
+		priv->mtk_eip_ring[i].irq = -1;
 
 	for (i = 0; i < PEC_MAX_INTERFACE_NUM; i++) {
 		char wq_name[17] = {0};
@@ -192,6 +212,7 @@ static int __init mtk_crypto_lookaside_data_init(struct platform_device *pdev)
 			return irq;
 
 		cpu = cpumask_local_spread(i, NUMA_NO_NODE);
+		priv->mtk_eip_ring[i].irq = irq;
 		irq_set_affinity_hint(irq, get_cpu_mask(cpu));
 	}
 
@@ -230,11 +251,16 @@ static inline u32 crypto_eip_read(u32 reg)
 	return readl(mcrypto.crypto_base + reg);
 }
 
+static const struct xfrmdev_ops mtk_xfrmdev_ops;
+
 #if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
 static bool mtk_crypto_eip_offloadable(struct sk_buff *skb)
 {
-	/* TODO: check is esp */
-	return true;
+	struct dst_entry *dst = skb_dst(skb);
+	struct xfrm_state *x = dst ? dst_xfrm(dst) : NULL;
+
+	return x && x->xso.dev && x->xso.dev->xfrmdev_ops == &mtk_xfrmdev_ops &&
+	       mtk_xfrm_offload_ok(skb, x);
 }
 #endif // HNAT
 
@@ -289,6 +315,7 @@ static const struct xfrmdev_ops mtk_xfrmdev_ops = {
 	.xdo_dev_state_delete = mtk_xfrm_offload_state_delete,
 	.xdo_dev_state_free = mtk_xfrm_offload_state_free,
 	.xdo_dev_offload_ok = mtk_xfrm_offload_ok,
+	.xdo_dev_packet_xmit = mtk_xfrm_offload_packet_xmit,
 
 	/* Not support at v5.4*/
 	.xdo_dev_policy_add = mtk_xfrm_offload_policy_add,
@@ -296,40 +323,54 @@ static const struct xfrmdev_ops mtk_xfrmdev_ops = {
 	.xdo_dev_policy_free = mtk_xfrm_offload_policy_free,
 };
 
-void mtk_crypto_enable_ipsec_dev_features(struct net_device *dev)
+static int mtk_crypto_enable_ipsec_dev_features_locked(struct net_device *dev)
 {
+	ASSERT_RTNL();
+	if (mtk_crypto_ppe_get_num(dev) < 0 || dev->type != ARPHRD_ETHER)
+		return -EOPNOTSUPP;
+	if (dev->xfrmdev_ops && dev->xfrmdev_ops != &mtk_xfrmdev_ops)
+		return -EBUSY;
 	dev->xfrmdev_ops = &mtk_xfrmdev_ops;
 	dev->features |= NETIF_F_HW_ESP;
 	dev->hw_enc_features |= NETIF_F_HW_ESP;
+	netdev_change_features(dev);
+	return 0;
+}
+
+int mtk_crypto_enable_ipsec_dev_features(struct net_device *dev)
+{
+	int ret;
 
 	rtnl_lock();
-	netdev_change_features(dev);
+	ret = mtk_crypto_enable_ipsec_dev_features_locked(dev);
 	rtnl_unlock();
+	return ret;
+}
 
-	if (dev->features & NETIF_F_HW_ESP)
-		CRYPTO_INFO("dev: %s, enable hw offload ipsec success\n", dev->name);
-	else
-		CRYPTO_INFO("dev: %s, enable hw offload ipsec failed\n", dev->name);
+static void mtk_crypto_disable_ipsec_dev_features_locked(struct net_device *dev)
+{
+	ASSERT_RTNL();
+	if (dev->xfrmdev_ops != &mtk_xfrmdev_ops)
+		return;
+	dev->features &= ~NETIF_F_HW_ESP;
+	dev->hw_enc_features &= ~NETIF_F_HW_ESP;
+	netdev_change_features(dev);
+	dev->xfrmdev_ops = NULL;
 }
 
 void mtk_crypto_disable_ipsec_dev_features(struct net_device *dev)
 {
-	dev->xfrmdev_ops = NULL;
-	dev->features &= (~NETIF_F_HW_ESP);
-	dev->hw_enc_features &= (~NETIF_F_HW_ESP);
-
 	rtnl_lock();
-	netdev_change_features(dev);
+	mtk_crypto_disable_ipsec_dev_features_locked(dev);
 	rtnl_unlock();
 }
-
 
 static void mtk_crypto_xfrm_offload_deinit(struct mtk_eth *eth)
 {
 	struct net_device *dev;
 
 #if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
-	mtk_crypto_offloadable = NULL;
+	RCU_INIT_POINTER(mtk_crypto_offloadable, NULL);
 #elif defined(CONFIG_CRYPTO_OFFLOAD_INLINE_FLOWBLOCK)
 	mtk_flow_offload_get_cdrt = NULL;
 #endif // HNAT
@@ -337,19 +378,23 @@ static void mtk_crypto_xfrm_offload_deinit(struct mtk_eth *eth)
 	/* wait for in-flight RX NAPI callers before module text goes away */
 	synchronize_net();
 
+	rtnl_lock();
 	for_each_netdev(&init_net, dev)
-		mtk_crypto_disable_ipsec_dev_features(dev);
+		mtk_crypto_disable_ipsec_dev_features_locked(dev);
+	rtnl_unlock();
 }
 
 static void mtk_crypto_xfrm_offload_init(struct mtk_eth *eth)
 {
 	struct net_device *dev;
 
+	rtnl_lock();
 	for_each_netdev(&init_net, dev)
-		mtk_crypto_enable_ipsec_dev_features(dev);
+		mtk_crypto_enable_ipsec_dev_features_locked(dev);
+	rtnl_unlock();
 
 #if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
-	mtk_crypto_offloadable = mtk_crypto_eip_offloadable;
+	rcu_assign_pointer(mtk_crypto_offloadable, mtk_crypto_eip_offloadable);
 #elif defined(CONFIG_CRYPTO_OFFLOAD_INLINE_FLOWBLOCK)
 	mtk_flow_offload_get_cdrt = mtk_crypto_xfrm_get_cdrt;
 #endif // HNAT
@@ -376,8 +421,8 @@ static int __init mtk_crypto_eth_dts_init(struct platform_device *pdev)
 		goto out;
 	}
 
-	if (!eth_pdev->dev.driver) {
-		ret = -EFAULT;
+	if (!eth_pdev->dev.driver || !platform_get_drvdata(eth_pdev)) {
+		ret = -EPROBE_DEFER;
 		goto out;
 	}
 
@@ -386,8 +431,7 @@ static int __init mtk_crypto_eth_dts_init(struct platform_device *pdev)
 		goto out;
 	}
 
-	mcrypto.eth_base = devm_ioremap(&pdev->dev,
-					res.start, resource_size(&res));
+	mcrypto.eth_base = ioremap(res.start, resource_size(&res));
 	if (!mcrypto.eth_base) {
 		ret = -ENOMEM;
 		goto out;
@@ -396,8 +440,9 @@ static int __init mtk_crypto_eth_dts_init(struct platform_device *pdev)
 	mcrypto.eth = platform_get_drvdata(eth_pdev);
 
 out:
+	if (eth_pdev)
+		put_device(&eth_pdev->dev);
 	of_node_put(eth_node);
-
 	return ret;
 }
 
@@ -428,54 +473,46 @@ static int __init mtk_crypto_ppe_num_dts_init(struct platform_device *pdev)
 	return 0;
 }
 
+static void mtk_crypto_eip_dts_deinit(void)
+{
+#if defined(CONFIG_CRYPTO_MTK_DDK_LOOKASIDE)
+	mtk_crypto_lookaside_data_deinit();
+#endif
+	if (mcrypto.eth_base)
+		iounmap(mcrypto.eth_base);
+	mcrypto.eth_base = NULL;
+	mcrypto.crypto_base = NULL; /* Mapping is owned by the DDK platform driver. */
+	mcrypto.eth = NULL;
+	crypto_dev = NULL;
+}
+
 static int __init mtk_crypto_eip_dts_init(void)
 {
-	struct platform_device *crypto_pdev;
-	struct device_node *crypto_node;
+	struct platform_device *crypto_pdev = NULL;
 	int ret;
 
-	crypto_node = of_find_compatible_node(NULL, NULL, HWPAL_PLATFORM_DEVICE_NAME);
-	if (!crypto_node)
+	/* Reuse the DDK's validated mapping. devm resources attached here would
+	 * survive an inline module's failed init/reload until ksupport unloads.
+	 */
+	ret = UMDevXS_OFDev_GetDevice(0, &crypto_pdev, &mcrypto.crypto_base);
+	if (ret || !crypto_pdev || !mcrypto.crypto_base)
 		return -ENODEV;
-
-	crypto_pdev = of_find_device_by_node(crypto_node);
-	if (!crypto_pdev) {
-		ret = -ENODEV;
-		goto out;
-	}
-
-	/* check crypto platform device is ready */
-	if (!crypto_pdev->dev.driver) {
-		ret = -EFAULT;
-		goto out;
-	}
-
 	crypto_dev = &crypto_pdev->dev;
-
-	mcrypto.crypto_base = devm_platform_ioremap_resource(crypto_pdev, 0);
-	if (IS_ERR(mcrypto.crypto_base)) {
-		CRYPTO_ERR("Failed to get resource, please remove all ddk drivers\n");
-		ret = -ENOMEM;
-		goto out;
-	}
 
 	ret = mtk_crypto_eth_dts_init(crypto_pdev);
 	if (ret)
-		goto out;
-
+		goto error;
 	ret = mtk_crypto_ppe_num_dts_init(crypto_pdev);
 	if (ret)
-		goto out;
-
+		goto error;
 #if defined(CONFIG_CRYPTO_MTK_DDK_LOOKASIDE)
 	ret = mtk_crypto_lookaside_data_init(crypto_pdev);
 	if (ret)
-		goto out;
-#endif /* CONFIG_CRYPTO_MTK_DDK_LOOKASIDE */
-
-out:
-	of_node_put(crypto_node);
-
+		goto error;
+#endif
+	return 0;
+error:
+	mtk_crypto_eip_dts_deinit();
 	return ret;
 }
 
@@ -483,6 +520,11 @@ static int __init mtk_crypto_eip_hw_init(void)
 {
 	int ret;
 
+	if (!mtk_pce_is_ready())
+		return -ENODEV;
+
+	mcrypto.force_clk_saved[0] = crypto_eip_read(EIP197_FORCE_CLK_ON);
+	mcrypto.force_clk_saved[1] = crypto_eip_read(EIP197_FORCE_CLK_ON2);
 	crypto_eip_write(EIP197_FORCE_CLK_ON, 0xffffffff);
 
 	crypto_eip_write(EIP197_FORCE_CLK_ON2, 0xffffffff);
@@ -491,8 +533,8 @@ static int __init mtk_crypto_eip_hw_init(void)
 
 	ret = mtk_ddk_pec_init();
 	if (ret) {
-		crypto_eip_write(EIP197_FORCE_CLK_ON, 0);
-		crypto_eip_write(EIP197_FORCE_CLK_ON2, 0);
+		crypto_eip_write(EIP197_FORCE_CLK_ON, mcrypto.force_clk_saved[0]);
+		crypto_eip_write(EIP197_FORCE_CLK_ON2, mcrypto.force_clk_saved[1]);
 		return ret;
 	}
 
@@ -503,9 +545,9 @@ static void mtk_crypto_eip_hw_deinit(void)
 {
 	mtk_ddk_pec_deinit();
 
-	crypto_eip_write(EIP197_FORCE_CLK_ON, 0);
+	crypto_eip_write(EIP197_FORCE_CLK_ON, mcrypto.force_clk_saved[0]);
 
-	crypto_eip_write(EIP197_FORCE_CLK_ON2, 0);
+	crypto_eip_write(EIP197_FORCE_CLK_ON2, mcrypto.force_clk_saved[1]);
 }
 
 static int __init mtk_crypto_eip_init(void)
@@ -521,7 +563,7 @@ static int __init mtk_crypto_eip_init(void)
 	ret = mtk_crypto_eip_hw_init();
 	if (ret) {
 		CRYPTO_ERR("crypto-eip hw init failed: %d\n", ret);
-		return ret;
+		goto err_dts;
 	}
 
 	ret = mtk_crypto_register_nf_hooks();
@@ -558,6 +600,8 @@ err_nf:
 #endif
 err_hw:
 	mtk_crypto_eip_hw_deinit();
+err_dts:
+	mtk_crypto_eip_dts_deinit();
 	return ret;
 }
 
@@ -577,7 +621,7 @@ static void __exit mtk_crypto_eip_exit(void)
 
 	mtk_crypto_unregister_nf_hooks();
 	mtk_crypto_eip_hw_deinit();
-
+	mtk_crypto_eip_dts_deinit();
 }
 
 module_init(mtk_crypto_eip_init);

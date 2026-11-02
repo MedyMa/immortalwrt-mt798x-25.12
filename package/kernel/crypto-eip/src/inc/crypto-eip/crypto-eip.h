@@ -15,6 +15,7 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/atomic.h>
+#include <linux/refcount.h>
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0))
 #include <crypto/sha1.h>
@@ -55,6 +56,7 @@ struct mtk_crypto {
 	void __iomem *crypto_base;
 	void __iomem *eth_base;
 	u32 ppe_num;
+	u32 force_clk_saved[2];
 };
 
 struct mtk_xfrm_params {
@@ -63,6 +65,9 @@ struct mtk_xfrm_params {
 	struct cdrt_entry *cdrt;
 
 	void *p_tr;			/* pointer to transform record */
+	dma_addr_t tr_dma;
+	bool active;
+	refcount_t refs;
 	u32 tr_type;
 	void *p_handle;		/* pointer to eip dma handle */
 	u32 dir;			/* SABuilder_Direction_t */
@@ -169,7 +174,7 @@ extern void mtk_update_dtls_param(struct DTLS_param *DTLSParam_p, int TnlIdx);
 extern void mtk_remove_dtls_param(struct DTLS_param *DTLSParam_p, int TnlIdx);
 extern void mtk_update_cdrt_idx(struct mtk_cdrt_idx_param *cdrt_idx_params_p);
 
-void mtk_crypto_enable_ipsec_dev_features(struct net_device *dev);
+int mtk_crypto_enable_ipsec_dev_features(struct net_device *dev);
 void mtk_crypto_disable_ipsec_dev_features(struct net_device *dev);
 
 /* Netsys */
@@ -187,9 +192,9 @@ int mtk_xfrm_offload_policy_add(struct xfrm_policy *xp);
 
 void mtk_xfrm_offload_state_delete(struct xfrm_state *xs);
 void mtk_xfrm_offload_state_free(struct xfrm_state *xs);
-void mtk_xfrm_offload_state_tear_down(void);
 void mtk_xfrm_offload_policy_delete(struct xfrm_policy *xp);
 void mtk_xfrm_offload_policy_free(struct xfrm_policy *xp);
+int mtk_xfrm_offload_packet_xmit(struct sk_buff *skb, struct xfrm_state *xs);
 bool mtk_xfrm_offload_ok(struct sk_buff *skb, struct xfrm_state *xs);
 
 int mtk_crypto_register_nf_hooks(void);

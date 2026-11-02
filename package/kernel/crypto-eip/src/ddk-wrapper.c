@@ -100,6 +100,23 @@ static bool crypto_iotoken_create(IOToken_Input_Dscr_t * const dscr_p,
 	return true;
 }
 
+static PEC_Status_t mtk_pec_packet_put(unsigned int ring,
+				     PEC_CommandDescriptor_t *cmd,
+				     unsigned int *count)
+{
+	unsigned int tries = MTK_EIP197_INLINE_NOF_TRIES;
+	PEC_Status_t ret;
+
+	do {
+		*count = 0;
+		ret = PEC_Packet_Put(ring, cmd, 1, count);
+		if (ret != PEC_STATUS_BUSY)
+			return ret;
+		udelay(MTK_EIP197_INLINE_RETRY_DELAY_MS * 1000);
+	} while (--tries);
+	return ret;
+}
+
 static unsigned int crypto_pe_busy_get_one(IOToken_Output_Dscr_t *const OutTokenDscr_p,
 			       u32 *OutTokenData_p,
 			       PEC_ResultDescriptor_t *RD_p, int ring)
@@ -883,11 +900,9 @@ int mtk_crypto_basic_cipher(struct crypto_async_request *async,
 		goto error_remove_sg;
 	}
 
-	do {
-		rc = PEC_Packet_Put(ring, &Cmd, 1, &count);
-	} while (rc == PEC_STATUS_BUSY);
+	rc = mtk_pec_packet_put(ring, &Cmd, &count);
 
-	if (rc != PEC_STATUS_OK && count != 1) {
+	if (rc != PEC_STATUS_OK || count != 1) {
 		goto error_remove_sg;
 	}
 
@@ -1082,11 +1097,9 @@ int crypto_ahash_token_req(struct crypto_async_request *async, struct mtk_crypto
 		goto error_exit_unregister;
 	}
 
-	do {
-		rc = PEC_Packet_Put(ring, &Cmd, 1, &count);
-	} while (rc == PEC_STATUS_BUSY);
+	rc = mtk_pec_packet_put(ring, &Cmd, &count);
 
-	if (rc != PEC_STATUS_OK && count != 1) {
+	if (rc != PEC_STATUS_OK || count != 1) {
 		rc = 1;
 		CRYPTO_ERR("PEC_Packet_Put error: %d\n", rc);
 		goto error_exit_unregister;
@@ -1312,11 +1325,9 @@ int crypto_ahash_aes_cbc(struct crypto_async_request *async, struct mtk_crypto_a
 		goto error_exit_unregister;
 	}
 
-	do {
-		rc = PEC_Packet_Put(ring, &Cmd, 1, &count);
-	} while (rc == PEC_STATUS_BUSY);
+	rc = mtk_pec_packet_put(ring, &Cmd, &count);
 
-	if (rc != PEC_STATUS_OK && count != 1) {
+	if (rc != PEC_STATUS_OK || count != 1) {
 		rc = 1;
 		CRYPTO_ERR("PEC_Packet_Put error: %d\n", rc);
 		goto error_exit_unregister;
@@ -1568,11 +1579,9 @@ int crypto_first_ahash_req(struct crypto_async_request *async,
 		goto error_exit_unregister;
 	}
 
-	do {
-		rc = PEC_Packet_Put(ring, &Cmd, 1, &count);
-	} while (rc == PEC_STATUS_BUSY);
+	rc = mtk_pec_packet_put(ring, &Cmd, &count);
 
-	if (rc != PEC_STATUS_OK && count != 1) {
+	if (rc != PEC_STATUS_OK || count != 1) {
 		rc = 1;
 		CRYPTO_ERR("PEC_Packet_Put error: %d\n", rc);
 		goto error_exit_unregister;
@@ -1741,6 +1750,8 @@ bool crypto_hmac_precompute(SABuilder_Auth_t AuthAlgo,
 	}
 
 	blocksize = crypto_ahash_blocksize(atfm);
+	if (blocksize > sizeof(pad_block) || !Inner_p || !Outer_p)
+		goto free_ahash;
 	state = kzalloc(crypto_ahash_statesize(atfm), GFP_KERNEL);
 	if (!state)
 		goto free_ahash;
@@ -1781,7 +1792,9 @@ free_request:
 	ahash_request_free(areq);
 free_ahash:
 	crypto_free_ahash(atfm);
-	kfree(state);
+	kfree_sensitive(state);
+	memzero_explicit(pad_block, sizeof(pad_block));
+	memzero_explicit(hashed_key, sizeof(hashed_key));
 
 	return ret;
 }
@@ -1800,7 +1813,7 @@ mtk_ddk_aes_block_encrypt(uint8_t *key,  unsigned int klen, uint8_t *input, uint
 	tfm = crypto_alloc_skcipher("ecb(aes)", 0, 0);
 	if (IS_ERR(tfm)) {
 		pr_err("skcipher: failed to allocate tfm\n");
-		return PTR_ERR(tfm);
+		return false;
 	}
 
 	req = skcipher_request_alloc(tfm, GFP_KERNEL);
@@ -1837,6 +1850,14 @@ out:
 
 static bool set_crypto_aead(struct xfrm_algo_aead *aead, SABuilder_Params_t *params)
 {
+	unsigned int salt = !strcmp(aead->alg_name, "rfc4309(ccm(aes))") ? 3 : 4;
+	unsigned int bytes = aead->alg_key_len / 8;
+
+	if (aead->alg_key_len % 8 ||
+	    (bytes != AES_KEYSIZE_128 + salt &&
+	     bytes != AES_KEYSIZE_192 + salt &&
+	     bytes != AES_KEYSIZE_256 + salt))
+		return false;
 	params->Key_p = aead->alg_key;
 	params->CryptoAlgo = SAB_CRYPTO_AES;
 	params->KeyByteCount = aead->alg_key_len / 8;
@@ -1885,18 +1906,14 @@ static bool set_auth_aead(struct xfrm_algo_aead *aead,
 	xfrm_params->tr_type = EIP197_SMALL_TR;
 	if (strcmp(aead->alg_name, "rfc4106(gcm(aes))") == 0) {
 		params->AuthAlgo = SAB_AUTH_AES_GCM;
-		hash_key = kcalloc(AES_BLOCK_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		if (!hash_key)
-			return false;
 		memset(hash_key, 0, AES_BLOCK_SIZE);
-		mtk_ddk_aes_block_encrypt(params->Key_p, params->KeyByteCount, hash_key, hash_key);
+		if (!mtk_ddk_aes_block_encrypt(params->Key_p, params->KeyByteCount, hash_key, hash_key))
+			return false;
 	} else if (strcmp(aead->alg_name, "rfc4543(gcm(aes))") == 0) {
 		params->AuthAlgo = SAB_AUTH_AES_GMAC;
-		hash_key = kcalloc(AES_BLOCK_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		if (!hash_key)
-			return false;
 		memset(hash_key, 0, AES_BLOCK_SIZE);
-		mtk_ddk_aes_block_encrypt(params->Key_p, params->KeyByteCount, hash_key, hash_key);
+		if (!mtk_ddk_aes_block_encrypt(params->Key_p, params->KeyByteCount, hash_key, hash_key))
+			return false;
 	} else if (strcmp(aead->alg_name, "rfc4309(ccm(aes))") == 0) {
 		params->AuthAlgo = SAB_AUTH_AES_CCM;
 		return true;
@@ -1921,55 +1938,27 @@ static bool set_auth_aalg(struct xfrm_algo_auth *aalg,
 			  struct mtk_xfrm_params *xfrm_params,
 			  SABuilder_Params_t *params, uint8_t *inner, uint8_t *outer)
 {
-	if (strcmp(aalg->alg_name, "hmac(sha1)") == 0) {
+	xfrm_params->tr_type = EIP197_SMALL_TR;
+	if (!strcmp(aalg->alg_name, "hmac(sha1)"))
 		params->AuthAlgo = SAB_AUTH_HMAC_SHA1;
-		inner = kcalloc(SHA1_DIGEST_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		outer = kcalloc(SHA1_DIGEST_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		crypto_hmac_precompute(SAB_AUTH_HMAC_SHA1, &aalg->alg_key[0],
-					aalg->alg_key_len / 8, inner, outer);
-		params->AuthKey1_p = inner;
-		params->AuthKey2_p = outer;
-		xfrm_params->tr_type = EIP197_SMALL_TR;
-	} else if (strcmp(aalg->alg_name, "hmac(sha256)") == 0) {
+	else if (!strcmp(aalg->alg_name, "hmac(sha256)"))
 		params->AuthAlgo = SAB_AUTH_HMAC_SHA2_256;
-		inner = kcalloc(SHA256_DIGEST_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		outer = kcalloc(SHA256_DIGEST_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		crypto_hmac_precompute(SAB_AUTH_HMAC_SHA2_256, &aalg->alg_key[0],
-					aalg->alg_key_len / 8, inner, outer);
-		params->AuthKey1_p = inner;
-		params->AuthKey2_p = outer;
-		xfrm_params->tr_type = EIP197_SMALL_TR;
-	} else if (strcmp(aalg->alg_name, "hmac(sha384)") == 0) {
+	else if (!strcmp(aalg->alg_name, "hmac(sha384)")) {
 		params->AuthAlgo = SAB_AUTH_HMAC_SHA2_384;
-		inner = kcalloc(SHA512_DIGEST_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		outer = kcalloc(SHA512_DIGEST_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		crypto_hmac_precompute(SAB_AUTH_HMAC_SHA2_384, &aalg->alg_key[0],
-					aalg->alg_key_len / 8, inner, outer);
-		params->AuthKey1_p = inner;
-		params->AuthKey2_p = outer;
 		xfrm_params->tr_type = EIP197_LARGE_TR;
-	} else if (strcmp(aalg->alg_name, "hmac(sha512)") == 0) {
+	} else if (!strcmp(aalg->alg_name, "hmac(sha512)")) {
 		params->AuthAlgo = SAB_AUTH_HMAC_SHA2_512;
-		inner = kcalloc(SHA512_DIGEST_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		outer = kcalloc(SHA512_DIGEST_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		crypto_hmac_precompute(SAB_AUTH_HMAC_SHA2_512, &aalg->alg_key[0],
-					aalg->alg_key_len / 8, inner, outer);
-		params->AuthKey1_p = inner;
-		params->AuthKey2_p = outer;
 		xfrm_params->tr_type = EIP197_LARGE_TR;
-	} else if (strcmp(aalg->alg_name, "hmac(md5)") == 0) {
+	} else if (!strcmp(aalg->alg_name, "hmac(md5)"))
 		params->AuthAlgo = SAB_AUTH_HMAC_MD5;
-		inner = kcalloc(MD5_DIGEST_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		outer = kcalloc(MD5_DIGEST_SIZE, sizeof(uint8_t), GFP_KERNEL);
-		crypto_hmac_precompute(SAB_AUTH_HMAC_MD5, &aalg->alg_key[0],
-					aalg->alg_key_len / 8, inner, outer);
-		params->AuthKey1_p = inner;
-		params->AuthKey2_p = outer;
-		xfrm_params->tr_type = EIP197_SMALL_TR;
-	} else {
+	else
 		return false;
-	}
 
+	if (!crypto_hmac_precompute(params->AuthAlgo, aalg->alg_key,
+				    aalg->alg_key_len / 8, inner, outer))
+		return false;
+	params->AuthKey1_p = inner;
+	params->AuthKey2_p = outer;
 	return true;
 }
 
@@ -1981,8 +1970,8 @@ void *mtk_ddk_tr_ipsec_build(struct mtk_xfrm_params *xfrm_params, u32 ipsec_mode
 	SABuilder_Params_t params;
 	bool set_success = false;
 	unsigned int SAWords = 0;
-	uint8_t *inner = NULL;
-	uint8_t *outer = NULL;
+	u8 inner[SHA512_DIGEST_SIZE] = {};
+	u8 outer[SHA512_DIGEST_SIZE] = {};
 
 	DMABuf_Status_t dma_status;
 	DMABuf_Properties_t dma_properties = {0, 0, 0, 0};
@@ -1990,6 +1979,7 @@ void *mtk_ddk_tr_ipsec_build(struct mtk_xfrm_params *xfrm_params, u32 ipsec_mode
 
 	DMABuf_Handle_t sa_handle = {0};
 	PEC_Status_t pec_status;
+	u64 sa_dma;
 
 	if (xs->props.family == AF_INET)
 		sa_status = SABuilder_Init_ESP(&params,
@@ -2099,11 +2089,18 @@ void *mtk_ddk_tr_ipsec_build(struct mtk_xfrm_params *xfrm_params, u32 ipsec_mode
 		goto error_ret;
 	}
 
+	dma_status = DMABuf_DMAAddress_Get(sa_handle, &sa_dma);
+	if (dma_status != DMABUF_STATUS_OK || (sa_dma & 3)) {
+		crypto_free_sa(sa_handle.p, 0);
+		sa_host_addr.p = NULL;
+		goto error_ret;
+	}
+	xfrm_params->tr_dma = sa_dma;
 	xfrm_params->p_handle = sa_handle.p;
 
 error_ret:
-	kfree(inner);
-	kfree(outer);
+	memzero_explicit(inner, sizeof(inner));
+	memzero_explicit(outer, sizeof(outer));
 	return sa_host_addr.p;
 }
 
@@ -2261,9 +2258,7 @@ mtk_ddk_invalidate_rec(
 		return false;
 
 	// Issue command
-	do {
-		PEC_Rc = PEC_Packet_Put(PEC_INTERFACE_ID, &Cmd, 1, &count);
-	} while (PEC_Rc == PEC_STATUS_BUSY);
+	PEC_Rc = mtk_pec_packet_put(PEC_INTERFACE_ID, &Cmd, &count);
 
 	if (PEC_Rc != PEC_STATUS_OK || count != 1) {
 		CRYPTO_ERR("%s: PEC_Packet_Put() error %d, count %d\n",

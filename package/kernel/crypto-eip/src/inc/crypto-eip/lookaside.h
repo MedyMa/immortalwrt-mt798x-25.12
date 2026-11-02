@@ -94,6 +94,7 @@ struct mtk_crypto_work_data {
 };
 
 struct mtk_crypto_ring {
+	int irq;
 	struct list_head list;
 	spinlock_t ring_lock;
 
