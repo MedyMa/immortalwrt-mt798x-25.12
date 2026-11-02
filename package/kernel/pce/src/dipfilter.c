@@ -218,7 +218,7 @@ unlock:
 }
 EXPORT_SYMBOL(mtk_pce_dipfilter_entry_del);
 
-static void mtk_pce_dipfilter_clean_up(void)
+static int mtk_pce_dipfilter_clean_up(void)
 {
 	struct fe_mem_msg fmsg = {
 		.cmd = FE_MEM_CMD_WRITE,
@@ -244,13 +244,17 @@ static void mtk_pce_dipfilter_clean_up(void)
 
 unlock:
 	spin_unlock_irqrestore(&dip_hw.lock, flag);
+	return ret;
 }
 
 int mtk_pce_dipfilter_init(struct platform_device *pdev)
 {
+	int ret;
 	spin_lock_init(&dip_hw.lock);
 
-	mtk_pce_dipfilter_clean_up();
+	ret = mtk_pce_dipfilter_clean_up();
+	if (ret)
+		return ret;
 
 	return 0;
 }

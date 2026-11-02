@@ -120,7 +120,7 @@ EXPORT_SYMBOL(mtk_pce_cdrt_entry_write);
 
 struct cdrt_entry *mtk_pce_cdrt_entry_find(u32 cdrt_idx)
 {
-	struct cdrt_entry *cdrt;
+	struct cdrt_entry *cdrt = ERR_PTR(-ENODEV);
 	unsigned long flag;
 	u32 idx;
 
@@ -132,17 +132,18 @@ struct cdrt_entry *mtk_pce_cdrt_entry_find(u32 cdrt_idx)
 	if (cdrt_idx < CDRT_DEC_IDX_OFS + CDRT_DEC_MAX_ENTRY) {
 		idx = cdrt_idx - CDRT_DEC_IDX_OFS;
 		if (!test_bit(idx, cdrt_hw.dec_used))
-			return ERR_PTR(-ENODEV);
+			goto unlock;
 
 		cdrt = &cdrt_hw.dec_tbl[idx];
 	} else {
 		idx = cdrt_idx - CDRT_ENC_IDX_OFS;
 		if (!test_bit(idx, cdrt_hw.enc_used))
-			return ERR_PTR(-ENODEV);
+			goto unlock;
 
 		cdrt = &cdrt_hw.enc_tbl[idx];
 	}
 
+unlock:
 	spin_unlock_irqrestore(&cdrt_hw.lock, flag);
 
 	return cdrt;
@@ -224,7 +225,7 @@ void mtk_pce_cdrt_entry_free(struct cdrt_entry *cdrt)
 }
 EXPORT_SYMBOL(mtk_pce_cdrt_entry_free);
 
-static void mtk_pce_cdrt_clean_up(void)
+static int mtk_pce_cdrt_clean_up(void)
 {
 	struct fe_mem_msg msg = {
 		.cmd = FE_MEM_CMD_WRITE,
@@ -243,12 +244,13 @@ static void mtk_pce_cdrt_clean_up(void)
 
 		ret = mtk_pce_fe_mem_msg_send(&msg);
 		if (ret)
-			return;
+			break;
 
 		/* TODO: clean up bit map? */
 	}
 
 	spin_unlock_irqrestore(&cdrt_hw.lock, flag);
+	return ret;
 }
 
 int mtk_pce_cdrt_enable(void)
@@ -265,11 +267,14 @@ void mtk_pce_cdrt_disable(void)
 
 int mtk_pce_cdrt_init(struct platform_device *pdev)
 {
+	int ret;
 	u32 i;
 
 	spin_lock_init(&cdrt_hw.lock);
 
-	mtk_pce_cdrt_clean_up();
+	ret = mtk_pce_cdrt_clean_up();
+	if (ret)
+		return ret;
 
 	for (i = 0; i < CDRT_DEC_MAX_ENTRY; i++) {
 		cdrt_hw.dec_tbl[i].idx = i + CDRT_DEC_IDX_OFS;

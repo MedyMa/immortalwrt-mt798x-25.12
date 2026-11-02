@@ -211,4 +211,6 @@ int mtk_pce_enable(void);
 void mtk_pce_disable(void);
 
 int mtk_pce_fe_mem_msg_send(struct fe_mem_msg *msg);
+bool mtk_pce_is_ready(void);
+
 #endif /* _MTK_PCE_H_ */

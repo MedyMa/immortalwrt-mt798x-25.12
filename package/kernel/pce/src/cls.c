@@ -57,7 +57,7 @@ void mtk_pce_cls_disable(void)
 	mtk_pce_netsys_clrbits(GLO_MEM_CFG, GDM_CLS_EN);
 }
 
-static void mtk_pce_cls_clean_up(void)
+static int mtk_pce_cls_clean_up(void)
 {
 	struct fe_mem_msg msg = {
 		.cmd = FE_MEM_CMD_WRITE,
@@ -81,15 +81,19 @@ static void mtk_pce_cls_clean_up(void)
 
 unlock:
 	spin_unlock_irqrestore(&cls_hw.lock, flag);
+	return ret;
 }
 
 int mtk_pce_cls_init(struct platform_device *pdev)
 {
+	int ret;
 	u32 i;
 
 	spin_lock_init(&cls_hw.lock);
 
-	mtk_pce_cls_clean_up();
+	ret = mtk_pce_cls_clean_up();
+	if (ret)
+		return ret;
 
 	for (i = 0; i < FE_MEM_CLS_MAX_INDEX; i++)
 		cls_hw.cls_tbl[i].idx = i + 1;
@@ -155,8 +159,8 @@ struct cls_entry *mtk_pce_cls_entry_alloc(void)
 
 	spin_lock_irqsave(&cls_hw.lock, flag);
 
-	idx = find_first_zero_bit(cls_hw.cls_used, FE_MEM_CLS_MAX_INDEX);
-	if (idx == FE_MEM_CLS_MAX_INDEX) {
+	idx = find_first_zero_bit(cls_hw.cls_used, FE_MEM_CLS_MAX_INDEX - 1);
+	if (idx == FE_MEM_CLS_MAX_INDEX - 1) {
 		cls = ERR_PTR(-ENOMEM);
 		goto unlock;
 	}

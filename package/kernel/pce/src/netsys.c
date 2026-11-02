@@ -9,6 +9,7 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/err.h>
+#include <linux/iopoll.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -25,6 +26,7 @@
 struct netsys_hw {
 	void __iomem *base;
 	spinlock_t lock;
+	bool failed;
 	u32 fe_mem_limit[__FE_MEM_TYPE_MAX];
 };
 
@@ -105,18 +107,32 @@ static inline void mtk_pce_fe_mem_start(enum fe_mem_cmd cmd)
 		   FIELD_PREP(GLO_MEM_CTRL_CMD_MASK, cmd));
 }
 
-static inline void mtk_pce_fe_mem_wait_transfer_done(void)
+static int mtk_pce_fe_mem_wait_transfer_done(void)
 {
-	while (FIELD_GET(GLO_MEM_CTRL_CMD_MASK, mtk_pce_netsys_read(GLO_MEM_CTRL)))
-		udelay(10);
+	u32 value;
+	int ret;
+
+	/* Called with IRQs disabled: a stalled FE must not hang the boot CPU. */
+	ret = readl_poll_timeout_atomic(netsys.base + GLO_MEM_CTRL, value,
+				       !(value & GLO_MEM_CTRL_CMD_MASK), 10, 10000);
+	if (ret) {
+		WRITE_ONCE(netsys.failed, true);
+		pr_err_ratelimited("pce: FE memory transfer timed out (ctrl=%#x)\n", value);
+	}
+	return ret;
 }
 
 static int mtk_pce_fe_mem_write(enum fe_mem_type type, u32 *raw_data, u32 idx)
 {
 	unsigned long flag;
 	u32 i = 0;
+	int ret;
 
 	spin_lock_irqsave(&netsys.lock, flag);
+	if (netsys.failed) {
+		ret = -EIO;
+		goto unlock;
+	}
 
 	mtk_pce_fe_mem_config(type, idx);
 
@@ -126,37 +142,52 @@ static int mtk_pce_fe_mem_write(enum fe_mem_type type, u32 *raw_data, u32 idx)
 
 	mtk_pce_fe_mem_start(FE_MEM_CMD_WRITE);
 
-	mtk_pce_fe_mem_wait_transfer_done();
+	ret = mtk_pce_fe_mem_wait_transfer_done();
 
+unlock:
 	spin_unlock_irqrestore(&netsys.lock, flag);
 
-	return 0;
+	return ret;
 }
 
 static int mtk_pce_fe_mem_read(enum fe_mem_type type, u32 *raw_data, u32 idx)
 {
 	unsigned long flag;
 	u32 i = 0;
+	int ret;
 
 	spin_lock_irqsave(&netsys.lock, flag);
+	if (netsys.failed) {
+		ret = -EIO;
+		goto unlock;
+	}
 
 	mtk_pce_fe_mem_config(type, idx);
 
 	mtk_pce_fe_mem_start(FE_MEM_CMD_READ);
 
-	mtk_pce_fe_mem_wait_transfer_done();
+	ret = mtk_pce_fe_mem_wait_transfer_done();
+
+	if (ret)
+		goto unlock;
 
 	/* read data out */
 	for (i = 0; i < FE_MEM_DATA_WLEN; i++)
 		raw_data[i] = mtk_pce_netsys_read(GLO_MEM_DATA_IDX(i));
 
+unlock:
 	spin_unlock_irqrestore(&netsys.lock, flag);
 
-	return 0;
+	return ret;
 }
 
 int mtk_pce_fe_mem_msg_send(struct fe_mem_msg *msg)
 {
+	if (unlikely(!netsys.base))
+		return -ENODEV;
+	if (unlikely(READ_ONCE(netsys.failed)))
+		return -EIO;
+
 	if (unlikely(!msg))
 		return -EINVAL;
 
@@ -201,16 +232,22 @@ int mtk_pce_netsys_init(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	if (of_address_to_resource(fe_mem, 0, &res))
-		return -ENXIO;
+	if (of_address_to_resource(fe_mem, 0, &res)) {
+		ret = -ENXIO;
+		goto put_node;
+	}
 
 	/* map fe_mem */
 	netsys.base = devm_ioremap(&pdev->dev, res.start, resource_size(&res));
-	if (!netsys.base)
-		return -ENOMEM;
+	if (!netsys.base) {
+		ret = -ENOMEM;
+		goto put_node;
+	}
 
 	spin_lock_init(&netsys.lock);
+	netsys.failed = false;
 
+put_node:
 	of_node_put(fe_mem);
 
 	return ret;
@@ -218,7 +255,7 @@ int mtk_pce_netsys_init(struct platform_device *pdev)
 
 void mtk_pce_netsys_deinit(struct platform_device *pdev)
 {
-	/* nothing to deinit right now */
+	netsys.base = NULL;
 }
 
 int mtk_pce_enable(void)

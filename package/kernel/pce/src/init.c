@@ -22,6 +22,13 @@
 #include "pce/pce.h"
 
 struct device *pce_dev;
+static bool pce_ready;
+
+bool mtk_pce_is_ready(void)
+{
+	return READ_ONCE(pce_ready);
+}
+EXPORT_SYMBOL_GPL(mtk_pce_is_ready);
 
 static int mtk_pce_probe(struct platform_device *pdev)
 {
@@ -53,7 +60,8 @@ static int mtk_pce_probe(struct platform_device *pdev)
 	if (ret)
 		goto debugfs_deinit;
 
-	return ret;
+	WRITE_ONCE(pce_ready, true);
+	return 0;
 
 debugfs_deinit:
 	mtk_pce_debugfs_deinit(pdev);
@@ -75,6 +83,7 @@ netsys_deinit:
 
 static void mtk_pce_remove_new(struct platform_device *pdev)
 {
+	WRITE_ONCE(pce_ready, false);
 	mtk_pce_disable();
 
 	mtk_pce_debugfs_deinit(pdev);
@@ -117,14 +126,25 @@ static struct platform_driver mtk_pce_driver = {
 #endif
 	.driver = {
 		.name = "mediatek,pce",
+		.probe_type = PROBE_FORCE_SYNCHRONOUS,
 		.owner = THIS_MODULE,
+		.suppress_bind_attrs = true,
 		.of_match_table = mtk_pce_match,
 	},
 };
 
 static int __init mtk_pce_init(void)
 {
-	return platform_driver_register(&mtk_pce_driver);
+	int ret = platform_driver_register(&mtk_pce_driver);
+
+	/* A registered driver with a failed probe must not satisfy the module
+	 * dependency of NPU/EIP clients that immediately access its registers.
+	 */
+	if (!ret && !mtk_pce_is_ready()) {
+		platform_driver_unregister(&mtk_pce_driver);
+		return -ENODEV;
+	}
+	return ret;
 }
 
 static void __exit mtk_pce_exit(void)
