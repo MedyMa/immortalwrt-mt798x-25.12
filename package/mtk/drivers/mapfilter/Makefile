@@ -9,7 +9,8 @@ include $(INCLUDE_DIR)/kernel.mk
 PKG_NAME:=mapfilter
 PKG_REVISION:=70fcdd
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_REVISION).tar.bz2
-PKG_RELEASE:=3
+PKG_RELEASE:=4
+PKG_CONFIG_DEPENDS:=CONFIG_MTK_WIFI7_MAP_HOSTAPD_SUPPORT
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -19,6 +20,7 @@ MAKE_FLAGS += CONFIG_SUPPORT_OPENWRT=y
 define KernelPackage/mapfilter
   CATEGORY:=MTK Properties
   TITLE:=MTK map filter
+  DEPENDS:=+kmod-br-netfilter
   FILES:=$(PKG_BUILD_DIR)/mapfilter.ko
   # The native Mesh service modprobes this only after Mesh is enabled.
 ifneq ($(CONFIG_MTK_WIFI7_MAP_HOSTAPD_SUPPORT),y)
