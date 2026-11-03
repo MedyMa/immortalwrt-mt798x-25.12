@@ -9,7 +9,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME:=wifi-profile
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 PKG_BUILD_DEPENDS:=
 PKG_FILE_DEPENDS:=
 PKG_LICENSE:=GPL-2.0
@@ -195,7 +195,6 @@ define Package/wifi-dats/install
 			$(INSTALL_BIN) ./files/unified_script/wifi $(1)/sbin/; \
 			$(INSTALL_BIN) ./files/unified_script/mtwifi.lua $(1)/lib/wifi/; \
 			$(INSTALL_BIN) ./files/unified_script/mtkdat.lua $(1)/lib/wifi/; \
-			$(INSTALL_BIN) ./files/unified_script/wifi_services.lua $(1)/lib/wifi/; \
 			$(INSTALL_BIN) ./files/unified_script/hostapd.lua $(1)/lib/wifi/; \
 			$(INSTALL_BIN) ./files/unified_script/hostapd_wps_er_action.lua $(1)/lib/wifi/; \
 			$(INSTALL_BIN) ./files/unified_script/supplicant.lua $(1)/lib/wifi/; \

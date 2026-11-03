@@ -273,7 +273,6 @@ local function mtwifi_release_ext_vif(dev)
 end
 
 function mtwifi_up(devname)
-    local wifi_services_exist = false
     local l1profile = "/etc/wireless/l1profile.dat"
     local uci = mtkdat.uci_load_wireless()
 
@@ -293,9 +292,6 @@ function mtwifi_up(devname)
         mtkdat.uci2dat()
     end
 
-    if  mtkdat.exist("/lib/wifi/wifi_services.lua") then
-        wifi_services_exist = require("wifi_services")
-    end
 
     nixio.syslog("debug", "mtwifi called up!")
 
@@ -387,10 +383,6 @@ function mtwifi_down(devname)
     local path = "/etc/config/wireless"
     os.execute("cp -f "..path.." "..mtkdat.__uci_applied_settings_path())
 
-    local wifi_services_exist = false
-    if  mtkdat.exist("/lib/wifi/wifi_services.lua") then
-        wifi_services_exist = require("wifi_services")
-    end
 
     nixio.syslog("debug", "mtwifi_down called!")
 

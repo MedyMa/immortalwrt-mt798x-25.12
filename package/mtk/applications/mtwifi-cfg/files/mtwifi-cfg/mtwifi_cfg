@@ -270,68 +270,6 @@ function mtwifi_set_hairpin_phy(vifs, main_ifname)
 end
 
 -- ============================================================
--- mtk service_misc
--- ============================================================
-local function find_first_card_profile()
-    local best_name, best_path = nil, nil
-    for name, dev in pairs(l1dat.devname_ridx) do
-        if dev.profile_path then
-            if not best_name or name < best_name then
-                best_name = name
-                best_path = dev.profile_path
-            end
-        end
-    end
-    return best_path
-end
-
-function mtwifi_service_misc()
-    -- The native MAP service is started after hostapd/netifd setup completes.
-    if utils.exists("/usr/libexec/mtk-easymesh") then return end
-    local mapd_default = utils.load_profile("/etc/map/mapd_default.cfg") or {}
-    local mapd_user    = utils.load_profile("/etc/map/mapd_user.cfg") or {}
-    local first_card   = find_first_card_profile()
-    local first_card_cfgs = first_card and utils.load_profile(first_card) or {}
-
-    if utils.exists("/usr/bin/wapp_openwrt.sh") then
-        os.execute("/etc/init.d/wapp start")
-    end
-
-    if not utils.exists("/usr/bin/EasyMesh_openwrt.sh") then
-        return
-    end
-
-    if mapd_default.mode then
-        local eth_mode    = mapd_user.mode or mapd_default.mode
-        local device_role = mapd_user.DeviceRole or mapd_default.DeviceRole
-
-        if first_card_cfgs.MapMode == "1" then
-            if (eth_mode == "0" and device_role == "1") or eth_mode == "1" then
-                os.execute("/etc/init.d/easymesh start")
-            else
-                os.execute("/etc/init.d/easymesh_bridge start")
-            end
-        elseif first_card_cfgs.MapMode ~= "0" then
-            os.execute("/etc/init.d/easymesh start")
-        end
-    else
-        os.execute("/etc/init.d/easymesh start")
-    end
-end
-
-function mtwifi_service_misc_clean()
-    if utils.exists("/usr/libexec/mtk-easymesh") then
-        os.execute("/etc/init.d/easymesh stop >/dev/null 2>&1")
-        return
-    end
-    os.execute("rm -rf /tmp/wapp_ctrl")
-    os.execute("killall -15 mapd 2>/dev/null")
-    os.execute("killall -15 wapp 2>/dev/null")
-    os.execute("killall -15 p1905_managerd 2>/dev/null")
-    os.execute("killall -15 bs20 2>/dev/null")
-end
-
--- ============================================================
 -- ifup / ifdown
 -- ============================================================
 function ifup(ifname)
@@ -467,7 +405,6 @@ function mtwifi_up(devname, cfg, is_dbdc)
     end
 
     mtwifi_set_mld_bcn_up(cfg)
-    mtwifi_service_misc()
     mtwifi_set_mgmt_rx_accept_all(cfg.device)
     mtwifi_cfg_cfg80211_tool_hook(cfg)
 end
@@ -475,7 +412,6 @@ end
 function mtwifi_down(devname, cfg)
     nixio.syslog("info", "mtwifi-cfg: stop "..devname)
 
-    mtwifi_service_misc_clean()
     mtwifi_set_mgmt_rx_accept_beacon_probrsp(devname)
 
     return {}
@@ -533,17 +469,12 @@ function mtwifi_cfg_cfg80211_tool_hook(cfg)
                 end
                 __exec_cfg80211_tool(vif, j[1], val)
             end
-            local multi_ap = tonumber(v.config.multi_ap or "0") or 0
-            if tostring(cfg.config.map_mode or "0") == "1" and multi_ap == 0 then
-                local encryption = v.config.encryption or "none"
-                multi_ap = (encryption:match("^psk2") or encryption:match("^sae")) and 3 or 2
-            end
-            if multi_ap > 0 then
+            if v.config.multi_ap == "1" or v.config.multi_ap == "2" then
                 if v.config.isolate == "1" then
                     nixio.syslog("err", "mtwifi-cfg: multi_ap backhaul cannot combine with isolate_clients; ignoring multi_ap for "..vif)
                 else
-                    __exec_cfg80211_tool(vif, "fhbss", multi_ap >= 2 and "1" or "0")
-                    __exec_cfg80211_tool(vif, "bhbss", multi_ap % 2 == 1 and "1" or "0")
+                    __exec_cfg80211_tool(vif, "fhbss", (v.config.multi_ap == "2") and "0" or "1")
+                    __exec_cfg80211_tool(vif, "bhbss", (v.config.multi_ap == "2") and "1" or "0")
                 end
             end
         end
@@ -561,21 +492,6 @@ function mtwifi_cfg_cfg80211_tool_hook(cfg)
 
     mtwifi_cfg_foreach_vif(cfg, "ap", ap_hook)
     mtwifi_cfg_foreach_vif(cfg, "sta", apcli_hook)
-end
-
-function set_map_cfg(cfg, dats)
-    -- Device options must survive netifd JSON parsing and reach the DAT profile.
-    local map_mode = tostring(cfg.config.map_mode or "0")
-    if not map_mode:match("^[0-4]$") then
-        nixio.syslog("err", "mtwifi-cfg: invalid MAP mode")
-        return false
-    end
-    dats.MapMode = map_mode
-    for _, key in ipairs({ "SRMeshUlMode", "MapStatsDisable", "MapAccept3Addr", "MapBalance", "SREnable", "SRMode", "SRDPDEnable" }) do
-        if cfg.config[key] ~= nil then set_dev_dat(dats, key, cfg.config[key]) end
-    end
-
-    return true
 end
 
 function set_chip_cfg(cfg, dats)
@@ -897,8 +813,6 @@ function mtwifi_cfg_setup(argv)
         nixio.syslog("err", "mtwifi-cfg: invalid htmode!")
         return
     end
-
-    if not set_map_cfg(cfg, dats) then return false end
 
     local WirelessMode
     local band = cfg.config.band

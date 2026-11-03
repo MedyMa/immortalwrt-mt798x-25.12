@@ -24,8 +24,7 @@ SCAN_ACTION_SCRIPT="/lib/wifi/supplicant_scan_action.sh"
 drv_mtwifi_init_device_config() {
 	hostapd_common_add_device_config
 
-	config_add_int txpower beacon_int cell_density obss_interval map_mode
-	config_add_boolean SRMeshUlMode MapStatsDisable MapAccept3Addr MapBalance SREnable SRMode SRDPDEnable
+	config_add_int txpower beacon_int cell_density obss_interval
 	config_add_int min_tx_power num_global_macaddr
 	config_add_int beamformer_antennas beamformee_antennas
 	config_add_int vht_max_a_mpdu_len_exp vht_max_mpdu vht_link_adapt vht160
@@ -729,33 +728,6 @@ mac80211_prepare_vif() {
 
 	json_select config
 
-	json_get_var mode mode
-	if [ "$map_mode" = 1 ] && [ "$mode" = ap ]; then
-		local map_multi_ap map_option map_value
-		json_get_vars encryption multi_ap ssid key
-		map_multi_ap="${multi_ap:-0}"
-		if [ "$map_multi_ap" = 0 ]; then
-			case "$encryption" in psk2*|sae*) map_multi_ap=3 ;; *) map_multi_ap=2 ;; esac
-			json_add_int multi_ap "$map_multi_ap"
-		fi
-		for map_option in ieee80211k bss_transition interworking mbo; do
-			json_get_var map_value "$map_option"
-			[ -n "$map_value" ] || json_add_boolean "$map_option" 1
-		done
-		if [ "$band" != 6g ]; then
-			json_get_var map_value wps_independent
-			[ -n "$map_value" ] || json_add_int wps_independent 0
-			json_get_var map_value wps_pushbutton
-			case "$encryption" in psk2*|sae-mixed*) [ -n "$map_value" ] || json_add_int wps_pushbutton 1 ;; esac
-			if [ "$map_multi_ap" = 3 ]; then
-				json_get_var map_value multi_ap_backhaul_ssid
-				[ -n "$map_value" ] || json_add_string multi_ap_backhaul_ssid "$ssid"
-				json_get_var map_value multi_ap_backhaul_key
-				[ -n "$map_value" ] || json_add_string multi_ap_backhaul_key "$key"
-			fi
-		fi
-	fi
-
 	json_get_vars ifname mode ssid wds powersave macaddr enable wpa_psk_file vlan_file disabled
 	if [ "$disabled" = "1" ]; then
 		json_select ..
@@ -877,27 +849,6 @@ mtwifi_hostapd_start() {
 		[ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null && kill "$oldpid" 2>/dev/null
 		rm -f "$pid_file"
 	fi
-	if [ "$map_mode" = 1 ]; then
-		local wiphy reply iface first_ap retry=0
-		wiphy="$(mtwifi_resolve_phy "$phy")" || return 1
-		while [ "$retry" -lt 30 ] && [ ! -S /var/run/hostapd/global ]; do
-			sleep 0.1
-			retry=$((retry+1))
-		done
-		[ -S /var/run/hostapd/global ] || {
-			logger -t netifd-mtwifi "MAP requires the hostapd global control socket"
-			return 1
-		}
-		first_ap="$(sed -n 's/^interface=//p' "$conf_file" | head -n1)"
-		[ -n "$first_ap" ] && /usr/sbin/hostapd_cli -g /var/run/hostapd/global raw REMOVE "$first_ap" >/dev/null 2>&1
-		reply="$(/usr/sbin/hostapd_cli -g /var/run/hostapd/global raw ADD "bss_config=$wiphy:$conf_file" 2>&1)"
-		case "$reply" in *OK*) ;; *) logger -t netifd-mtwifi "MAP hostapd ADD failed: $reply"; return 1 ;; esac
-		# wapp's interface reconfiguration API uses these per-interface paths.
-		for iface in $(sed -n -e 's/^interface=//p' -e 's/^bss=//p' "$conf_file"); do
-			ln -sf "$conf_file" "/var/run/hostapd/hostapd-$iface.conf"
-		done
-		return 0
-	fi
 
 	if ! /usr/sbin/hostapd -B -P "$pid_file" "$conf_file"; then
 		logger -t "netifd-mtwifi" "hostapd failed for $phy; see the preceding hostapd error"
@@ -941,14 +892,6 @@ mtwifi_hostapd_stop() {
 	local phy="$1"
 	local pid_file="/var/run/hostapd-$phy.pid"
 	local conf_file="/var/run/hostapd-$phy.conf"
-	local iface first_ap
-	if [ -S /var/run/hostapd/global ]; then
-		first_ap="$(sed -n 's/^interface=//p' "$conf_file" 2>/dev/null | head -n1)"
-		[ -n "$first_ap" ] && /usr/sbin/hostapd_cli -g /var/run/hostapd/global raw REMOVE "$first_ap" >/dev/null 2>&1
-	fi
-	for iface in $(sed -n -e 's/^interface=//p' -e 's/^bss=//p' "$conf_file" 2>/dev/null); do
-		rm -f "/var/run/hostapd/hostapd-$iface.conf"
-	done
 
 	if [ -f "$pid_file" ]; then
 		local pid="$(cat "$pid_file" 2>/dev/null)"
@@ -972,22 +915,8 @@ mtwifi_wpas_conf() {
 	json_get_vars identity password ca_cert client_cert priv_key priv_key_pwd eap_type auth phase1
 
 	json_select ..
-	if [ "$map_mode" = 1 ] && [ -z "$ssid" ] && [ -s "/etc/map/backhaul-$ifname.conf" ]; then
-		cp "/etc/map/backhaul-$ifname.conf" "$conf"
-		chmod 0600 "$conf"
-		return 0
-	fi
 
 	: > "$conf"
-	chmod 0600 "$conf"
-	if [ "$map_mode" = 1 ]; then
-		cat >> "$conf" <<EOF
-wps_cred_processing=1
-wps_cred_add_sae=1
-ignore_old_scan_res=1
-pmf=1
-EOF
-	fi
 
 	cat >> "$conf" <<EOF
 ctrl_interface=/var/run/wpa_supplicant/
@@ -1004,17 +933,12 @@ config_methods=display virtual_push_button keypad physical_push_button
 
 sae_pwe=${sae_pwe:-2}
 autoscan=periodic:30
-EOF
 
-	# An unconfigured MAP bSTA waits for WPS/DPP credentials from wapp.
-	[ "$map_mode" = 1 ] && [ -z "$ssid" ] && return 0
-	cat >> "$conf" <<EOF
 network={
 	ssid="$ssid"
 	scan_ssid=1
 EOF
 
-	[ "$map_mode" = 1 ] && echo "	multi_ap_backhaul_sta=1" >> "$conf"
 	[ -n "$bssid" ]      && echo "	bssid=$bssid"           >> "$conf"
 	[ -n "$sae_groups" ] && echo "	sae_groups=$sae_groups" >> "$conf"
 
@@ -1266,7 +1190,7 @@ drv_mtwifi_setup() {
 	fi
 
 	json_select config
-	json_get_vars band htmode channel map_mode
+	json_get_vars band htmode channel
 	json_select ..
 
 	case "$band" in
@@ -1337,9 +1261,6 @@ drv_mtwifi_setup() {
 	wireless_set_up
 
 	lock -u $LOCK_FILE
-	if [ -x /usr/libexec/mtk-easymesh ] && [ "$(uci -q get mapd.mapd_cfg.enable)" = 1 ]; then
-		/etc/init.d/easymesh reload >/dev/null 2>&1 &
-	fi
 }
 
 drv_mtwifi_teardown() {

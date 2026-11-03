@@ -123,7 +123,6 @@ function wifi(cmd, devname)
 	end
 
 	if  cmd == "down" or cmd == "restart" or cmd == "reload" or cmd == "reset" then
-		_G["wifi_service_misc_clean"]()
 
 		if _G["set_mgmt_rx_accept_beacon_probrsp"] then
 			_G["set_mgmt_rx_accept_beacon_probrsp"](devname)
@@ -176,9 +175,8 @@ function wifi(cmd, devname)
 		_G["set_mld_bcn_up"]()
 	end
 
-	-- for wifi service and mgmt rx which should setup after wifi up
+	-- Configure management RX after wifi up
 	if  cmd == "up" or cmd == "restart" or cmd == "reload" or cmd == "reset" then
-		_G["wifi_service_misc"]()
 		if _G["set_mgmt_rx_accept_all"] then
 			_G["set_mgmt_rx_accept_all"](devname)
 		end

@@ -132,7 +132,7 @@ mtwifi_defs.chip_cfgs = {
 }
 
 mtwifi_defs.reinstall_cfgs = {
-    "WHNAT", "E2pAccessMode", "MapMode",
+    "WHNAT", "E2pAccessMode",
     "HT_RxStream", "HT_TxStream", "WdsEnable",
     "MldGroup", "ApcliMloDisable"
 }

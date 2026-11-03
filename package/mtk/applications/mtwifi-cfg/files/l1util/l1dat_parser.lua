@@ -150,6 +150,8 @@ function l1dat_parser.load_l1_profile(path)
                  })
     --local nixio = require("nixio")
     local chipset_num = {}
+    local dir = io.popen("ls /etc/wireless/")
+    if not dir then return end
     local fd = io.open(path, "r")
     if not fd then return end
 

@@ -31,15 +31,6 @@ vifidx = vif and vif.vifidx or nil
 --print(devs, dev, dev.apcli, devname, vifname)
 
 local cfgs = mtkwifi.load_cfg(dev.devname)
-local map_cfgs
-local first_card_cfgs
-local appliedMapModeDiff
-if pcall(require, "map_helper") then
-    map_cfgs = mtkwifi.load_profile(mtkwifi.__read_easymesh_profile_path())
-    first_card_cfgs = mtkwifi.load_cfg(mtkwifi.detect_first_card())
-    local appliedMapDiffTable = mtkwifi.diff_cfg(mtkwifi.detect_first_card())
-    appliedMapModeDiff = appliedMapDiffTable["MapMode"] and appliedMapDiffTable["MapMode"][2] or nil
-end
 if string.split(cfgs.WirelessMode,";")[1] == "18" or string.split(cfgs.WirelessMode,";")[1] == "24" then
     ApCliAuthModeList = dev.ApCliAuthModeList_6G
 else
@@ -134,9 +125,6 @@ function hi(to, devname, vifname)
                     <span style="color:red;">( <a href="javascript:location.href='<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "reload", devname)%>'">Click here</a> to apply changes)</span>
                 <%end%>
             </legend>
-            <div class="alert-message" id="EASYMESH_WARNING_MSG" style="display:none;">
-                <strong>WARNING: EasyMesh feature is enabled!</strong>
-            </div>
             <ul class="cbi-tabmenu">
                 <li class="cbi-tab" id="vif-cfg-tab-apcli">
                     <a href="javascript:hi('apcli', <%="'"..devname.."', '"..vifname.."'"%>);this.blur(); ">AP Client</a>
@@ -1670,46 +1658,6 @@ function hi(to, devname, vifname)
         return false;
     }
 
-    function get_device_role()
-    {
-        XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "multi_ap", "get_device_role")%>', null,
-            function(x)
-            {
-                console.log(x);
-                try{
-                    var devRoleObj = JSON.parse(x.response);
-                    var devRole = parseInt(devRoleObj.mapDevRole);
-                    if(devRole != 1 && devRole != 2){
-                        console.log("EasyMesh Device Role is neither Controller nor Agent!");
-                        return;
-                    }
-                    document.getElementById("EASYMESH_WARNING_MSG").style.display = "";
-                }
-                catch(e){
-                    console.log("Incorrect response received for get device role request!",e.name,e.message);
-                }
-            }
-        );
-    }
-
-    function check_update_easymesh_profile()
-    {
-        <% if not pcall(require, "map_helper") then %>
-            console.log("map_helper library is not available!");
-            return;
-        <% else %>
-            <%if not map_cfgs then %>
-                console.log("EasyMesh Configurations are not available!");
-                return;
-            <% else %>
-                <% if (not appliedMapModeDiff and first_card_cfgs.MapMode == "1") or
-                    (appliedMapModeDiff and appliedMapModeDiff == "1" and first_card_cfgs.MapMode ~= "1") then %>
-                    get_device_role();
-                <% end %>
-            <% end %>
-        <% end %>
-    }
-
     function get_apply_status_cb(rsp)
     {
         try{
@@ -1771,7 +1719,6 @@ function hi(to, devname, vifname)
             document.getElementById("vif-cfg-tab-WPS").classList.add("tab-disabled");
             document.getElementById("disable-txt").innerHTML = "To access ApCli WPS tab please enable ApClient Mode";
         <% end %>
-        check_update_easymesh_profile();
         setTimeout(apcliInfoTimerHandler,1000);
     }
 

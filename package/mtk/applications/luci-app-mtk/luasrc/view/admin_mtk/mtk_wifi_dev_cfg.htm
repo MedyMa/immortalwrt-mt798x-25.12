@@ -24,15 +24,6 @@ for _,v in ipairs(devs) do
 end
 local cfgs = mtkwifi.load_cfg(dev.devname)
 local bands = mtkwifi.detect_triband()
-local map_cfgs
-local first_card_cfgs
-local appliedMapModeDiff
-if pcall(require, "map_helper") then
-    map_cfgs = mtkwifi.load_cfg(mtkwifi.__read_easymesh_profile_path())
-    first_card_cfgs = mtkwifi.load_cfg(mtkwifi.detect_first_card())
-    local appliedMapDiffTable = mtkwifi.diff_cfg(mtkwifi.detect_first_card())
-    appliedMapModeDiff = appliedMapDiffTable["MapMode"] and appliedMapDiffTable["MapMode"][2] or nil
-end
 
 local l1dat, l1 = mtkwifi.__get_l1dat()
 local dridx = l1dat and l1.DEV_RINDEX
@@ -79,9 +70,6 @@ function hi(to) {
                 <span style="color:red;">( <a href="javascript:location.href='<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "reload", dev.devname)%>'">Click here</a> to apply changes)</span>
             <%end%>
         </legend>
-        <div class="alert-message" id="EASYMESH_WARNING_MSG" style="display:none;">
-            <strong>WARNING: EasyMesh feature is enabled!</strong>
-        </div>
         <ul class="cbi-tabmenu">
             <li class="cbi-tab" id="dev-cfg-tab-basic">
                 <a href="javascript:hi('basic');this.blur(); ">Basic</a>
@@ -100,15 +88,6 @@ function hi(to) {
         </ul>
 
         <table id="dev-cfg-basic" class="cbi-section-table">
-            <tbody id="EASY_MESH_DEV_SETTINGS_TBODY" style="display:none">
-                <tr>
-                    <td>Channel</td>
-                    <td>
-                        <span id="EASY_MESH_CHANNEL_SPAN"></span>
-                    </td>
-                    <td></td>
-                </tr>
-            </tbody>
 
             <tbody id="DEV_CFG_BASIC_SETTINGS">
                 <tr><th></th><td></td><td></td></tr>
@@ -865,7 +844,7 @@ function hi(to) {
             }
         );
     }
-    
+
     function getChannelListNotSupportRegion(is_change_bw){
         var cCode = document.getElementById('CountryCode').value;
         XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "get_channel_list_not_support_region")%>', {main_ifname: '<%=dev.vifs[1]["vifname"]%>', country_code: cCode},
@@ -1549,163 +1528,6 @@ function hi(to) {
         return true;
     }
 
-    function update_easymesh_profile_fields(obj_1905)
-    {
-        var vifsMacList=[];
-        var WirelessModeListJS = {};
-
-        <% for _,vif in ipairs(dev.vifs) do %>
-            <% if vif.state == "up" then%>
-                <% local bssid = vif.__bssid and vif.__bssid:sub(1,17) or ""%>
-                <% if bssid and bssid ~= "" then %>
-                    vifsMacList.push("<%=bssid%>");
-                    WirelessModeListJS['<%=bssid%>'] = {};
-                    <% for wModeIdx, wModeStr in pairs(dev.WirelessModeList) do %>
-                        WirelessModeListJS['<%=bssid%>']['<%=wModeIdx%>'] = "<%=wModeStr%>";
-                    <% end %>
-                <% end %>
-            <% end %>
-        <% end %>
-
-
-        if(!obj_1905.hasOwnProperty('Radio Info')){
-            console.log("Topology does not have Radio Info Property!",obj_1905);
-            return;
-        }
-
-        var channel_span = document.getElementById("EASY_MESH_CHANNEL_SPAN");
-
-        if (!channel_span){
-            console.log("Failed to update EasyMesh channel field! Could not find the channel to update!");
-            return;
-        }
-        for (var vifIdx = 0; vifIdx < vifsMacList.length; vifIdx++){
-            var radioIdx;
-            for (radioIdx=0; radioIdx < obj_1905['Radio Info'].length; radioIdx++){
-                var radioInfoObj = obj_1905['Radio Info'][radioIdx];
-                var bssInfoArr = radioInfoObj['BSSINFO'];
-                var bssIdx;
-                for(bssIdx=0; bssIdx < bssInfoArr.length; bssIdx++){
-                    var bssInfo = bssInfoArr[bssIdx];
-                    if(bssInfo.hasOwnProperty('BSSID') && (bssInfo['BSSID'].toUpperCase() == vifsMacList[vifIdx].toUpperCase())){
-                        channel_span.innerHTML = radioInfoObj['channel'];
-                        document.getElementById("DEV_CFG_BASIC_SETTINGS").style.display = "none";
-                        document.getElementById("EASY_MESH_DEV_SETTINGS_TBODY").style.display = "";
-                        break;
-                    }
-                }
-                if(bssIdx < bssInfoArr.length){
-                    break;
-                }
-            }
-            if(radioIdx < obj_1905['Radio Info'].length){
-                break;
-            }
-        }
-    }
-
-    function find_own_topo_info(devRole, jsTopoInfo, alMac)
-    {
-        var tree_info = [];
-        var topoInfoArr = jsTopoInfo['topology information'];
-        if(!(topoInfoArr instanceof Array)){
-            console.log("Incorrect TopologyInfo: Value of topology information is not an Array!");
-            return;
-        }
-        for(var idx_1905=0; idx_1905 < topoInfoArr.length; idx_1905++){
-            var obj_1905 = topoInfoArr[idx_1905];
-            if (obj_1905.hasOwnProperty('AL MAC') && (obj_1905['AL MAC'].toUpperCase() == alMac.toUpperCase())){
-                update_easymesh_profile_fields(obj_1905);
-                return;
-            }
-        }
-        console.log(alMac," AL-MAC NOT FOUND in Topology! Topology: ",jsTopoInfo);
-    }
-
-    function get_al_mac(devRole, jsTopoInfo)
-    {
-        XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "multi_ap", "get_al_mac")%>' + '/' + devRole, null,
-            function(x)
-            {
-                try{
-                    var r = JSON.parse(x.response);
-                    var mac_reg_exp = /[A-Fa-f0-9]{2}:[A-Fa-f0-9]{2}:[A-Fa-f0-9]{2}:[A-Fa-f0-9]{2}:[A-Fa-f0-9]{2}:[A-Fa-f0-9]{2}/;
-                    if (r['status'] == "SUCCESS" && mac_reg_exp.test(r['al_mac'])) {
-                        find_own_topo_info(devRole, jsTopoInfo, r['al_mac']);
-                    }
-                    else{
-                        console.log("Incorrect AL-MAC received!",r['status'],r['al_mac']);
-                    }
-                }
-                catch(e){
-                    console.log("Incorrect response received for get AL-MAC request!",e.name,e.message);
-                }
-            }
-        );
-    }
-
-    function get_run_time_topology(devRole)
-    {
-        XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "multi_ap", "get_runtime_topology")%>', null,
-            function(x)
-            {
-                try{
-                    var r = JSON.parse(x.response);
-                    if(r.status == "SUCCESS"){
-                        var jsTopoInfo = JSON.parse(r['luaTopologyInfo']);
-                        get_al_mac(devRole, jsTopoInfo);
-                    }
-                    else{
-                        console.log("Failed to get Topology Info!\nStatus: ",r.status);
-                    }
-                }
-                catch(e){
-                    console.log("Incorrect response! Failed to get Topology Info!",e.name,e.message);
-                }
-            }
-        );
-    }
-
-    function get_device_role()
-    {
-        XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "multi_ap", "get_device_role")%>', null,
-            function(x)
-            {
-                try{
-                    var devRoleObj = JSON.parse(x.response);
-                    var devRole = parseInt(devRoleObj.mapDevRole);
-                    if(devRole != 1 && devRole != 2){
-                        console.log("EasyMesh Device Role is neither Controller nor Agent!");
-                        return;
-                    }
-                    document.getElementById("EASYMESH_WARNING_MSG").style.display = "";
-                    get_run_time_topology(devRole);
-                }
-                catch(e){
-                    console.log("Incorrect response received for get device role request!",e.name,e.message);
-                }
-            }
-        );
-    }
-
-    function check_update_easymesh_profile()
-    {
-        <% if not pcall(require, "map_helper") then %>
-            console.log("map_helper library is not available!");
-            return;
-        <% else %>
-            <%if not map_cfgs then %>
-                console.log("EasyMesh Configurations are not available!");
-                return;
-            <% else %>
-                <% if (not appliedMapModeDiff and first_card_cfgs.MapMode == "1") or
-                    (appliedMapModeDiff and appliedMapModeDiff == "1" and first_card_cfgs.MapMode ~= "1") then %>
-                    get_device_role();
-                <% end %>
-            <% end %>
-        <% end %>
-    }
-
     function get_apply_status_cb(rsp)
     {
         try{
@@ -1761,7 +1583,6 @@ function hi(to) {
         <% if dev.isPowerBoostSupported then%>
             initPowerBoost();
         <% end %>
-        check_update_easymesh_profile();
         initHtmodeList()
     }
 

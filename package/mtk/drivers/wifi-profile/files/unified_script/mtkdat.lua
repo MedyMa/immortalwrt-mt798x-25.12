@@ -22,7 +22,6 @@ require("datconf")
 require("uci")
 
 --local ioctl_help = require "ioctl_helper"
---local map_help = require "map_helper"
 local mtkdat = {}
 local nixio = require("nixio")
 local static_devs = {}
@@ -1410,27 +1409,6 @@ function mtkdat.load_profile(path, raw)
 end
 
 
-local function save_easymesh_profile_to_nvram()
-    if not pcall(require, "mtknvram") then
-        return
-    end
-    local nvram = require("mtknvram")
-    local merged_easymesh_dev1_path = "/tmp/mtk/wifi/merged_easymesh_dev1.dat"
-    local l1dat = load_l1_profile(l1dat_parser.L1_DAT_PATH)
-    local dev1_profile_paths
-    local dev1_profile_path_table = l1_zone_to_path("dev1")
-    if not next(dev1_profile_path_table) then
-        return
-    end
-    dev1_profile_paths = table.concat(dev1_profile_path_table, " ")
-    -- Uncomment below two statements when there is sufficient space in dev1 NVRAM zone to store EasyMesh Agent's BSS Cfgs Settings.
-    -- mtkdat.__prepare_easymesh_bss_nvram_cfgs()
-    -- os.execute("cat "..dev1_profile_paths.." "..mtkdat.__read_easymesh_profile_path().." "..mtkdat.__easymesh_bss_cfgs_nvram_path().." > "..merged_easymesh_dev1_path.." 2>/dev/null")
-    -- Comment or remove below line once above requirement is met.
-    os.execute("cat "..dev1_profile_paths.." "..mtkdat.__read_easymesh_profile_path().." > "..merged_easymesh_dev1_path.." 2>/dev/null")
-    nvram.nvram_save_profile(merged_easymesh_dev1_path, "dev1")
-end
-
 function mtkdat.save_profile(cfgs, path)
 
     if not cfgs then
@@ -1451,20 +1429,16 @@ function mtkdat.save_profile(cfgs, path)
         local l1dat = load_l1_profile(l1dat_parser.L1_DAT_PATH)
         local zone = l1_path_to_zone(path)
 
-        if pcall(require, "map_helper") and zone == "dev1" then
-            save_easymesh_profile_to_nvram()
+        if not l1dat then
+            nixio.syslog("debug", "save_profile: no l1dat")
+            nvram.nvram_save_profile(path)
         else
-            if not l1dat then
-                nixio.syslog("debug", "save_profile: no l1dat")
-                nvram.nvram_save_profile(path)
+            if zone then
+                nixio.syslog("debug", "save_profile "..path.." "..zone)
+                nvram.nvram_save_profile(path, zone)
             else
-                if zone then
-                    nixio.syslog("debug", "save_profile "..path.." "..zone)
-                    nvram.nvram_save_profile(path, zone)
-                else
-                    nixio.syslog("debug", "save_profile "..path)
-                    nvram.nvram_save_profile(path)
-                end
+                nixio.syslog("debug", "save_profile "..path)
+                nvram.nvram_save_profile(path)
             end
         end
     end
@@ -1529,16 +1503,9 @@ function mtkdat.diff_profile(path1, path2)
     end
     assert(path2)
 
-    local cfg1
-    local cfg2
+    local cfg1 = mtkdat.load_profile(path1) or {}
+    local cfg2 = mtkdat.load_profile(path2) or {}
     local diff = {}
-    if path1 == mtkdat.__easymesh_bss_cfgs_path() then
-        cfg1 = get_file_lines(path1) or {}
-        cfg2 = get_file_lines(path2) or {}
-    else
-        cfg1 = mtkdat.load_profile(path1) or {}
-        cfg2 = mtkdat.load_profile(path2) or {}
-    end
 
     for k,v in pairs(cfg1) do
         if cfg2[k] ~= cfg1[k] then
@@ -1644,30 +1611,6 @@ end
 
 function mtkdat.search_dev_and_profile()
     return search_dev_and_profile_l1() or search_dev_and_profile_orig()
-end
-
-function mtkdat.__read_easymesh_profile_path()
-    return "/etc/map/mapd_cfg"
-end
-
-function mtkdat.__write_easymesh_profile_path()
-    return "/etc/map/mapd_user.cfg"
-end
-
-function mtkdat.__easymesh_mapd_profile_path()
-    return "/etc/mapd_strng.conf"
-end
-
-function mtkdat.__easymesh_bss_cfgs_path()
-    return "/etc/map/wts_bss_info_config"
-end
-
-function mtkdat.__easymesh_bss_cfgs_nvram_path()
-    local p = "/tmp/mtk/wifi/wts_bss_info_config.nvram"
-    if not mtkdat.exist("/tmp/mtk/wifi") then
-        os.execute("mkdir -p /tmp/mtk/wifi")
-    end
-    return p
 end
 
 local function get_iface_prefix(ifname)

@@ -569,7 +569,6 @@ config MTK_WIFI7_OCE_SUPPORT
 config MTK_WIFI7_MAP_SUPPORT
         bool "MAP Support"
         depends on MTK_WIFI7_DRIVER
-        select MTK_WIFI7_MBO_SUPPORT
         select MTK_WIFI7_INTERWORKING
         select MTK_WIFI7_WNM_SUPPORT
         select MTK_WIFI7_DOT11K_RRM_SUPPORT

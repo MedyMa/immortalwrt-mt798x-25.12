@@ -1676,43 +1676,6 @@ function mtkwifi.load_cfg(dev_name, path, load_mld)
     return cfg
 end
 
-function mtkwifi.load_mapd()
-    local mapd_cfg = {}
-    local mapd_user = {}
-    local mapd_strng = {}
-    local dpp_cfg = {}
-    --mapd_cfg
-    mapd_cfg.DeviceRole = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_cfg.DeviceRole") or "")
-    mapd_cfg.SteerEnable = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_cfg.SteerEnable") or "")
-    mapd_cfg.BhPriority2G = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_cfg.BhPriority2G") or "")
-    mapd_cfg.BhPriority5GH = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_cfg.BhPriority5GH") or "")
-    mapd_cfg.BhPriority5GL = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_cfg.BhPriority5GL") or "")
-    mapd_cfg.BhPriority6G = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_cfg.BhPriority6G") or "")
-    mapd_cfg.APSteerRssiTh = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_cfg.APSteerRssiTh") or "")
-
-    --mapd_user
-    local mode = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_user.mode") or "")
-    if mode ~= "" then
-        mapd_user.mode = mode
-    end
-    mapd_user.MeshSREnable = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_user.MeshSREnable") or "")
-
-    --mapd_strng
-    mapd_strng.CUOverloadTh_2G = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_strng.CUOverloadTh_2G") or "")
-    mapd_strng.CUOverloadTh_5G_L = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_strng.CUOverloadTh_5G_L") or "")
-    mapd_strng.CUOverloadTh_5G_H = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_strng.CUOverloadTh_5G_H") or "")
-    mapd_strng.CUOverloadTh_6G = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.mapd_strng.CUOverloadTh_6G") or "")
-
-    --dpp_cfg
-    dpp_cfg.allowed_role = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.dpp_cfg.allowed_role") or "")
-    dpp_cfg.presence_band_priority = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.dpp_cfg.presence_band_priority") or "")
-    if mtkwifi.read_pipe("uci get mapd.dpp_cfg.agt_qr_code") ~= "" then
-        dpp_cfg.agt_qr_code = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd.dpp_cfg.agt_qr_code") or "")
-    end
-
-    return mapd_cfg, mapd_user, mapd_strng, dpp_cfg
-end
-
 function mtkwifi.save_profile(cfgs, path)
 
     if not cfgs then
@@ -1733,47 +1696,16 @@ function mtkwifi.save_profile(cfgs, path)
         local l1dat, l1 = mtkwifi.__get_l1dat()
         local zone = l1 and l1.l1_path_to_zone(path)
 
-        if pcall(require, "map_helper") and zone == "dev00" then
-            mtkwifi.save_easymesh_profile_to_nvram()
+        if not l1dat then
+            debug_write("save_profile: no l1dat", path)
+            nvram.nvram_save_profile(path)
         else
-            if not l1dat then
-                debug_write("save_profile: no l1dat", path)
-                nvram.nvram_save_profile(path)
+            if zone then
+                debug_write("save_profile:", path, zone)
+                nvram.nvram_save_profile(path, zone)
             else
-                if zone then
-                    debug_write("save_profile:", path, zone)
-                    nvram.nvram_save_profile(path, zone)
-                else
-                    debug_write("save_profile:", path)
-                    nvram.nvram_save_profile(path)
-                end
-            end
-        end
-    end
-    os.execute("sync >dev/null 2>&1")
-end
-
-function mtkwifi.save_mesh_profile()
-    os.execute("lua /etc/uci2map.lua")
-    if pcall(require, "mtknvram") then
-        local nvram = require("mtknvram")
-        local l1dat, l1 = mtkwifi.__get_l1dat()
-        local zone = l1 and l1.l1_path_to_zone(path)
-
-        if pcall(require, "map_helper") and zone == "dev00" then
-            mtkwifi.save_easymesh_profile_to_nvram()
-        else
-            if not l1dat then
-                debug_write("save_profile: no l1dat", path)
+                debug_write("save_profile:", path)
                 nvram.nvram_save_profile(path)
-            else
-                if zone then
-                    debug_write("save_profile:", path, zone)
-                    nvram.nvram_save_profile(path, zone)
-                else
-                    debug_write("save_profile:", path)
-                    nvram.nvram_save_profile(path)
-                end
             end
         end
     end
@@ -2120,16 +2052,9 @@ function mtkwifi.diff_profile(path1, path2)
     end
     assert(path2)
 
-    local cfg1
-    local cfg2
+    local cfg1 = mtkwifi.load_profile(path1) or {}
+    local cfg2 = mtkwifi.load_profile(path2) or {}
     local diff = {}
-    if path1 == mtkwifi.__easymesh_bss_cfgs_path() then
-        cfg1 = mtkwifi.get_file_lines(path1) or {}
-        cfg2 = mtkwifi.get_file_lines(path2) or {}
-    else
-        cfg1 = mtkwifi.load_profile(path1) or {}
-        cfg2 = mtkwifi.load_profile(path2) or {}
-    end
 
     for k,v in pairs(cfg1) do
         if cfg2[k] ~= cfg1[k] then
@@ -3127,17 +3052,6 @@ function mtkwifi.__is_6890_project()
     return false
 end
 
-function mtkwifi._is_support_6G()
-    local support_6e = false
-    local tmp = io.popen("cat /etc/map/1905d.cfg | grep radio_band")
-    local result = tmp:read("*all")
-    if result and string.find(result, "6G") then
-        support_6e = true
-    end
-    tmp:close()
-    return support_6e
-end
-
 function mtkwifi.channel_region_support()
 	local support_channel_region = true
     local tmp = io.popen("cat /etc/wireless/mediatek/mt7990.1.dat | grep UnifiedCountryConfig")
@@ -3147,17 +3061,6 @@ function mtkwifi.channel_region_support()
     end
     tmp:close()
     return support_channel_region
-end
-
-function mtkwifi.r6_support()
-    local r6_support = false
-    local fp = io.popen("1905ctrl dev show_r6_support")
-    local result = fp:read("*all")
-    fp:close()
-    if result and (string.find(result, "MAP_R6_SUPPORT") or string.find(result, "MAP_PRE_R6_SUPPORT")) then
-        r6_support = true
-    end
-    return r6_support
 end
 
 function mtkwifi.get_all_devs()
@@ -3646,272 +3549,6 @@ function mtkwifi.get_referer_url()
         to_url = luci.dispatcher.build_url("admin", "mtk", "wifi")
     end
     return to_url
-end
-
-function mtkwifi.save_read_easymesh_profile()
-    local easymesh_applied_path = mtkwifi.__profile_applied_settings_path(mtkwifi.__read_easymesh_profile_path())
-    if not mtkwifi.exists(easymesh_applied_path) then
-        os.execute("cp -f "..mtkwifi.__read_easymesh_profile_path().." "..easymesh_applied_path)
-    end
-
-    local fd = io.open(mtkwifi.__read_easymesh_profile_path(), "w")
-    if not fd then return end
-    os.execute("lua /etc/uci2map.lua")
-    fd:close()
-
-    mtkwifi.save_easymesh_profile_to_nvram()
-    os.execute("sync >/dev/null 2>&1")
-end
-
-function mtkwifi.save_easymesh_profile_to_nvram()
-    if not pcall(require, "mtknvram") then
-        return
-    end
-    local nvram = require("mtknvram")
-    local merged_easymesh_dev1_path = "/tmp/mtk/wifi/merged_easymesh_dev1.dat"
-    local l1dat, l1 = mtkwifi.__get_l1dat()
-    local dev1_profile_paths
-    local dev1_profile_path_table = l1 and l1.l1_zone_to_path("dev00")
-    if not next(dev1_profile_path_table) then
-        return
-    end
-    dev1_profile_paths = table.concat(dev1_profile_path_table, " ")
-    -- Uncomment below two statements when there is sufficient space in dev1 NVRAM zone to store EasyMesh Agent's BSS Cfgs Settings.
-    -- mtkwifi.__prepare_easymesh_bss_nvram_cfgs()
-    -- os.execute("cat "..dev1_profile_paths.." "..mtkwifi.__read_easymesh_profile_path().." "..mtkwifi.__easymesh_bss_cfgs_nvram_path().." > "..merged_easymesh_dev1_path.." 2>/dev/null")
-    -- Comment or remove below line once above requirement is met.
-    os.execute("cat "..dev1_profile_paths.." "..mtkwifi.__read_easymesh_profile_path().." > "..merged_easymesh_dev1_path.." 2>/dev/null")
-    nvram.nvram_save_profile(merged_easymesh_dev1_path, "dev00")
-    os.execute("sync >/dev/null 2>&1")
-end
-
-function mtkwifi.save_write_easymesh_profile(easymesh_mapd_cfgs)
-    if not easymesh_mapd_cfgs then
-        return
-    end
-    local mapd_user = mtkwifi.read_pipe("uci show mapd.mapd_user") 
-    if not mapd_user or mapd_user == "" then return end
-    table.sort(easymesh_mapd_cfgs, function(a,b) return a<b end)
-    for k,v in mtkwifi.__spairs(easymesh_mapd_cfgs, function(a,b) return string.upper(a) < string.upper(b) end) do
-        os.execute("uci set mapd.mapd_user."..k.."="..v)
-        os.execute("uci set mapd.mapd_cfg."..k.."="..v)
-    end
-    os.execute("uci commit")
-    os.execute("lua /etc/uci2map.lua")
-    os.execute("sync >/dev/null 2>&1")
-end
-
-function mtkwifi.__read_easymesh_profile_path()
-    return "/etc/map/mapd_cfg"
-end
-
-function mtkwifi.__write_easymesh_profile_path()
-    return "/etc/map/mapd_user.cfg"
-end
-
-function mtkwifi.__easymesh_mapd_profile_path()
-    return "/etc/mapd_strng.conf"
-end
-
-function mtkwifi.__easymesh_bss_cfgs_path()
-    return "/etc/map/wts_bss_info_config"
-end
-
-function mtkwifi.__easymesh_bsta_mlo_cfgs_path()
-    return "/etc/map/wts_bsta_mlo_config"
-end
-
-function mtkwifi.__easymesh_bss_cfgs_nvram_path()
-    local p = "/tmp/mtk/wifi/wts_bss_info_config.nvram"
-    os.execute("mkdir -p /tmp/mtk/wifi")
-    return p
-end
-
-function mtkwifi.get_easymesh_al_mac(devRole)
-    local r = {}
-    local mapd_app_cfgs = mtkwifi.load_profile("/etc/map/1905d.cfg")
-    if not mapd_app_cfgs then
-        r['status'] = "Failed to load /etc/map/1905d.cfg file!"
-    else
-        r['status'] = 'SUCCESS'
-        if tonumber(devRole) == 1 then
-            r['al_mac'] = mapd_app_cfgs['map_controller_alid']
-        else
-            r['al_mac'] = mapd_app_cfgs['map_agent_alid']
-        end
-    end
-    return r
-end
-
-function mtkwifi.get_easymesh_on_boarded_iface_info()
-    local r = {}
-    r['status'] = "ERROR"
-    r['staBhInfStr'] = ""
-    r['devname'] = ""
-    local devs = mtkwifi.get_all_devs()
-    for _, dev in ipairs(devs) do
-        if dev.apcli and dev.apcli.status == "Connected" then
-            r['status'] = "SUCCESS"
-            r['staBhInfStr'] = r['staBhInfStr']..dev.apcli.vifname..';'
-            r['devname'] = r['devname']..dev.devname..';'
-        end
-    end
-    return r
-end
-
-function mtkwifi.load_easymesh_sta_mlo_cfgs()
-    local shuci = require("shuci")
-    local path = "/etc/config/mapd"
-    if not mtkwifi.exists(path) then
-        return
-    end
-    local mapd = shuci.decode(path)
-    local cfgs = {}
-    -- convert profile into lua table
-    if mapd["bh_sta"] then
-        for _, bh_sta in pairs(mapd["bh_sta"]) do
-            staMac = bh_sta.almac
-            cfgs[staMac] = {}
-            cfgs[staMac]['name'] = bh_sta[".name"]
-            cfgs[staMac]['mlo_links'] = bh_sta.mlo_links
-            cfgs[staMac]['ruid_or_band'] = bh_sta.ruid_or_band
-        end
-    end
-    
-    return cfgs
-end
-
-function mtkwifi.load_easymesh_bss_cfgs()
-    local shuci = require("shuci")
-    local path = "/etc/config/mapd"
-    local ssid,pwd
-    if not mtkwifi.exists(path) then
-        return
-    end
-    local mapd = shuci.decode(path)
-
-    local cfgs = {}
-    cfgs['wildCardAlMacCfgs'] = {}
-    cfgs['distinctAlMacCfgs'] = {}
-    local tmp = {}
-
-    -- convert profile into lua table
-    if mapd["iface"] then
-        for _, iface in pairs(mapd["iface"]) do
-            -- Trim only leading space characters
-            local alMac, band = iface.mac, iface.radio
-                if band then
-                    alMac = alMac:upper()
-                    local bssInfoIdx
-                    if tmp[alMac] then
-                        if tmp[alMac][band] then
-                            bssInfoIdx = mtkwifi.get_table_length(tmp[alMac][band]) + 1
-                            tmp[alMac][band][bssInfoIdx] = {}
-                        else
-                            bssInfoIdx = 1
-                            tmp[alMac][band] = {}
-                            tmp[alMac][band][bssInfoIdx] = {}
-                        end
-                    else
-                        bssInfoIdx = 1
-                        tmp[alMac] = {}
-                        tmp[alMac][band] = {}
-                        tmp[alMac][band][bssInfoIdx] = {}
-                    end
-                    tmp[alMac][band][bssInfoIdx]['id'] = iface[".name"]
-                    ssid = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd."..iface[".name"]..".ssid"))
-                    tmp[alMac][band][bssInfoIdx]['ssid'] = ssid:gsub("\\", "\\\\")
-                    tmp[alMac][band][bssInfoIdx]['authMode'] = iface.authmode
-                    tmp[alMac][band][bssInfoIdx]['encType'] = iface.EncryptType
-                    pwd = mtkwifi.__trim(mtkwifi.read_pipe("uci get mapd."..iface[".name"]..".PSK")) or ""
-                    tmp[alMac][band][bssInfoIdx]['passPhrase'] = pwd:gsub("\\", "\\\\")
-                    tmp[alMac][band][bssInfoIdx]['isBhBssSupported'] = iface.bhbss
-                    tmp[alMac][band][bssInfoIdx]['isFhBssSupported'] = iface.fhbss
-                    tmp[alMac][band][bssInfoIdx]['isHidden'] = iface.hidden
-                    tmp[alMac][band][bssInfoIdx]['fhVlanId'] = iface.vlan
-                    tmp[alMac][band][bssInfoIdx]['primVlan'] = iface.pvid
-                    tmp[alMac][band][bssInfoIdx]['defPCP'] = iface.pcp
-                    tmp[alMac][band][bssInfoIdx]['mldGroupId'] = iface.mld_groupID
-
-                    if alMac == "FF:FF:FF:FF:FF:FF" then
-                        cfgs['wildCardAlMacCfgs']['FF:FF:FF:FF:FF:FF'] = tmp[alMac]
-                    else
-                        cfgs['distinctAlMacCfgs'][alMac] = tmp[alMac]
-                    end
-
-                else
-                    nixio.syslog("warning", "load_easymesh_bss_cfgs: skip line without 'LineNumber,AL-MAC Band' "..line)
-                end
-        end
-    end
-    return cfgs
-end
-
-function mtkwifi.save_easymesh_bss_cfgs()
-    local easymesh_bss_cfg_applied_path = mtkwifi.__profile_applied_settings_path(mtkwifi.__easymesh_bss_cfgs_path())
-    if not mtkwifi.exists(easymesh_bss_cfg_applied_path) then
-        os.execute("cp -f "..mtkwifi.__easymesh_bss_cfgs_path().." "..easymesh_bss_cfg_applied_path)
-    end
-
-    os.execute("lua /etc/uci2map.lua")
-
-    os.execute("sync "..mtkwifi.__easymesh_bss_cfgs_path().."  >/dev/null 2>&1")
-
-    -- Uncomment below line when there is sufficient space in dev1 NVRAM zone to store EasyMesh Agent's BSS Cfgs Settings.
-    -- mtkwifi.save_easymesh_profile_to_nvram()
-end
-
-function mtkwifi.__prepare_easymesh_bss_nvram_cfgs()
-    local fd = io.open(mtkwifi.__easymesh_bss_cfgs_nvram_path(), "w")
-    if not fd then
-        return
-    end
-    local cfgs = mtkwifi.load_easymesh_bss_cfgs()
-    local lineIdx = 0
-    -- First write distinct AL-MAC cfgs; then write wildcard AL-MAC(FF:FF:FF:FF:FF:FF) cfgs
-    for alMac,alMacTbl in pairs(cfgs['distinctAlMacCfgs']) do
-        for band,bssInfoTbl in pairs(alMacTbl) do
-            for _,bssInfo in pairs(bssInfoTbl) do
-                lineIdx = lineIdx + 1
-                fd:write('EasyMeshBssCfgsLine'..lineIdx..'='..lineIdx..','..alMac..' '..
-                    band..' '..
-                    bssInfo['ssid']..' '..
-                    bssInfo['authMode']..' '..
-                    bssInfo['encType']..' '..
-                    bssInfo['passPhrase']..' '..
-                    bssInfo['isBhBssSupported']..' '..
-                    bssInfo['isFhBssSupported']..' '..
-                    bssInfo['isHidden']..' '..
-                    bssInfo['fhVlanId']..' '..
-                    bssInfo['primVlan']..' '..
-                    bssInfo['defPCP']..
-                    '\n')
-            end
-        end
-    end
-    for alMac,alMacTbl in pairs(cfgs['wildCardAlMacCfgs']) do
-        for band,bssInfoTbl in pairs(alMacTbl) do
-            for _,bssInfo in pairs(bssInfoTbl) do
-                lineIdx = lineIdx + 1
-                fd:write('EasyMeshBssCfgsLine'..lineIdx..'='..lineIdx..','..alMac..' '..
-                    band..' '..
-                    bssInfo['ssid']..' '..
-                    bssInfo['authMode']..' '..
-                    bssInfo['encType']..' '..
-                    bssInfo['passPhrase']..' '..
-                    bssInfo['isBhBssSupported']..' '..
-                    bssInfo['isFhBssSupported']..' '..
-                    bssInfo['isHidden']..' '..
-                    bssInfo['fhVlanId']..' '..
-                    bssInfo['primVlan']..' '..
-                    bssInfo['defPCP']..
-                    '\n')
-            end
-        end
-    end
-    fd:write('EasyMeshTotalBssCfgsLines='..lineIdx..'\n')
-    fd:close()
-    os.execute("sync >/dev/null 2>&1")
 end
 
 return mtkwifi
