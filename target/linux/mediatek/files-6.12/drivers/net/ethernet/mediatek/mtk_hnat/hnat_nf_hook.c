@@ -2315,6 +2315,8 @@ static bool hnat_accounted_foe_commit(struct sk_buff *skb,
 				 false, confirm, generation, &accepted))
 		return false;
 
+	if (!accepted)
+		hnat_diag_note(skb, HNAT_DIAG_ACCOUNT_OWNER, 0, 0, -1, 0, -1);
 	return accepted;
 }
 
@@ -2728,21 +2730,21 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 
 	/*do not bind multicast if PPE mcast not enable*/
 	if (!mcast_hook_toggle && is_multicast_ether_addr(hw_path->eth_dest))
-		return -1;
+		return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 
 	ret = hnat_offload_engine_done(skb, hw_path);
 	if (ret == 1) {
 		hnat_get_filled_unbind_entry(skb, &entry);
 		goto hnat_entry_bind;
 	} else if (ret == -1) {
-		return -1;
+		return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 	}
 
 	entry.bfib1.pkt_type = foe->udib1.pkt_type; /* Get packte type state*/
 	entry.bfib1.state = foe->udib1.state;
 
 	if (unlikely(entry.bfib1.state != UNBIND))
-		return -1;
+		return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 
 #if defined(CONFIG_MEDIATEK_NETSYS_V2) || defined(CONFIG_MEDIATEK_NETSYS_V3)
 	entry.bfib1.sp = foe->udib1.sp;
@@ -2750,7 +2752,7 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 
 	if (IS_L2_BRIDGE(&entry)) {
 		if (!l2br_toggle)
-			return -1;
+			return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 		h_proto = ntohs(eth_hdr(skb)->h_proto);
 	} else if (ntohs(eth_hdr(skb)->h_proto) == ETH_P_PPP_SES) {
 		/* Apply PPPoE Bridge packet info to hw_path for further PPE entry preparing */
@@ -2762,14 +2764,14 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 	else if (ip_hdr(skb)->version == IPVERSION_V6)
 		h_proto = ETH_P_IPV6;
 	else
-		return -1;
+		return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 
 	switch (h_proto) {
 	case ETH_P_IP:
 		iph = (struct iphdr *)(skb_network_header(skb) + h_offset);
 		/* Do not bind if pkt is fragmented */
 		if (ip_is_fragment(iph) && !IS_IPV4_HNAT(&entry))
-			return -1;
+			return hnat_diag_fail(skb, HNAT_DIAG_FRAGMENT);
 
 		if (IS_IPV4_GRP(&entry) || IS_IPV4_DSLITE(&entry) || IS_IPV4_MAPE(&entry)) {
 			entry.ipv4_hnapt.sip = foe->ipv4_hnapt.sip;
@@ -2807,7 +2809,7 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 				if (IS_IPV4_HNAT(&entry)) {
 					/* 3-tuple offload only allows bridge forward */
 					if (!hnat_is_hw_path_bridging(hw_path))
-						return -1;
+						return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 					break;
 				}
 			} else {
@@ -2852,7 +2854,7 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 #endif
 			}
 		} else if (!IS_IPV6_6RD(&entry)) {
-			return -1;
+			return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 		}
 
 		switch (iph->protocol) {
@@ -2865,7 +2867,7 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 						  sizeof(_ports),
 						  &_ports);
 			if (unlikely(!pptr))
-				return -1;
+				return hnat_diag_fail(skb, HNAT_DIAG_PARAMETER_ERROR);
 
 			/* DS-Lite WAN->LAN */
 			if (IS_IPV4_MAPE(&entry)) {
@@ -2914,9 +2916,9 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 				break;
 			}
 
-			return -1;
+			return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 		default:
-			return -1;
+			return hnat_diag_fail(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL);
 		}
 		if (debug_level >= 7)
 			trace_printk(
@@ -2990,7 +2992,7 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 			if (IS_IPV6_3T_ROUTE(&entry)) {
 				/* 3-tuple offload only allows bridge forward */
 				if (!hnat_is_hw_path_bridging(hw_path))
-					return -1;
+					return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 				break;
 			}
 		}
@@ -3034,12 +3036,12 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 							  sizeof(_ports),
 							  &_ports);
 				if (unlikely(!pptr))
-					return -1;
+					return hnat_diag_fail(skb, HNAT_DIAG_PARAMETER_ERROR);
 
 				entry.ipv6_hnapt.new_sport = ntohs(pptr->src);
 				entry.ipv6_hnapt.new_dport = ntohs(pptr->dst);
 #else
-				return -1;
+				return hnat_diag_fail(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL);
 #endif
 			}
 			break;
@@ -3048,7 +3050,7 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 			iph = (struct iphdr *)(skb_inner_network_header(skb) + h_offset);
 			/* don't process inner fragment packets */
 			if (ip_is_fragment(iph))
-				return -1;
+				return hnat_diag_fail(skb, HNAT_DIAG_FRAGMENT);
 
 			if ((!mape_toggle &&
 			     entry.bfib1.pkt_type == IPV4_DSLITE) ||
@@ -3159,7 +3161,7 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 			break;
 
 		default:
-			return -1;
+			return hnat_diag_fail(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL);
 		}
 		if (debug_level >= 7)
 			trace_printk(
@@ -3196,7 +3198,7 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 			}
 			break;
 		}
-		return -1;
+		return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 	}
 
 	/* Fill Layer2 Info.*/
@@ -3217,7 +3219,7 @@ hnat_entry_bind:
 		port_id = hnat_dsa_get_port(&master_dev);
 		if (port_id >= 0) {
 			if (hnat_dsa_fill_stag(dev, &entry, h_proto, mape) < 0)
-				return -1;
+				return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 		}
 
 		mac = netdev_priv(master_dev);
@@ -3266,7 +3268,7 @@ hnat_entry_bind:
 			printk_ratelimited(KERN_WARNING
 					   "Unknown case of dp, iif=%x --> %s\n",
 					   skb_hnat_iface(skb), dev->name);
-		return -1;
+		return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 	}
 
 	if (IS_HQOS_MODE || hnat_queue_mark(skb) >= MAX_PPPQ_QUEUE_NUM)
@@ -3439,10 +3441,10 @@ hnat_entry_bind:
 		 * we should not modify it right now.
 		 */
 		if (unlikely(foe->udib1.state != UNBIND))
-			return -1;
+			return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 
 		if (IS_BOND(dev) && (entry.bfib1.vlan_layer || entry.bfib1.vpm))
-			return -1;
+			return hnat_diag_fail(skb, HNAT_DIAG_VLAN_POLICY);
 
 		if (hnat_account_enabled(hnat_priv)) {
 			account_handled = hnat_account_commit(hnat_priv,
@@ -3455,7 +3457,7 @@ hnat_entry_bind:
 					&account_generation)) {
 				hnat_account_invalidate(hnat_priv, skb_hnat_ppe(skb),
 						 skb_hnat_entry(skb));
-				return -1;
+				return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 			}
 		}
 
@@ -3468,7 +3470,7 @@ hnat_entry_bind:
 			flow_entry = kzalloc(sizeof(*flow_entry), GFP_ATOMIC);
 			if (!flow_entry) {
 				spin_unlock_bh(&hnat_priv->flow_entry_lock);
-				return -1;
+				return hnat_diag_fail(skb, HNAT_DIAG_NO_MEMORY);
 			}
 			INIT_HLIST_NODE(&flow_entry->list);
 			flow_entry->ppe_index = skb_hnat_ppe(skb);
@@ -3505,13 +3507,13 @@ hnat_entry_bind:
 	 */
 	if (unlikely(foe->udib1.state != UNBIND)) {
 		spin_unlock_bh(&hnat_priv->entry_lock);
-		return -1;
+		return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 	}
 	if (!hnat_accounted_foe_commit(skb, foe, &entry,
 				       skb_hnat_ppe(skb), skb_hnat_entry(skb),
 				       false, 0)) {
 		spin_unlock_bh(&hnat_priv->entry_lock);
-		return -1;
+		return hnat_diag_fail(skb, HNAT_DIAG_REJECTED);
 	}
 	spin_unlock_bh(&hnat_priv->entry_lock);
 
@@ -4537,26 +4539,27 @@ static unsigned int mtk_hnat_nf_post_routing(
 	bool is_virt_dev = false;
 
 	if (xlat_toggle && !mtk_464xlat_post_process(skb, out))
-		return 0;
+		return hnat_diag_skip(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL);
 
 	if (skb->protocol == htons(ETH_P_IPV6) && !hnat_priv->ipv6_en)
-		return 0;
+		return hnat_diag_skip(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL);
 
-	if (skb_hnat_alg(skb) || unlikely(!is_magic_tag_valid(skb) ||
-					  !IS_SPACE_AVAILABLE_HEAD(skb)))
-		return 0;
+	if (unlikely(!IS_SPACE_AVAILABLE_HEAD(skb) || !is_magic_tag_valid(skb)))
+		return hnat_diag_skip(skb, HNAT_DIAG_INVALID_METADATA);
+	if (skb_hnat_alg(skb))
+		return hnat_diag_skip(skb, HNAT_DIAG_ALGORITHM_EXCLUDED);
 
 	if (unlikely(!skb_mac_header_was_set(skb)))
-		return 0;
+		return hnat_diag_skip(skb, HNAT_DIAG_NO_MAC_HEADER);
 		
 	if (!IS_WHNAT(out) && IS_EXT(out) && FROM_WED(skb))
 		return 0;
 
 	if (unlikely(!skb_hnat_is_hashed(skb)))
-		return 0;
+		return hnat_diag_skip(skb, HNAT_DIAG_NO_FLOW_HASH);
 
 	if (unlikely(skb->mark & HNAT_EXCEPTION_BIT))
-		return 0;
+		return hnat_diag_skip(skb, HNAT_DIAG_MARK_EXCLUDED);
 
 	/* Get bond device slave for the following binding flow */
 	if (netif_is_bond_master(out) && out->netdev_ops->ndo_get_xmit_slave) {
@@ -4590,7 +4593,7 @@ static unsigned int mtk_hnat_nf_post_routing(
 	if (is_virt_dev
 	    && !(skb_hnat_tops(skb) && skb_hnat_is_encap(skb)
 		 && (hw_path.flags & BIT(DEV_PATH_TNL))))
-		return 0;
+		return hnat_diag_skip(skb, HNAT_DIAG_UNSUPPORTED_DEVICE);
 
 	if (debug_level >= 7)
 		trace_printk("[%s] case hit, %x-->%s, reason=%x\n", __func__,
@@ -4603,21 +4606,28 @@ static unsigned int mtk_hnat_nf_post_routing(
 	entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
 
 	switch (skb_hnat_reason(skb)) {
+	case HIT_BIND_EXCEED_MTU:
+		hnat_diag_note(skb, HNAT_DIAG_MTU, 0, 0, -1, 0, -1);
+		break;
 	case TCP_FIN_SYN_RST:
 		if (hnat_fin_callback && entry->bfib1.state == FIN &&
 		    IS_HNAT_API_SUPPORTED(entry))
 			hnat_trigger_callback(hnat_fin_callback, skb);
 		break;
 	case HIT_UNBIND:
-		if (!skb_hnat_reason_ready_bind(skb))
+		if (!skb_hnat_reason_ready_bind(skb)) {
+			hnat_diag_note(skb, HNAT_DIAG_BIND_THRESHOLD, 0, 0, -1, 0, -1);
 			break;
+		}
 		fallthrough;
 	case HIT_UNBIND_RATE_REACH:
 		if (entry_hnat_is_bound(entry))
 			break;
 
-		if (fn && !mtk_hnat_accel_type(skb))
+		if (fn && !mtk_hnat_accel_type(skb)) {
+			hnat_diag_note(skb, HNAT_DIAG_ALGORITHM_EXCLUDED, 0, 0, -1, 0, -1);
 			break;
+		}
 
 		if (!fn) {
 			memcpy(hw_path.eth_dest, eth_hdr(skb)->h_dest, ETH_ALEN);
@@ -4626,18 +4636,22 @@ static unsigned int mtk_hnat_nf_post_routing(
 			if (is_virt_dev && (hw_path.flags & BIT(DEV_PATH_TNL))) {
 				memset(hw_path.eth_dest, 0, ETH_ALEN);
 				memset(hw_path.eth_src, 0, ETH_ALEN);
-			} else if (fn(skb, arp_dev, &hw_path))
+			} else if (fn(skb, arp_dev, &hw_path)) {
+				hnat_diag_note(skb, HNAT_DIAG_NO_ROUTE, 0, 0, -1, 0, -1);
 				break;
+			}
 		}
 
 #if 1 /* ASUS: skip specific VID */
 		if (check_vlan(hw_path.vlan_id)) {
+			hnat_diag_note(skb, HNAT_DIAG_VLAN_POLICY, 0, 0, -1, 0, -1);
 			break;
 		}
 		if (skb->vlan_tci) {
 			u16 vid = skb->vlan_tci & VLAN_VID_MASK;
 
 			if (check_vlan(vid)) {
+				hnat_diag_note(skb, HNAT_DIAG_VLAN_POLICY, 0, 0, -1, 0, -1);
 				break;
 			}
 		}
@@ -4658,8 +4672,10 @@ static unsigned int mtk_hnat_nf_post_routing(
 					counters = acct->counter;
 					org_bytes = atomic64_read(&counters[IP_CT_DIR_ORIGINAL].bytes);
 					rpy_bytes = atomic64_read(&counters[IP_CT_DIR_REPLY].bytes);
-					if ((org_bytes < dpi_limit_bytes) && (rpy_bytes < dpi_limit_bytes))
+					if ((org_bytes < dpi_limit_bytes) && (rpy_bytes < dpi_limit_bytes)) {
+						hnat_diag_note(skb, HNAT_DIAG_DPI_WAIT, 0, 0, -1, 0, -1);
 						break;
+					}
 				} else {
 					pr_crit("[%s]nf_conntrack_acct not enabled!\n", __func__);
 				}
@@ -4678,8 +4694,10 @@ static unsigned int mtk_hnat_nf_post_routing(
 			if (skb_hnat_is_encap(skb) && !is_virt_dev &&
 			    mtk_tnl_encap_offload && mtk_tnl_encap_offload(skb, &eth))
 				break;
-			if (skb_hnat_is_decap(skb))
+			if (skb_hnat_is_decap(skb)) {
+				hnat_diag_note(skb, HNAT_DIAG_DECAP_PENDING, 0, 2, -1, 0, -1);
 				break;
+			}
 		}
 
 		skb_to_hnat_info(skb, out, entry, &hw_path);

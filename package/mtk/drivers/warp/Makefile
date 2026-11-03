@@ -7,6 +7,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=warp
+PKG_RELEASE:=2
 P4REV:=
 PKG_VERSION:=
 PKG_SOURCE:=warp_20250613-433271.tar.xz

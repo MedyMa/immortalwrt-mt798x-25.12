@@ -13,6 +13,7 @@
 
 #include <mtk_eth_soc.h>
 #include <mtk_hnat/hnat.h>
+#include <mtk_hnat/hnat_diag.h>
 #include <mtk_hnat/nf_hnat_mtk.h>
 
 #include <pce/cls.h>
@@ -69,6 +70,32 @@ static inline void inc_tnl_hnat_encap_offload_statistic_success(void)
 static inline void inc_tnl_hnat_encap_offload_statistic_fail(void)
 {
 	hnat_ts.encap_offload.fail++;
+}
+
+
+static enum hnat_diag_reason npu_diag_reason(int error)
+{
+	switch (error) {
+	case -EAGAIN: case -EBUSY: return HNAT_DIAG_SYNC_PENDING;
+	case -ENOMEM: case -ENOSPC: return HNAT_DIAG_NO_MEMORY;
+	case -EMSGSIZE: return HNAT_DIAG_MTU;
+	case -EOPNOTSUPP: return HNAT_DIAG_UNSUPPORTED_PROTOCOL;
+	case -ENODEV: return HNAT_DIAG_NO_TUNNEL;
+	case -EPERM: case -EINVAL: return HNAT_DIAG_INVALID_METADATA;
+	default: return HNAT_DIAG_PARAMETER_ERROR;
+	}
+}
+
+/* The caller holds info->lock; this copies identity, never retains pointers. */
+static void npu_diag_link(struct sk_buff *skb, struct npu_tnl_info *info)
+{
+	bool synced = (info->status & TNL_STA_UPDATED) &&
+		!(info->status & (TNL_STA_UPDATING | TNL_STA_QUEUED)) &&
+		info->generation == info->synced_generation;
+
+	hnat_diag_note(skb, synced ? HNAT_DIAG_PARAMETERS : HNAT_DIAG_SYNC_PENDING, 0,
+		       skb_hnat_is_decap(skb) ? 2 : 1, info->tnl_idx, info->generation,
+		       info->pce_ready ? info->tnl_params.cls_entry : -1);
 }
 
 static inline void skb_set_npu_tnl_idx(struct sk_buff *skb, u32 tnl_idx)
@@ -360,6 +387,7 @@ static int mtk_npu_nf_hnat_tnl_info_setup(struct npu_tnl_input *tnl_input,
 		return -EPERM;
 
 	spin_lock(&tnl_info->lock);
+	npu_diag_link(skb, tnl_info);
 	if (tnl_info->status & TNL_STA_UPDATING) {
 		spin_unlock(&tnl_info->lock);
 		return -EAGAIN;
@@ -399,6 +427,7 @@ static int mtk_npu_nf_hnat_tnl_info_setup(struct npu_tnl_input *tnl_input,
 	if (has_diff)
 		mtk_npu_tnl_info_submit_no_tnl_lock(tnl_info);
 
+	npu_diag_link(skb, tnl_info);
 	spin_unlock(&tnl_info->lock);
 	if (old_dev)
 		dev_put(old_dev);
@@ -416,24 +445,24 @@ static bool mtk_npu_tnl_decap_offloadable(struct sk_buff *skb)
 	u32 i;
 
 	if (secpath_exists(skb))
-		return false;
+		return (hnat_diag_note(skb, HNAT_DIAG_SECURITY_POLICY, 0, 0, -1, 0, -1), false);
 
 	if (unlikely(!mtk_npu_mcu_alive())) {
 		skb_mark_unbind(skb);
 		inc_tnl_hnat_decap_offloadable_statistic_fail();
-		return -EAGAIN;
+		return (hnat_diag_note(skb, HNAT_DIAG_NPU_NOT_READY, 0, 0, -1, 0, -1), false);
 	}
 
 	/* skb should not carry npu here */
 	if (skb_hnat_tops(skb)) {
 		inc_tnl_hnat_decap_offloadable_statistic_fail();
-		return false;
+		return (hnat_diag_note(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL, 0, 0, -1, 0, -1), false);
 	}
 
 	iph = ip_hdr(skb);
 	/* TODO: currently decap only support ipv4 */
 	if (iph->version != 4)
-		return false;
+		return (hnat_diag_note(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL, 0, 0, -1, 0, -1), false);
 
 	hw_path.dev = skb->dev;
 	hw_path.virt_dev = skb->dev;
@@ -458,13 +487,13 @@ static bool mtk_npu_tnl_decap_offloadable(struct sk_buff *skb)
 		    && tnl_type->tnl_decap_offloadable(skb)) {
 			skb_hnat_tops(skb) = tnl_type->tnl_proto_type;
 			inc_tnl_hnat_decap_offloadable_statistic_success();
-			return true;
+			return (hnat_diag_note(skb, HNAT_DIAG_ELIGIBLE, 0, 2, -1, 0, -1), true);
 		}
 	}
 
 	inc_tnl_hnat_decap_offloadable_statistic_fail();
 
-	return false;
+	return (hnat_diag_note(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL, 0, 0, -1, 0, -1), false);
 }
 
 static int mtk_npu_tnl_decap_offload(struct sk_buff *skb)
@@ -477,26 +506,26 @@ static int mtk_npu_tnl_decap_offload(struct sk_buff *skb)
 	if (unlikely(!mtk_npu_mcu_alive())) {
 		skb_mark_unbind(skb);
 		inc_tnl_hnat_decap_offload_statistic_fail();
-		return -EAGAIN;
+		return (hnat_diag_note(skb, npu_diag_reason(-EAGAIN), -EAGAIN, 2, -1, 0, -1), -EAGAIN);
 	}
 
 	if (unlikely(!skb_npu_valid(skb) || !skb_hnat_is_decap(skb))) {
 		skb_mark_unbind(skb);
 		inc_tnl_hnat_decap_offload_statistic_fail();
-		return -EINVAL;
+		return (hnat_diag_note(skb, npu_diag_reason(-EINVAL), -EINVAL, 2, -1, 0, -1), -EINVAL);
 	}
 
 	tnl_type = skb_to_tnl_type(skb);
 	if (IS_ERR(tnl_type)) {
 		skb_mark_unbind(skb);
 		inc_tnl_hnat_decap_offload_statistic_fail();
-		return PTR_ERR(tnl_type);
+		return (hnat_diag_note(skb, npu_diag_reason(PTR_ERR(tnl_type)), PTR_ERR(tnl_type), 2, -1, 0, -1), PTR_ERR(tnl_type));
 	}
 
 	if (unlikely(!tnl_type->tnl_decap_param_setup || !tnl_type->tnl_param_match)) {
 		skb_mark_unbind(skb);
 		inc_tnl_hnat_decap_offload_statistic_fail();
-		return -ENODEV;
+		return (hnat_diag_note(skb, npu_diag_reason(-ENODEV), -ENODEV, 2, -1, 0, -1), -ENODEV);
 	}
 
 	memset(&tnl_params, 0, sizeof(struct npu_tnl_params));
@@ -519,8 +548,10 @@ static int mtk_npu_tnl_decap_offload(struct sk_buff *skb)
 	 * We don't need to mark unbind here
 	 * Since we may learn the tunnel info in next pre-routing
 	 */
-	if (unlikely(ret))
+	if (unlikely(ret)) {
+		hnat_diag_note(skb, npu_diag_reason(ret), ret, 2, -1, 0, -1);
 		return ret;
+	}
 
 	tnl_params.npu_entry_proto = tnl_type->tnl_proto_type;
 	tnl_params.cdrt_idx = skb_hnat_cdrt(skb);
@@ -541,6 +572,8 @@ static int mtk_npu_tnl_decap_offload(struct sk_buff *skb)
 	(ret == 0 ? inc_tnl_hnat_decap_offload_statistic_success() :
 		    inc_tnl_hnat_decap_offload_statistic_fail());
 
+	if (ret)
+		hnat_diag_note(skb, npu_diag_reason(ret), ret, 2, -1, 0, -1);
 	return ret;
 }
 
@@ -612,18 +645,18 @@ static int mtk_npu_tnl_encap_offload(struct sk_buff *skb, struct ethhdr *eth)
 
 	if (unlikely(!skb || !eth)) {
 		inc_tnl_hnat_encap_offload_statistic_fail();
-		return -EINVAL;
+		return (hnat_diag_note(skb, npu_diag_reason(-EINVAL), -EINVAL, 1, -1, 0, -1), -EINVAL);
 	}
 
 	if (unlikely(!mtk_npu_mcu_alive())) {
 		skb_mark_unbind(skb);
 		inc_tnl_hnat_encap_offload_statistic_fail();
-		return -EAGAIN;
+		return (hnat_diag_note(skb, npu_diag_reason(-EAGAIN), -EAGAIN, 1, -1, 0, -1), -EAGAIN);
 	}
 
 	if (!skb_hnat_is_encap(skb)) {
 		inc_tnl_hnat_encap_offload_statistic_fail();
-		return -EPERM;
+		return (hnat_diag_note(skb, npu_diag_reason(-EPERM), -EPERM, 1, -1, 0, -1), -EPERM);
 	}
 
 	if (skb_hnat_cdrt(skb))
@@ -634,6 +667,8 @@ static int mtk_npu_tnl_encap_offload(struct sk_buff *skb, struct ethhdr *eth)
 	(ret == 0 ? inc_tnl_hnat_encap_offload_statistic_success() :
 		    inc_tnl_hnat_encap_offload_statistic_fail());
 
+	if (ret)
+		hnat_diag_note(skb, npu_diag_reason(ret), ret, 1, -1, 0, -1);
 	return ret;
 }
 

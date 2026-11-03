@@ -1937,11 +1937,14 @@ static int hnat_probe(struct platform_device *pdev)
 	return 0;
 
 err_out:
+	hnat_deinit_debugfs(hnat_priv);
 	hnat_account_cleanup(hnat_priv);
 	for (i = 0; i < CFG_PPE_NUM; i++)
 		hnat_stop(i);
+	goto err_ext_if;
 err_out1:
 	hnat_deinit_debugfs(hnat_priv);
+err_ext_if:
 	for (i = 0; i < MAX_EXT_DEVS && hnat_priv->ext_if[i]; i++) {
 		ext_entry = hnat_priv->ext_if[i];
 		ext_if_del(ext_entry);
@@ -1957,12 +1960,19 @@ static void hnat_remove(struct platform_device *pdev)
 {
 	int i;
 
+	/* Fence user controls before stopping their timer and PPE producers. */
+	hnat_deinit_debugfs(hnat_priv);
 	hnat_roaming_disable();
 	hnat_flow_entry_teardown_disable();
 	unregister_netdevice_notifier(&nf_hnat_netdevice_nb);
 	unregister_netevent_notifier(&nf_hnat_netevent_nb);
 	hnat_neigh_update_cleanup();
 	hnat_disable_hook();
+	timer_shutdown_sync(&hnat_priv->hnat_sma_build_entry_timer);
+	if (hnat_priv->data->version == MTK_HNAT_V1_3)
+		timer_shutdown_sync(&hnat_priv->hnat_reset_timestamp_timer);
+	if (IS_HQOS_MODE && IS_GMAC1_MODE)
+		dev_remove_pack(&mtk_pack_type);
 
 	if (hnat_priv->data->mcast)
 		hnat_mcast_disable();
@@ -1974,14 +1984,7 @@ static void hnat_remove(struct platform_device *pdev)
 	for (i = 0; i < MAX_PPE_NUM; i++)
 		mtk_set_ppe_pse_port_state(i, false);
 
-	hnat_deinit_debugfs(hnat_priv);
 	hnat_release_netdev();
-	del_timer_sync(&hnat_priv->hnat_sma_build_entry_timer);
-	if (hnat_priv->data->version == MTK_HNAT_V1_3)
-		del_timer_sync(&hnat_priv->hnat_reset_timestamp_timer);
-
-	if (IS_HQOS_MODE && IS_GMAC1_MODE)
-		dev_remove_pack(&mtk_pack_type);
 }
 
 static const struct mtk_hnat_data hnat_data_v1 = {

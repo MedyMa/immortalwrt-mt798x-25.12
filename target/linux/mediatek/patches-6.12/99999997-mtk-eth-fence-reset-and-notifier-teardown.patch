@@ -1,0 +1,309 @@
+Subject: [PATCH] net: mediatek: fence reset producers and unregister reset notifier
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_dbg.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_dbg.c
+@@ -2903,9 +2903,9 @@
+ 	}
+ 
+ 	eth->debugfs->root = debugfs_create_dir("mtketh", NULL);
+-	if (!eth->debugfs->root) {
++	if (IS_ERR_OR_NULL(eth->debugfs->root)) {
+ 		dev_err(eth->dev, "%s: failed to create debugfs directory\n", __func__);
+-		return -ENOMEM;
++		return eth->debugfs->root ? PTR_ERR(eth->debugfs->root) : -ENOMEM;
+ 	}
+ 
+ 	eth->debugfs->mt7530.mmio_base = eth->esw_base;
+@@ -2995,12 +2995,18 @@
+ 	return 0;
+ 
+ err:
+-	debugfs_remove_recursive(eth->debugfs->root);
++	mtk_eth_debugfs_exit(eth);
+ 	return ret;
+ }
+ 
+ void mtk_eth_debugfs_exit(struct mtk_eth *eth)
+ {
+-	debugfs_remove_recursive(eth->debugfs->root);
+-	remove_proc_subtree(PROCREG_DIR, eth->debugfs->procfs_root);
+-}
++	if (!eth->debugfs)
++		return;
++	if (!IS_ERR_OR_NULL(eth->debugfs->root))
++		debugfs_remove_recursive(eth->debugfs->root);
++	eth->debugfs->root = NULL;
++	if (eth->debugfs->procfs_root)
++		proc_remove(eth->debugfs->procfs_root);
++	eth->debugfs->procfs_root = NULL;
++}
+--- a/drivers/net/ethernet/mediatek/mtk_eth_reset.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_reset.c
+@@ -8,7 +8,7 @@
+ #include "mtk_eth_soc.h"
+ #include "mtk_eth_reset.h"
+ 
+-struct mtk_eth *g_eth;
++static struct mtk_eth __rcu *g_eth;
+ 
+ static int mtk_rest_cnt;
+ int mtk_wifi_num;
+@@ -23,16 +23,21 @@
+ 
+ void mtk_set_pse_drop(u32 config)
+ {
+-	struct mtk_eth *eth = g_eth;
++	struct mtk_eth *eth;
+ 
+-	if (!eth || mtk_is_netsys_v1(eth))
+-		return;
++	rcu_read_lock();
++	eth = rcu_dereference(g_eth);
++
++	if (!eth || test_bit(MTK_STOPPING, &eth->state) || mtk_is_netsys_v1(eth))
++		goto out;
+ 
+ 	mtk_w32(eth, config, PSE_PPE_DROP(0));
+ 	if (MTK_HAS_CAPS(eth->soc->caps, MTK_RSTCTRL_PPE1))
+ 		mtk_w32(eth, config, PSE_PPE_DROP(1));
+ 	if (MTK_HAS_CAPS(eth->soc->caps, MTK_RSTCTRL_PPE2))
+ 		mtk_w32(eth, config, PSE_PPE_DROP(2));
++out:
++	rcu_read_unlock();
+ }
+ EXPORT_SYMBOL(mtk_set_pse_drop);
+ 
+@@ -70,7 +75,8 @@
+ 		break;
+ 	case MTK_FE_START_RESET_INIT:
+ 		pr_info("%s rcv fe start reset init event:%lx\n", __func__, event);
+-		if (!test_bit(MTK_RESETTING, &eth->state)) {
++		if (!test_bit(MTK_RESETTING, &eth->state) &&
++		    !test_bit(MTK_STOPPING, &eth->state)) {
+ 			eth->reset.event = MTK_FE_START_RESET;
+ 			mtk_reset_event_update(eth, MTK_EVENT_FORCE);
+ 			schedule_work(&eth->pending_work);
+@@ -89,10 +95,29 @@
+ 
+ int mtk_eth_netdevice_event_init(struct mtk_eth *eth)
+ {
+-	g_eth = eth;
++	int ret;
+ 
++	reinit_completion(&wait_ser_done);
++	reinit_completion(&wait_ack_done);
++	reinit_completion(&wait_tops_done);
++	mtk_wifi_num = 0;
++	mtk_rest_cnt = 0;
++	mtk_stop_fail = false;
+ 	eth->reset.netdevice_notifier.notifier_call = mtk_eth_netdevice_event;
+-	register_netdevice_notifier(&eth->reset.netdevice_notifier);
+-
++	ret = register_netdevice_notifier(&eth->reset.netdevice_notifier);
++	if (ret)
++		return ret;
++	eth->reset.notifier_registered = true;
++	rcu_assign_pointer(g_eth, eth);
+ 	return 0;
+ }
++
++void mtk_eth_netdevice_event_deinit(struct mtk_eth *eth)
++{
++	if (!eth->reset.notifier_registered)
++		return;
++	unregister_netdevice_notifier(&eth->reset.netdevice_notifier);
++	eth->reset.notifier_registered = false;
++	RCU_INIT_POINTER(g_eth, NULL);
++	synchronize_rcu();
++}
+--- a/drivers/net/ethernet/mediatek/mtk_eth_reset.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_reset.h
+@@ -30,5 +30,6 @@
+ 
+ void mtk_set_pse_drop(u32 config);
+ int mtk_eth_netdevice_event_init(struct mtk_eth *eth);
++void mtk_eth_netdevice_event_deinit(struct mtk_eth *eth);
+ 
+ #endif		/* MTK_ETH_RESET_H */
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -3071,7 +3071,7 @@
+ 			mtk_ppe_check_skb(eth->ppe[ppe_idx], skb, hash);
+ #endif
+ 
+-		if (eth->hwlro && eth->debugfs->hwlro_stats.ebl &&
++		if (eth->hwlro && eth->debugfs && eth->debugfs->hwlro_stats.ebl &&
+ 		    IS_HW_LRO_RING(ring->ring_no)) {
+ 			mtk_eth_debugfs_hwlro_stats_update(eth, ring->ring_no, &trxd);
+ 			mtk_eth_debugfs_hwlro_flush_stats_update(eth, ring->ring_no, &trxd);
+@@ -6143,6 +6143,17 @@
+ 	}
+ }
+ 
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
++static bool mtk_wait_for_reset(struct mtk_eth *eth, struct completion *done)
++{
++	while (!wait_for_completion_timeout(done, msecs_to_jiffies(100))) {
++		if (test_bit(MTK_STOPPING, &eth->state))
++			return false;
++	}
++	return !test_bit(MTK_STOPPING, &eth->state);
++}
++#endif
++
+ static void mtk_pending_work(struct work_struct *work)
+ {
+ 	struct mtk_eth *eth = container_of(work, struct mtk_eth, pending_work);
+@@ -6152,6 +6163,10 @@
+ 	mtk_reset_event_update(eth, MTK_EVENT_TOTAL_CNT);
+ 
+ 	rtnl_lock();
++	if (test_bit(MTK_STOPPING, &eth->state)) {
++		rtnl_unlock();
++		return;
++	}
+ 	set_bit(MTK_RESETTING, &eth->state);
+ 
+ 	mtk_hw_dump_all(eth);
+@@ -6174,14 +6189,20 @@
+ 		rtnl_unlock();
+ 		if (mtk_wifi_num > 0) {
+ 			pr_info("waiting event from wifi\n");
+-			wait_for_completion(&wait_ser_done);
++			if (!mtk_wait_for_reset(eth, &wait_ser_done)) {
++				rtnl_lock();
++				goto out_stopping;
++			}
+ 			if (mtk_is_netsys_v3_or_greater(eth) && mtk_stop_fail) {
+ 				rtnl_lock();
+ 				call_netdevice_notifiers(MTK_FE_START_RESET,
+ 							 eth->netdev[i]);
+ 				rtnl_unlock();
+ 				pr_info("waiting event when stop fail\n");
+-				wait_for_completion(&wait_ser_done);
++				if (!mtk_wait_for_reset(eth, &wait_ser_done)) {
++					rtnl_lock();
++					goto out_stopping;
++				}
+ 				mtk_stop_fail = 0;
+ 			}
+ 		}
+@@ -6261,7 +6282,10 @@
+ 			    mtk_wifi_num > 0) {
+ 				pr_info("waiting done ack from wifi\n");
+ 				rtnl_unlock();
+-				wait_for_completion(&wait_ack_done);
++				if (!mtk_wait_for_reset(eth, &wait_ack_done)) {
++					rtnl_lock();
++					goto out_stopping;
++				}
+ 				rtnl_lock();
+ 			}
+ 		}
+@@ -6277,6 +6301,12 @@
+ 	mtk_restore_qdma_cfg(eth);
+ 
+ 	rtnl_unlock();
++	return;
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
++out_stopping:
++	clear_bit(MTK_RESETTING, &eth->state);
++	rtnl_unlock();
++#endif
+ }
+ 
+ static void mtk_napi_del(struct mtk_eth *eth)
+@@ -6349,13 +6379,20 @@
+ {
+ 	int i;
+ 
++	if (test_and_set_bit(MTK_STOPPING, &eth->state))
++		return;
++	mtk_eth_debugfs_exit(eth);
++
+ 	for (i = 0; i < MTK_MAX_DEVS; i++) {
+ 		if (eth->mux[i])
+-			cancel_delayed_work_sync(&eth->mux[i]->poll);
+-	}
+-	cancel_delayed_work_sync(&eth->reset.monitor_work);
+-	cancel_work_sync(&eth->netdev_restart_work);
+-	cancel_work_sync(&eth->pending_work);
++			disable_delayed_work_sync(&eth->mux[i]->poll);
++	}
++	disable_delayed_work_sync(&eth->reset.monitor_work);
++	disable_work_sync(&eth->netdev_restart_work);
++	disable_work_sync(&eth->pending_work);
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
++	mtk_eth_netdevice_event_deinit(eth);
++#endif
+ }
+ 
+ static int mtk_cleanup(struct mtk_eth *eth)
+@@ -7738,7 +7775,9 @@
+ 
+ 	platform_set_drvdata(pdev, eth);
+ #if defined(CONFIG_NET_MEDIATEK_HNAT) || defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
+-	mtk_eth_netdevice_event_init(eth);
++	err = mtk_eth_netdevice_event_init(eth);
++	if (err)
++		goto err_unreg_netdev;
+ #endif
+ 	schedule_delayed_work(&eth->reset.monitor_work,
+ 			      MTK_DMA_MONITOR_TIMEOUT);
+@@ -7749,8 +7788,8 @@
+ 	return 0;
+ 
+ err_unreg_netdev:
++	mtk_quiesce_work(eth);
+ 	mtk_unreg_dev(eth);
+-	mtk_quiesce_work(eth);
+ #if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
+ 	for (i = 0; i < ARRAY_SIZE(eth->ppe); i++)
+ 		mtk_ppe_stop(eth->ppe[i]);
+@@ -7758,12 +7797,14 @@
+ 	mtk_napi_del(eth);
+ 	free_netdev(eth->dummy_dev);
+ err_deinit_ppe:
++	mtk_quiesce_work(eth);
+ #if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
+ 	mtk_ppe_deinit(eth);
+ #endif
+ 	mtk_release_all_muxes(eth);
+ 	mtk_mdio_cleanup(eth);
+ err_free_dev:
++	mtk_quiesce_work(eth);
+ 	mtk_free_dev(eth);
+ err_deinit_hw:
+ 	mtk_hw_deinit(eth);
+@@ -7784,9 +7825,9 @@
+ 	mtk_gso_skb_copy_head = NULL;
+ 	mtk_ip_frag_skb_copy_head = NULL;
+ 
+-	/* Close running ports while NAPI, PHY and register mappings are live. */
++	/* Drain producers before closing ports and releasing their dependencies. */
++	mtk_quiesce_work(eth);
+ 	mtk_unreg_dev(eth);
+-	mtk_quiesce_work(eth);
+ 	mtk_release_all_muxes(eth);
+ 
+ 	for (i = 0; i < MTK_MAX_DEVS; i++) {
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -1144,7 +1144,8 @@
+ 
+ enum mtk_dev_state {
+ 	MTK_HW_INIT,
+-	MTK_RESETTING
++	MTK_RESETTING,
++	MTK_STOPPING
+ };
+ 
+ /* PSE Port Definition */
+@@ -1817,6 +1818,7 @@
+ 	struct {
+ 		struct delayed_work monitor_work;
+ 		struct notifier_block netdevice_notifier;
++		bool notifier_registered;
+ 		atomic_t force;
+ 		u32 event;
+ 		u32 count[32];

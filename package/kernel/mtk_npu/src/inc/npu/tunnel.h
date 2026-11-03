@@ -102,6 +102,16 @@ enum npu_tnl_info_flag {
 	TNL_INFO_DEBUG_BIT,
 };
 
+enum npu_tnl_sync_stage {
+	NPU_TNL_SYNC_IDLE,
+	NPU_TNL_SYNC_CLASSIFIER,
+	NPU_TNL_SYNC_PAUSE,
+	NPU_TNL_SYNC_MGMT,
+	NPU_TNL_SYNC_OFFLOAD_SEND,
+	NPU_TNL_SYNC_DIPFILTER,
+	NPU_TNL_SYNC_READY,
+};
+
 struct npu_cls_entry {
 	struct cls_entry *cls;
 	struct list_head node;
@@ -130,6 +140,11 @@ struct npu_tnl_info {
 	u32 status;
 	u32 flag; /* bit: enum npu_tnl_info_flag */
 	bool pce_ready;
+	/* Host diagnostics only; not part of the firmware ABI. */
+	u64 generation, sync_attempts, sync_failures;
+	u64 sync_target_generation, synced_generation;
+	int last_sync_error;
+	u8 sync_stage;
 } __aligned(16);
 
 /*

@@ -4374,6 +4374,7 @@ int hnat_init_debugfs(struct mtk_hnat *h)
 		goto err0;
 	}
 	h->root = root;
+	hnat_diag_create(root);
 
 	for (i = 0; i < CFG_PPE_NUM; i++) {
 		h->regset[i] = kzalloc(sizeof(*h->regset[i]), GFP_KERNEL);
@@ -4494,6 +4495,8 @@ err0:
 void hnat_deinit_debugfs(struct mtk_hnat *h)
 {
 	int i;
+
+	hnat_diag_remove();
 
 	debugfs_remove_recursive(h->root);
 	h->root = NULL;

@@ -1,0 +1,202 @@
+Subject: [PATCH] net: ethernet: mediatek: keep PPE running independently of MAC state
+
+Adapt MediaTek commit 4da8f23cdf716cd3339c83cc3b5143335163ca47.
+Keep PPE running for WiFi-only WED forwarding, restart it across FE
+reset, and stop it on probe unwind and remove. Start only after PPE
+and NAPI allocation succeeds, before exposing the first netdev.
+Retain the built-in and modular proprietary HNAT ownership guards.
+Guard the existing external-PPE metadata accesses in non-HNAT builds.
+Drain reset/restart work before destroying PPE or netdev resources.
+
+Upstream: https://github.com/mediatek/mtk-openwrt-feeds/commit/4da8f23cdf716cd3339c83cc3b5143335163ca47
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -2141,7 +2141,9 @@
+ 	txd_info = (struct mtk_tx_dma_desc_info){
+ 		.gso = gso,
+ 		.qid = queue,
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
+ 		.ext_ppe = HNAT_SKB_CB2(skb)->magic == 0x78681415,
++#endif
+ 		.cdrt = 0,
+ 		.tport = 0,
+ 		.tops_entry = 0,
+@@ -2231,7 +2233,9 @@
+ 		frag_size = skb_frag_size(frag);
+ 		memset(&txd_info, 0, sizeof(struct mtk_tx_dma_desc_info));
+ 		txd_info.qid = queue;
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
+ 		txd_info.ext_ppe = HNAT_SKB_CB2(skb)->magic == 0x78681415;
++#endif
+ 		offset = 0;
+ 
+ 		if (mtk_is_netsys_v3_or_greater(eth) &&
+@@ -2883,11 +2887,14 @@
+ 
+ 		/* Per descriptor: a previous PPD packet must not redirect this one. */
+ 		sent_ppd = 0;
+-		if ( (mac == 4) || ((FIELD_GET(MTK_RXD5_PPE_CPU_REASON, trxd.rxd5)) == HIT_BIND_FORCE_TO_CPU)) 
+-			{
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_HNAT)
++		if (mac == 4 ||
++		    FIELD_GET(MTK_RXD5_PPE_CPU_REASON, trxd.rxd5) ==
++		    HIT_BIND_FORCE_TO_CPU) {
+ 			sent_ppd = 1;
+-			mac =0;
+-			}
++			mac = 0;
++		}
++#endif
+ 
+ 
+ 		if (unlikely(mac < 0 || mac >= MTK_MAX_DEVS ||
+@@ -4844,11 +4851,6 @@
+ 		if (err)
+ 			return err;
+ 
+-#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
+-		for (i = 0; i < ARRAY_SIZE(eth->ppe); i++)
+-			mtk_ppe_start(eth->ppe[i]);
+-#endif
+-
+ 		for (i = 0; i < MTK_MAX_DEVS; i++) {
+ 			if (!eth->netdev[i])
+ 				continue;
+@@ -5020,11 +5022,6 @@
+ 		mtk_ptp_clock_deinit(eth);
+ 
+ 	mtk_dma_free(eth);
+-
+-#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
+-	for (i = 0; i < ARRAY_SIZE(eth->ppe); i++)
+-		mtk_ppe_stop(eth->ppe[i]);
+-#endif
+ 
+ 	return 0;
+ }
+@@ -6206,12 +6203,22 @@
+ 		__set_bit(i, &restart);
+ 	}
+ 
++#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
++	for (i = 0; i < ARRAY_SIZE(eth->ppe); i++)
++		mtk_ppe_stop(eth->ppe[i]);
++#endif
++
+ 	usleep_range(15000, 16000);
+ 
+ 	if (eth->dev->pins)
+ 		pinctrl_select_state(eth->dev->pins->p,
+ 				     eth->dev->pins->default_state);
+ 	mtk_hw_init(eth, true);
++
++#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
++	for (i = 0; i < ARRAY_SIZE(eth->ppe); i++)
++		mtk_ppe_start(eth->ppe[i]);
++#endif
+ 
+ 	/* restart DMA and enable IRQs */
+ 	for (i = 0; i < MTK_MAX_DEVS; i++) {
+@@ -6334,14 +6341,23 @@
+ 		mtk_pcs_lynxi_destroy(eth->sgmii_pcs[i]);
+ }
+ 
++static void mtk_quiesce_work(struct mtk_eth *eth)
++{
++	int i;
++
++	for (i = 0; i < MTK_MAX_DEVS; i++) {
++		if (eth->mux[i])
++			cancel_delayed_work_sync(&eth->mux[i]->poll);
++	}
++	cancel_delayed_work_sync(&eth->reset.monitor_work);
++	cancel_work_sync(&eth->netdev_restart_work);
++	cancel_work_sync(&eth->pending_work);
++}
++
+ static int mtk_cleanup(struct mtk_eth *eth)
+ {
+ 	mtk_sgmii_destroy(eth);
+-	mtk_unreg_dev(eth);
+ 	mtk_free_dev(eth);
+-	cancel_work_sync(&eth->pending_work);
+-	cancel_work_sync(&eth->netdev_restart_work);
+-	cancel_delayed_work_sync(&eth->reset.monitor_work);
+ 
+ 	return 0;
+ }
+@@ -7694,6 +7710,12 @@
+ 		}
+ 	}
+ 
++#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
++	/* Keep PPE feedback available to WED with every MAC down. */
++	for (i = 0; i < ARRAY_SIZE(eth->ppe); i++)
++		mtk_ppe_start(eth->ppe[i]);
++#endif
++
+ 	for (i = 0; i < MTK_MAX_DEVS; i++) {
+ 		if (!eth->netdev[i])
+ 			continue;
+@@ -7724,6 +7746,11 @@
+ 
+ err_unreg_netdev:
+ 	mtk_unreg_dev(eth);
++	mtk_quiesce_work(eth);
++#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
++	for (i = 0; i < ARRAY_SIZE(eth->ppe); i++)
++		mtk_ppe_stop(eth->ppe[i]);
++#endif
+ 	mtk_napi_del(eth);
+ 	free_netdev(eth->dummy_dev);
+ err_deinit_ppe:
+@@ -7753,16 +7780,15 @@
+ 	mtk_gso_skb_copy_head = NULL;
+ 	mtk_ip_frag_skb_copy_head = NULL;
+ 
+-	if (eth->esw_base)
+-		iounmap(eth->esw_base);
+-
+-	/* stop all devices to make sure that dma is properly shut down */
++	/* Close running ports while NAPI, PHY and register mappings are live. */
++	mtk_unreg_dev(eth);
++	mtk_quiesce_work(eth);
++	mtk_release_all_muxes(eth);
++
+ 	for (i = 0; i < MTK_MAX_DEVS; i++) {
+ 		if (!eth->netdev[i])
+ 			continue;
+-		mtk_stop(eth->netdev[i]);
+ 		mac = netdev_priv(eth->netdev[i]);
+-		phylink_disconnect_phy(mac->phylink);
+ 		if (mac->sgmii_pcs)
+ 			mtk_pcs_lynxi_put(mac->sgmii_pcs);
+ 
+@@ -7770,14 +7796,23 @@
+ 			mtk_usxgmii_pcs_put(mac->usxgmii_pcs);
+ 	}
+ 
++#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
++	for (i = 0; i < ARRAY_SIZE(eth->ppe); i++)
++		mtk_ppe_stop(eth->ppe[i]);
++#endif
++
+ 	mtk_wed_exit();
+-	mtk_hw_deinit(eth);
+-
+ 	mtk_napi_del(eth);
++#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
++	mtk_ppe_deinit(eth);
++#endif
+ 	mtk_cleanup(eth);
+ 	free_netdev(eth->dummy_dev);
+ 	mtk_mdio_cleanup(eth);
+-	mtk_release_all_muxes(eth);
++	mtk_hw_deinit(eth);
++
++	if (eth->esw_base)
++		iounmap(eth->esw_base);
+ }
+ 
+ #define DESC_SIZE(struct_name)				\

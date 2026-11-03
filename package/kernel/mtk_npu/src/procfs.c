@@ -12,6 +12,7 @@
 
 #include "npu/internal.h"
 #include "npu/procfs.h"
+#include "npu/mbox.h"
 #include "npu/tunnel.h"
 
 struct proc_dir_entry *npu_proc_root;
@@ -36,19 +37,18 @@ static const struct proc_ops telemetry_capabilities_ops = {
 	.proc_release = single_release,
 };
 
-/* One lock per row; no FW/MIB/MMIO read. Native 25.12 has no generation
- * sequence, so the reserved generation column is explicitly unspecified (0).
- */
 static int tunnels_show(struct seq_file *s, void *unused)
 {
 	struct npu_tnl_info *info;
 	struct npu_tnl_params params;
 	unsigned long flags;
-	u32 i, status, ifindex;
+	u64 generation, sync_attempts, sync_failures, synced_generation;
+	int sync_error;
+	u8 sync_stage;
+	u32 i, status, ifindex, classifier;
 	bool synced;
 
-	seq_printf(s, "# schema=1 max_tunnels=%u snapshot=per_entry unit=metadata\n",
-		   (unsigned int)CONFIG_NPU_TNL_NUM);
+	seq_printf(s, "# schema=1 max_tunnels=%u snapshot=per_entry unit=metadata\n", (unsigned int)CONFIG_NPU_TNL_NUM);
 	seq_puts(s, "# index generation ifindex type ipproto sip sport dip dport encap decap synchronized\n");
 	for (i = 0; i < CONFIG_NPU_TNL_NUM; i++) {
 		info = mtk_npu_tnl_info_get_by_idx(i);
@@ -56,21 +56,38 @@ static int tunnels_show(struct seq_file *s, void *unused)
 			continue;
 		spin_lock_irqsave(&info->lock, flags);
 		status = info->status;
-		if (!info->dev || (status & (TNL_STA_UNINIT | TNL_STA_DELETING |
-					    TNL_STA_DELETING_SKIP_PCE))) {
+		if (status & (TNL_STA_UNINIT | TNL_STA_DELETING |
+					    TNL_STA_DELETING_SKIP_PCE)) {
 			spin_unlock_irqrestore(&info->lock, flags);
 			continue;
 		}
 		params = info->cache;
-		ifindex = info->dev->ifindex;
-		synced = (status & TNL_STA_UPDATED) &&
+		classifier = info->pce_ready ? info->tnl_params.cls_entry : 65535;
+		generation = info->generation;
+		sync_attempts = info->sync_attempts;
+		sync_failures = info->sync_failures;
+		synced_generation = info->synced_generation;
+		sync_error = info->last_sync_error;
+		sync_stage = info->sync_stage;
+		ifindex = info->dev ? info->dev->ifindex : 0;
+		synced = generation == synced_generation &&
+			 (status & TNL_STA_UPDATED) &&
 			 !(status & (TNL_STA_UPDATING | TNL_STA_QUEUED)) &&
 			 !memcmp(&info->tnl_params, &params, sizeof(params));
 		spin_unlock_irqrestore(&info->lock, flags);
 		if (params.params.network.type != NPU_NETWORK_IP)
 			continue;
-		seq_printf(s, "%u 0 %u %u %u %pI4 %u %pI4 %u %u %u %u\n",
-			i, ifindex, params.params.tunnel.type,
+		/* Optional comment records preserve the schema-1 data-row format.
+		 * Counters describe host setup/ACKs, never forwarded bytes/packets.
+		 */
+		seq_printf(s, "# sync %u %llu %llu %llu %u %d %llu\n",
+			i, generation, sync_attempts, sync_failures,
+			sync_stage, sync_error, synced_generation);
+		seq_printf(s, "# cls %u %llu %u\n", i, generation, classifier);
+		seq_printf(s, "# crypto %u %llu %u\n",
+			i, generation, params.cdrt_idx);
+		seq_printf(s, "%u %llu %u %u %u %pI4 %u %pI4 %u %u %u %u\n",
+			i, generation, ifindex, params.params.tunnel.type,
 			params.params.network.ip.proto, &params.params.network.ip.sip,
 			params.params.transport.type == NPU_TRANSPORT_UDP ?
 				ntohs(params.params.transport.udp.sport) : 0,
@@ -154,6 +171,25 @@ static const struct proc_ops tnl_proc_ops = {
 };
 #endif /* KERNEL_VERSION(5, 6, 0) > LINUX_VERSION_CODE */
 
+
+static int communication_show(struct seq_file *s, void *unused)
+{
+	mtk_npu_mbox_health_show(s);
+	return 0;
+}
+
+static int communication_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, communication_show, NULL);
+}
+
+static const struct proc_ops communication_ops = {
+	.proc_open = communication_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
+};
+
 int mtk_npu_procfs_init(struct platform_device *pdev)
 {
 	npu_proc_root = proc_mkdir("npu", NULL);
@@ -167,6 +203,8 @@ int mtk_npu_procfs_init(struct platform_device *pdev)
 	    !proc_create("telemetry-capabilities", 0400, npu_proc_root,
 			 &telemetry_capabilities_ops))
 		goto err_out;
+	if (!proc_create("communication", 0400, npu_proc_root, &communication_ops))
+		NPU_NOTICE("mailbox diagnostics unavailable\n");
 	return 0;
 
 err_out:

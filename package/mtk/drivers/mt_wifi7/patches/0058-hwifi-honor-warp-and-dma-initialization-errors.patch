@@ -1,0 +1,157 @@
+Subject: [PATCH] hwifi: require successful WARP attachment and IRQ ownership
+
+--- a/wlan_hwifi/bus/mtk_wed.h
++++ b/wlan_hwifi/bus/mtk_wed.h
+@@ -89,6 +89,9 @@
+ 	const struct mtk_bus_io_ops *io_ops;
+ 	const struct mtk_bus_dma_ops *dma_ops;
+ 	struct wifi_hw *wifi_hw;
++	u32 warp_caps;
++	int irq_error;
++	bool irq_requested;
+ };
+ 
+ struct wed_driver {
+--- a/wlan_hwifi/bus/mtk_wed.c
++++ b/wlan_hwifi/bus/mtk_wed.c
+@@ -113,6 +113,7 @@
+ 	int ret;
+ 
+ 	wed->irq = irq;
++	wed->irq_requested = false;
+ 	name = wed->irq_name;
+ 
+ 	ret = snprintf(name, MAX_IRQ_NAME_LEN, "%s-wed", to_name(trans));
+@@ -124,8 +125,10 @@
+ 	ret = request_irq(irq, mtk_bus_dma_irq_handler,
+ 		IRQF_SHARED, name, &trans->vec_data[0]);
+ end:
++	wed->irq_error = ret;
++	wed->irq_requested = ret == 0;
+ 	if (ret)
+-		dev_err(to_device(trans), "%s(): Request wed irq failed\n", __func__);
++		dev_err(to_device(trans), "%s(): Request wed irq failed: %d\n", __func__, ret);
+ }
+ 
+ static void
+@@ -134,10 +137,13 @@
+ 	struct wed_trans *wed = to_wed_trans(priv_data);
+ 	struct pci_trans *trans = to_pci_trans(priv_data);
+ 
+-	if (irq == wed->irq)
++	if (irq == wed->irq && wed->irq_requested) {
+ 		free_irq(wed->irq, &trans->vec_data[0]);
+-	else
+-		mtk_dbg(MTK_BUS, "warp_irq(%d) != wed->irq(%d)\n", __func__);
++		wed->irq_requested = false;
++	}
++	else if (irq != wed->irq)
++		mtk_dbg(MTK_BUS, "%s: warp_irq(%u) != wed->irq(%u)\n",
++			__func__, irq, wed->irq);
+ }
+ 
+ static void
+@@ -332,7 +338,6 @@
+ wed_warp_ver_notify(void *priv_data, u8 ver, u8 warp_sub_ver,
+ 		u8 warp_ver_brnach, int hw_cap)
+ {
+-	struct mtk_hw_dev *dev = to_hw_dev(priv_data);
+ 	struct pci_trans *trans = to_pci_trans(priv_data);
+ 	struct wed_trans *wed_trans = to_wed_trans(trans);
+ 
+@@ -342,14 +347,8 @@
+ 	wed_trans->wed_ver = ver;
+ 	wed_trans->wed_sub_ver = warp_sub_ver;
+ 
+-	if (hw_cap & WED_HW_CAP_RRO_DBG_MODE)
+-		set_bit(PCI_FLAG_WHNAT_RRO_DBG, &trans->flags);
+-	if (hw_cap & WED_HW_CAP_RRO_DBG_MEMCPY_MODE)
+-		set_bit(PCI_FLAG_WHNAT_RRO_DBG_MEMCPY, &trans->flags);
+-	if (hw_cap & WED_HW_CAP_RX_OFFLOAD)
+-		set_bit(HWIFI_FLAG_RX_OFFLOAD, &dev->flags);
+-	if (hw_cap & WED_HW_CAP_RX_WOCPU)
+-		set_bit(HWIFI_FLAG_BA_OFFLOAD, &dev->flags);
++	/* Publish offload capabilities only after attachment is verified. */
++	wed_trans->warp_caps = hw_cap;
+ }
+ 
+ static u32
+@@ -942,6 +941,8 @@
+ 	struct mtk_chip_hw_cap *hw_cap = dev->chip_drv->hw_caps;
+ 	struct wifi_hw *wed_hw;
+ 	bool is_master = test_bit(BUS_TRANS_FLAG_MASTER, &bus_trans->flag);
++	bool resetting = test_bit(HWIFI_STATE_RESET, &dev->state);
++	bool previously_enabled = trans->enable;
+ 	int ret = 0;
+ 
+ 	/*initial as false*/
+@@ -982,15 +983,41 @@
+ 		wed_hw->src = SLAVE_SRC;
+ 
+ 	wed_pci_cap_get(ptrans, dev, wed_hw);
+-	if (!test_bit(HWIFI_STATE_RESET, &dev->state))
++	if (!resetting) {
++		trans->irq_error = 0;
++		trans->irq_requested = false;
+ 		ret = warp_register_client(wed_hw, &wed_ops);
+-
+-	trans->enable = (ret == WED_INVAL) ? false : true;
+-	if (trans->enable)
++		if (!ret && !trans->irq_requested) {
++			ret = trans->irq_error ? trans->irq_error : -ENXIO;
++			warp_client_remove(hw);
++		}
++	} else if (!previously_enabled)
++		goto end;
++
++	/* Every negative errno means no usable WED instance. */
++	trans->enable = ret == 0;
++	if (ret)
++		trans->wifi_hw = NULL;
++	if (trans->enable) {
++		if (trans->warp_caps & WED_HW_CAP_RRO_DBG_MODE)
++			set_bit(PCI_FLAG_WHNAT_RRO_DBG, &ptrans->flags);
++		if (trans->warp_caps & WED_HW_CAP_RRO_DBG_MEMCPY_MODE)
++			set_bit(PCI_FLAG_WHNAT_RRO_DBG_MEMCPY, &ptrans->flags);
++		if (trans->warp_caps & WED_HW_CAP_RX_OFFLOAD)
++			set_bit(HWIFI_FLAG_RX_OFFLOAD, &dev->flags);
++		if (trans->warp_caps & WED_HW_CAP_RX_WOCPU)
++			set_bit(HWIFI_FLAG_BA_OFFLOAD, &dev->flags);
+ 		wed_set_device(wed_hw, hw);
++	}
+ 
+ end:
+-	return trans->dma_ops->init_device(hw);
++	ret = trans->dma_ops->init_device(hw);
++	if (ret && trans->enable && !resetting) {
++		warp_client_remove(hw);
++		trans->wifi_hw = NULL;
++		trans->enable = false;
++	}
++	return ret;
+ }
+ 
+ static void
+@@ -1001,8 +1028,11 @@
+ 
+ 	trans->dma_ops->exit_device(hw);
+ 
+-	if (trans->enable && !test_bit(HWIFI_STATE_RESET, &dev->state))
++	if (trans->enable && !test_bit(HWIFI_STATE_RESET, &dev->state)) {
+ 		warp_client_remove(hw);
++		trans->wifi_hw = NULL;
++		trans->enable = false;
++	}
+ }
+ 
+ static void
+@@ -1448,7 +1478,8 @@
+ 	if (trans->enable) {
+ 		for (idx = 0; idx < max_src_num; idx++)
+ 			tx_token_num[idx] = hw_dev->ext_tx_tk_nums_master;
+-		tx_token_num[1] = hw_dev->ext_tx_tk_nums_slave;
++		if (max_src_num > 1)
++			tx_token_num[1] = hw_dev->ext_tx_tk_nums_slave;
+ 	} else {
+ 		return trans->dma_ops->get_tx_token_num(hw, tx_token_num, max_src_num);
+ 	}

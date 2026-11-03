@@ -1292,10 +1292,18 @@ enum FoeIpAct {
 
 #if defined(CONFIG_MEDIATEK_NETSYS_V2) || defined(CONFIG_MEDIATEK_NETSYS_V3)
 #define skb_hnat_is_hashed(skb)                                                 \
-	(skb_hnat_entry(skb) != 0x7fff && skb_hnat_entry(skb) < hnat_priv->foe_etry_num)
+	(hnat_priv && IS_SPACE_AVAILABLE_HEAD(skb) && is_magic_tag_valid(skb) && \
+	 skb_hnat_ppe(skb) < CFG_PPE_NUM && skb_hnat_ppe(skb) < MAX_PPE_NUM && \
+	 skb_hnat_entry(skb) != 0x7fff && \
+	 skb_hnat_entry(skb) < hnat_priv->foe_etry_num && \
+	 hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)])
 #else
 #define skb_hnat_is_hashed(skb)                                                 \
-	(skb_hnat_entry(skb) != 0x3fff && skb_hnat_entry(skb) < hnat_priv->foe_etry_num)
+	(hnat_priv && IS_SPACE_AVAILABLE_HEAD(skb) && is_magic_tag_valid(skb) && \
+	 skb_hnat_ppe(skb) < CFG_PPE_NUM && skb_hnat_ppe(skb) < MAX_PPE_NUM && \
+	 skb_hnat_entry(skb) != 0x3fff && \
+	 skb_hnat_entry(skb) < hnat_priv->foe_etry_num && \
+	 hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)])
 #endif
 #define FROM_GE_LAN_GRP(skb) (FROM_GE_LAN(skb) | FROM_GE_LAN2(skb))
 #define FROM_GE_LAN(skb) (skb_hnat_iface(skb) == FOE_MAGIC_GE_LAN)
@@ -1601,6 +1609,7 @@ void hnat_vif_acct_update(struct mtk_hnat *h, u32 ppe_id, u32 index,
 			  u64 bytes, u64 packets);
 
 #include "hnat_account.h"
+#include "hnat_diag.h"
 
 int hnat_mcast_foe_bind_handle(const u8 *dmac,
 			       u32 ppe_id, u32 foe_idx, struct foe_entry *entry, int ifindex);
