@@ -1,14 +1,14 @@
 --- a/iwinfo_nl80211.c
 +++ b/iwinfo_nl80211.c
-@@ -28,6 +28,7 @@
- #include <fnmatch.h>
+@@ -29,6 +29,7 @@
  #include <stdarg.h>
+ #include <endian.h>
  #include <stdlib.h>
 +#include <signal.h>
  
  #include "iwinfo_nl80211.h"
- #include "mtk_nl80211.h" 
-@@ -904,24 +905,30 @@ static int __nl80211_hostapd_query(const char *ifname, ...)
+ #include "mtk_nl80211.h"
+@@ -932,7 +933,7 @@
  	va_list ap, ap_cur;
  	char *phy, *search, *dest, *key, *val, buf[128];
  	int len, found = 0, match = 1;
@@ -17,9 +17,7 @@
  
  	if (nl80211_get_if_data(ifname, &data))
  		return 0;
- 
- 	if (data.mode != IWINFO_OPMODE_MASTER && data.mode != IWINFO_OPMODE_AP_VLAN)
- 		return 0;
+@@ -942,14 +943,20 @@
  
  	phy = nl80211_ifname2phy(ifname);
  
@@ -48,7 +46,7 @@
  
  	if (!fp)
  		return 0;
-@@ -1199,24 +1205,41 @@
+@@ -1228,24 +1235,41 @@
  
  static void nl80211_hostapd_hup(const char *ifname)
  {
@@ -71,13 +69,15 @@
 -				pid = atoi(buf);
 -
 -			close(fd);
-+			snprintf(path, sizeof(path), "/var/run/hostapd-%s.pid", ifname);
-+			fd = open(path, O_RDONLY);
- 		}
+-		}
 -
 -		if (pid > 0)
 -			kill(pid, 1);
- 	}
+-	}
++			snprintf(path, sizeof(path), "/var/run/hostapd-%s.pid", ifname);
++			fd = open(path, O_RDONLY);
++		}
++	}
 +	else
 +	{
 +		snprintf(path, sizeof(path), "/var/run/hostapd-%s.pid", ifname);
