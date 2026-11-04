@@ -302,6 +302,7 @@ typedef enum _SEC_AKM_MODE {
 #define MTK_L1UTIL_PATH			"/usr/lib/lua/l1dat_parser.lua"
 
 void getRate(HTTRANSMIT_SETTING HTSetting, ULONG *fLastTxRxRate);
+void get_rate_eht(UINT8 mcs, UINT8 bw, UINT8 nss, UINT8 dcm, ULONG *last_tx_rate);
 void get_rate_he(UINT8 mcs, UINT8 bw, UINT8 nss, UINT8 dcm, ULONG *last_tx_rate);
 UINT32 cck_to_mcs(UINT32 mcs);
 
