@@ -17,6 +17,11 @@
 #include "util.h"
 //2021-03-24 willa.liu@fibocom.com changed begin for support mantis 0071817
 #include "query_pcie_mode.h"
+
+/* GCC 14: declared here so main.c sees the prototypes (defined in QMIThread.c). */
+int requestGetSIMCardNumber(PROFILE_T *profile);
+int requestSimBindSubscription_NAS_WMS(void);
+int requestSimBindSubscription_WDS_DMS_QOS(void);
 //2021-03-24 willa.liu@fibocom.com changed begin for support mantis 0071817
 
 #define MAJOR 2
@@ -924,7 +929,7 @@ void *thread_socket_server(void *args)
     if ((socket_server_fd = socket(AF_UNIX,SOCK_STREAM,0))< 0)
     {
         dbg_time("Socket error:%s\a\n", strerror(errno));
-        return ;
+        return NULL;
     }
     dbg_time("socket[%d] successfuly!", socket_server_fd);
     if (!access(fibo_dial_filepath, F_OK))

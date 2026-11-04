@@ -1,0 +1,11 @@
+--- a/mt_wifi/os/linux/rt_linux.c
++++ b/mt_wifi/os/linux/rt_linux.c
+@@ -1974,7 +1974,7 @@
+ #endif
+ 
+ #if	defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
+-	netdev_set_priv_destructor(pNetDev, RtmpOSNetDevOpsFree);
++	pNetDev->priv_destructor = RtmpOSNetDevOpsFree;
+ 	if (rtnl_locked) {
+ 		ret = cfg80211_register_netdevice(pNetDev);
+ 	} else {

@@ -7,18 +7,17 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=libiwinfo
-PKG_RELEASE:=1
+PKG_RELEASE:=3
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL=$(PROJECT_GIT)/project/iwinfo.git
-PKG_SOURCE_DATE:=2026-01-14
-PKG_SOURCE_VERSION:=f5dd57a84cc31a403a1383dd14944fa2e2b5824a
-PKG_MIRROR_HASH:=a9ed29ea9f222d222fc554238e9c79675e1784293685198f759785da9940571f
+PKG_SOURCE_DATE:=2025-11-07
+PKG_SOURCE_VERSION:=5f4c213fc59f1a82d9f0140642d668ae2969531b
+PKG_MIRROR_HASH:=363e245821d9bc6ffe2cf20f4b51670f1f91928df22a2ffe73a06767f737fb6d
 PKG_MAINTAINER:=Jo-Philipp Wich <jo@mein.io>
 PKG_LICENSE:=GPL-2.0
 
 PKG_BUILD_FLAGS:=no-lto
-PKG_CONFIG_DEPENDS:=CONFIG_WIFI_SCRIPTS_UCODE
 
 IWINFO_ABI_VERSION:=20230701
 
@@ -34,7 +33,7 @@ define Package/libiwinfo
 endef
 
 define Package/libiwinfo/description
-  Wireless information library with simplified API for nl80211
+  Wireless information library with simplified API for nl80211, mtk
   and wext driver interfaces.
 endef
 
@@ -63,7 +62,7 @@ define Package/iwinfo
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=Generalized Wireless Information utility
-  DEPENDS:=+@!WIFI_SCRIPTS_UCODE:libiwinfo
+  DEPENDS:=+libiwinfo
 endef
 
 define Package/iwinfo/description
@@ -81,9 +80,9 @@ TARGET_CFLAGS += \
 
 MAKE_FLAGS += \
 	FPIC="$(FPIC)" \
-	CFLAGS="$(TARGET_CFLAGS) $(TARGET_CPPFLAGS)" \
+	CFLAGS="$(TARGET_CFLAGS)" \
 	LDFLAGS="$(TARGET_LDFLAGS)" \
-	BACKENDS="nl80211" \
+	BACKENDS="nl80211 mtk" \
 	SOVERSION="$(IWINFO_ABI_VERSION)"
 
 define Build/InstallDev
@@ -111,16 +110,10 @@ define Package/libiwinfo-data/install
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/devices.txt $(1)/usr/share/libiwinfo/devices.txt
 endef
 
-ifdef CONFIG_WIFI_SCRIPTS_UCODE
-  define Package/iwinfo/install
-	:
-  endef
-else
-  define Package/iwinfo/install
+define Package/iwinfo/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/iwinfo $(1)/usr/bin/iwinfo
-  endef
-endif
+endef
 
 $(eval $(call BuildPackage,libiwinfo))
 $(eval $(call BuildPackage,libiwinfo-lua))

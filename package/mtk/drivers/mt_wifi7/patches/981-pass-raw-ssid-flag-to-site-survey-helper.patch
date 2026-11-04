@@ -1,0 +1,11 @@
+--- a/mt_wifi/common/cmm_info.c
++++ b/mt_wifi/common/cmm_info.c
+@@ -6836,7 +6836,7 @@
+ 						"Snprintf failed!\n");
+ 			goto ERROR;
+ 		}
+-		RTMPCommSiteSurveyData(msg, pBss, TotalLen);
++		RTMPCommSiteSurveyData(msg, pBss, TotalLen, false);
+ #ifdef WSC_INCLUDED
+ 
+ 		/*WPS*/

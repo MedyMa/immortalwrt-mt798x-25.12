@@ -1,7 +1,6 @@
 Default
 INDEX0=MT7993
-INDEX0_init_path=/etc/wireless/mediatek/mt7993.1.dat
-INDEX0_profile_path=/etc/wireless/mediatek/mt7993.b0.dat;/etc/wireless/mediatek/mt7993.b1.dat
+INDEX0_profile_path=/etc/wireless/mediatek/mt7993.1.dat
 INDEX0_init_script=/lib/wifi/mtwifi.lua
 INDEX0_init_compatible=mtwifi
 INDEX0_EEPROM_offset=0x0

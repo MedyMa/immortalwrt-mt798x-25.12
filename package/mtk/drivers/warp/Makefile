@@ -7,12 +7,11 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=warp
-PKG_RELEASE:=2
+PKG_RELEASE:=4
 P4REV:=
 PKG_VERSION:=
-PKG_SOURCE:=warp_20250613-433271.tar.xz
-PKG_SOURCE_URL:=
 PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_NAME)
+PKG_FILE_DEPENDS:=$(CURDIR)/src/
 
 PKG_KCONFIG:= \
 	WARP_VERSION \
@@ -24,7 +23,7 @@ PKG_KCONFIG:= \
 	WARP_MEMORY_LEAK_DBG \
 	TARGET_mediatek
 
-PKG_CONFIG_DEPENDS:=$(foreach c, $(PKG_KCONFIG),$(if $(CONFIG_$c),CONFIG_$(c)))
+PKG_CONFIG_DEPENDS:=$(addprefix CONFIG_,$(PKG_KCONFIG))
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -33,6 +32,7 @@ TAR_CMD=$(HOST_TAR) -C $(1)/.. $(TAR_OPTIONS)
 define KernelPackage/warp
   CATEGORY:=MTK Properties
   TITLE:=MTK warp driver
+  KCONFIG:=CONFIG_RESET_TI_SYSCON=y
 
   DEPENDS:=+(TARGET_mediatek):kmod-mediatek_hnat
 
@@ -53,7 +53,7 @@ define Build/Compile
 		ARCH="$(LINUX_KARCH)" \
 		M="$(PKG_BUILD_DIR)" \
 		$(foreach c, $(PKG_KCONFIG),$(if $(CONFIG_$c),CONFIG_$(c)=$(CONFIG_$(c)))) \
-		KCFLAGS="-Wno-error=missing-prototypes -Wno-error=implicit-function-declaration" \
+		KBUILD_EXTRA_SYMBOLS="$(wildcard $(PKG_SYMVERS_DIR)/*.symvers)" \
 		modules
 endef
 

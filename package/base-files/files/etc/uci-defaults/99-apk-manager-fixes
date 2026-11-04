@@ -1,0 +1,102 @@
+#!/bin/sh
+
+sanitize_apk_repositories() {
+	local repo_file tmp_file line
+
+	for repo_file in /etc/apk/repositories /etc/apk/repositories.d/*; do
+		[ -f "$repo_file" ] || continue
+		tmp_file="${repo_file}.tmp.$$"
+		: > "$tmp_file"
+
+		while IFS= read -r line || [ -n "$line" ]; do
+			case "$line" in
+				\#*|'')
+					printf '%s\n' "$line" >> "$tmp_file"
+				;;
+				*kiddin9*|*/video/packages.adb)
+					printf '# %s\n' "$line" >> "$tmp_file"
+				;;
+				*)
+					printf '%s\n' "$line" >> "$tmp_file"
+				;;
+			esac
+		done < "$repo_file"
+
+		mv "$tmp_file" "$repo_file"
+	done
+}
+
+wrap_apk_binary() {
+	local apk_path="$1"
+	local real_path
+
+	[ -x "$apk_path" ] || return 0
+
+	real_path="${apk_path}.real"
+	if [ ! -f "$real_path" ]; then
+		mv "$apk_path" "$real_path"
+		cat > "$apk_path" << 'WRAP'
+#!/bin/sh
+real_apk="$(readlink -f "$0").real"
+
+# LuCI may put global flags before the applet. Skip global option operands so
+# a root/repository named "add" cannot be mistaken for an install command.
+action=
+skip_operand=
+for arg in "$@"; do
+	if [ -n "$skip_operand" ]; then
+		skip_operand=
+		continue
+	fi
+	if [ -z "$action" ]; then
+		case "$arg" in
+			--*=*) continue ;;
+			--arch|--cache-dir|--cache-max-age|--keys-dir|--preupgrade-depends|\
+			--progress-fd|--repositories-file|--repository|--repository-config|\
+			--root|--timeout|--uvol-manager|--wait|-p|-X)
+				skip_operand=1
+				continue
+			;;
+			--) break ;;
+			--*) continue ;;
+			-*)
+				short_opts="${arg#-}"
+				while [ -n "$short_opts" ]; do
+					opt="${short_opts%"${short_opts#?}"}"
+					short_opts="${short_opts#?}"
+					case "$opt" in
+						p|X)
+							[ -n "$short_opts" ] || skip_operand=1
+							break
+						;;
+					esac
+				done
+				continue
+			;;
+			add) action=add; continue ;;
+			*) break ;;
+		esac
+	fi
+	case "$arg" in
+		*.apk)
+			if [ -f "$arg" ]; then
+				exec "$real_apk" --allow-untrusted "$@"
+			fi
+		;;
+	esac
+done
+
+exec "$real_apk" "$@"
+WRAP
+		chmod 0755 "$apk_path"
+	fi
+}
+
+sanitize_apk_repositories
+wrap_apk_binary /usr/bin/apk
+
+if [ ! -e /sbin/apk ]; then
+	ln -sf /usr/bin/apk /sbin/apk 2>/dev/null || true
+fi
+
+exit 0

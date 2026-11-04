@@ -1,0 +1,1184 @@
+Subject: mt_hwifi: adapt the working R4 driver to Linux 6.12
+
+--- a/mt_wifi/ap/ap_cfg.c
++++ b/mt_wifi/ap/ap_cfg.c
+@@ -8192,7 +8192,7 @@
+ #endif/*ANDLINK_FEATURE_SUPPORT*/
+ 
+ #ifdef TR181_SUPPORT
+-static void Get_Sta_Stats(
++static void __maybe_unused Get_Sta_Stats(
+ 	IN RTMP_ADAPTER * pAd,
+ 	IN OUT struct wifi_sta_stats *staStats)
+ {
+@@ -8217,7 +8217,7 @@
+ 	staStats->valid = TRUE;
+ }
+ 
+-static void Get_Sta_Rates(
++static void __maybe_unused Get_Sta_Rates(
+ 	IN RTMP_ADAPTER * pAd,
+ 	IN OUT struct wifi_sta_rates *staRates)
+ {
+@@ -8245,7 +8245,7 @@
+ 	staRates->valid = TRUE;
+ }
+ 
+-static INT Get_Radio_Channel_Change_Info(
++static INT __maybe_unused Get_Radio_Channel_Change_Info(
+ 	IN RTMP_ADAPTER * pAd,
+ 	OUT UCHAR band_idx,
+ 	OUT RTMP_IOCTL_INPUT_STRUCT * wrq)
+@@ -8267,7 +8267,7 @@
+ 
+ 
+ #ifdef STAT_ENHANCE_SUPPORT
+-static INT Get_BSS_AC_Statistics(
++static INT __maybe_unused Get_BSS_AC_Statistics(
+ 	IN RTMP_ADAPTER * pAd,
+ 	IN INT ap_idx,
+ 	OUT struct wifi_dev_ac_stats *pStat)
+@@ -8327,7 +8327,7 @@
+ 	POS_COOKIE pObj = (POS_COOKIE) pAd->OS_Cookie;
+ 	RTMP_STRING driverVersion[16];
+ 	INT apidx = pObj->ioctl_if;
+-#ifdef CONFIG_MAP_SUPPORT
++#if defined(CONFIG_MAP_SUPPORT) || (defined(QOS_R2) && !defined(RT_CFG80211_SUPPORT))
+ 	PUCHAR pStaMacAddr = NULL;
+ #endif
+ #ifdef WSC_AP_SUPPORT
+--- a/mt_wifi/common/cmm_mat_iparp.c
++++ b/mt_wifi/common/cmm_mat_iparp.c
+@@ -676,32 +676,14 @@
+ 
+ static inline void IPintToIPstr(int ipint, char Ipstr[20], ULONG BufLen)
+ {
+-	int temp = 0;
++	u32 address = (u32)ipint;
+ 	int ret;
+-	temp = ipint & 0x000FF;
+-	ret = snprintf(Ipstr, BufLen, "%d.", temp);
+-	if (os_snprintf_error(BufLen, ret)) {
++
++	ret = snprintf(Ipstr, BufLen, "%u.%u.%u.%u", address & 0xff,
++		       (address >> 8) & 0xff, (address >> 16) & 0xff,
++		       (address >> 24) & 0xff);
++	if (os_snprintf_error(BufLen, ret))
+ 		MTWF_PRINT("%s: snprintf error!\n", __func__);
+-		return;
+-	}
+-	temp = (ipint >> 8) & 0x000FF;
+-	ret = snprintf(Ipstr, BufLen, "%s%d.", Ipstr, temp);
+-	if (os_snprintf_error(BufLen, ret)) {
+-		MTWF_PRINT("%s: snprintf error!\n", __func__);
+-		return;
+-	}
+-	temp = (ipint >> 16) & 0x000FF;
+-	ret = snprintf(Ipstr, BufLen, "%s%d.", Ipstr, temp);
+-	if (os_snprintf_error(BufLen, ret)) {
+-		MTWF_PRINT("%s: snprintf error!\n", __func__);
+-		return;
+-	}
+-	temp = (ipint >> 24) & 0x000FF;
+-	ret = snprintf(Ipstr, BufLen, "%s%d", Ipstr, temp);
+-	if (os_snprintf_error(BufLen, ret)) {
+-		MTWF_PRINT("%s: snprintf error!\n", __func__);
+-		return;
+-	}
+ }
+ 
+ 
+--- a/mt_wifi/common/cmm_radar.c
++++ b/mt_wifi/common/cmm_radar.c
+@@ -254,8 +254,9 @@
+ 			*phy_bw = BW_80;
+ 		else if (cfg->vht_conf.vht_bw == VHT_BW_160)
+ 			*phy_bw = BW_160;
+-		else
+-			;
++		else {
++			/* No action for this state. */
++		}
+ 	}
+ 
+ 	reg_cap_bw = get_channel_bw_cap(wdev, pAd->CommonCfg.DfsParameter.OutBandCh);
+@@ -350,8 +351,9 @@
+ 			phy_bw = BW_80;
+ 		else if (cfg->vht_conf.vht_bw == VHT_BW_160)
+ 			phy_bw = BW_160;
+-		else
+-			;
++		else {
++			/* No action for this state. */
++		}
+ 	}
+ 	vht_cent2 = cfg->phy_conf.cen_ch_2;
+ 
+@@ -446,8 +448,9 @@
+ 			/* Setting for no available channel */
+ 			pDot11h->ChannelMode = CHAN_NORMAL_MODE;
+ #endif /* DFS_ADJ_BW_ZERO_WAIT */
+-		} else
+-			;
++		} else {
++			/* No action for this state. */
++		}
+ 	} else
+ #endif
+ 	{
+--- a/mt_wifi/common/cmm_rdm_mt.c
++++ b/mt_wifi/common/cmm_rdm_mt.c
+@@ -2275,8 +2275,9 @@
+ 			MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_DFS, DBG_LVL_INFO, "In Set_RadarDetectStart_Proc: Bandwidth not 80+80 or 160\n");
+ 
+ 		pDfsParam->bNoSwitchCh = TRUE;
+-	} else
+-		;
++	} else {
++		/* No action for this state. */
++	}
+ 
+ 	return TRUE;
+ }
+@@ -2309,8 +2310,9 @@
+ 		else
+ #endif
+ 			MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_DFS, DBG_LVL_INFO, "In Set_RadarDetectStop_Proc: Bandwidth not 80+80 or 160\n");
+-	} else
+-		;
++	} else {
++		/* No action for this state. */
++	}
+ 
+ 	return TRUE;
+ }
+@@ -4247,8 +4249,9 @@
+ 				pChCtrl->ChList[ch_idx].IsOutBandCacDone = 1;
+ 			else if (!((target_ch) >> 2 & 1) && ((target_ch - pChCtrl->ChList[ch_idx].Channel) == 4))
+ 				pChCtrl->ChList[ch_idx].IsOutBandCacDone = 1;
+-			else
+-				;
++			else {
++				/* No action for this state. */
++			}
+ 		}
+ 		break;
+ 
+@@ -4533,8 +4536,9 @@
+ 		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_DFS, DBG_LVL_WARN,
+ 			"Wait for NOP of channel. Disable MAC TX\n");
+ 		mtRddControl(pAd, CAC_START, RddIdx, 0, 0);
+-	} else
+-		;
++	} else {
++		/* No action for this state. */
++	}
+ }
+ 
+ #ifdef DFS_ADJ_BW_ZERO_WAIT
+@@ -5487,8 +5491,9 @@
+ 					pChCtrl->ChList[ch_idx].Flags |= CHANNEL_RDD_HIT;
+ #endif /* DFS_SLAVE_SUPPORT */
+ 			}
+-			else
+-				;
++			else {
++				/* No action for this state. */
++			}
+ 		}
+ 		break;
+ 
+@@ -6125,8 +6130,9 @@
+ 					phy_bw = BW_80;
+ 				else if (cfg->vht_conf.vht_bw == VHT_BW_160)
+ 					phy_bw = BW_160;
+-				else
+-					;
++				else {
++					/* No action for this state. */
++				}
+ 			}
+ 
+ 			if (DfsRadarChannelCheck(pAd, wdev, cfg->phy_conf.cen_ch_2, phy_bw)) {
+@@ -6163,8 +6169,9 @@
+ 						phy_bw = BW_80;
+ 					else if (cfg->vht_conf.vht_bw == VHT_BW_160)
+ 						phy_bw = BW_160;
+-					else
+-						;
++					else {
++						/* No action for this state. */
++					}
+ 				}
+ 
+ 				if (DfsRadarChannelCheck(pAd, wdev, cfg->phy_conf.cen_ch_2, phy_bw)) {
+@@ -7640,10 +7647,12 @@
+ 				else
+ 					BwChannel = DfsBwChQueryByDefault(pAd, Bw - 1, pDfsParam, DFS_BW_CH_QUERY_LEVEL1, bDefaultSelect, SkipNonDfsCh, band_idx);
+ 			}
+-		} else
+-			;/*Will return BwChannel = 0*/
+-	} else
+-		;
++		} else {
++			/* No action for this state. */
++		}/*Will return BwChannel = 0*/
++	} else {
++		/* No action for this state. */
++	}
+ 	return BwChannel;
+ 
+ }
+@@ -9054,8 +9063,9 @@
+ 				pChCtrl->ChList[ChIdx].NOPSetByBw = BW_20;
+ 				pChCtrl->ChList[ChIdx].NOPClrCnt = 1;
+ 				pChCtrl->ChList[ChIdx].NOPSaveForClear = 1800;
+-			} else
+-				;
++			} else {
++				/* No action for this state. */
++			}
+ 		} else if (OrigSupportBwBitMap[ChIdx] == 0x03) {
+ 			if (SupportBwBitMap[ChIdx] == 0x03)
+ 				;
+@@ -9067,8 +9077,9 @@
+ 				pChCtrl->ChList[ChIdx].NOPSetByBw = BW_20;
+ 				pChCtrl->ChList[ChIdx].NOPClrCnt = 1;
+ 				pChCtrl->ChList[ChIdx].NOPSaveForClear = 1800;
+-			} else
+-				;
++			} else {
++				/* No action for this state. */
++			}
+ 		} else if (OrigSupportBwBitMap[ChIdx] == 0x01) {
+ 			if (SupportBwBitMap[ChIdx] == 0x01)
+ 				;
+@@ -9076,10 +9087,12 @@
+ 				pChCtrl->ChList[ChIdx].NOPSetByBw = BW_20;
+ 				pChCtrl->ChList[ChIdx].NOPClrCnt = 1;
+ 				pChCtrl->ChList[ChIdx].NOPSaveForClear = 1800;
+-			} else
+-				;
+-		} else
+-			;
++			} else {
++				/* No action for this state. */
++			}
++		} else {
++			/* No action for this state. */
++		}
+ 	}
+ 
+ 	for (i = 0; i < DFS_AVAILABLE_LIST_BW_NUM; i++) {
+--- a/mt_wifi/common/fsm/fsm_auth.c
++++ b/mt_wifi/common/fsm/fsm_auth.c
+@@ -756,8 +756,10 @@
+ 			/* APPeerAuthSimpleRspGenAndSend(pAd, pRcvHdr, */
+ 			/* auth_info.auth_alg, auth_info.auth_seq + 1, MLME_SUCCESS); */
+ 
+-		} else
+-			; /* MAC table full, what should we respond ????? */
++		} else {
++			/* No action for this state. */
++
++		} /* MAC table full, what should we respond ????? */
+ 	} else {
+ 		/* wrong algorithm */
+ 		/* APPeerAuthSimpleRspGenAndSend(pAd, pRcvHdr, */
+--- a/mt_wifi/common/fsm/fsm_sync.c
++++ b/mt_wifi/common/fsm/fsm_sync.c
+@@ -1836,7 +1836,7 @@
+ #else
+ 		if (Idx != BSS_NOT_FOUND)
+ #endif /* WIFI_REGION32_HIDDEN_SSID_SUPPORT */
+-			;/* RealRssi = ScanTab->BssEntry[Idx].Rssi; this assignment is no use*/
++			{/* RealRssi = ScanTab->BssEntry[Idx].Rssi; this assignment is no use*/ }
+ #ifdef CONFIG_STA_SUPPORT
+ #ifdef CONFIG_MAP_SUPPORT
+ 		else {
+--- a/mt_wifi/common/fsm/sta_mgmt_assoc.c
++++ b/mt_wifi/common/fsm/sta_mgmt_assoc.c
+@@ -1351,7 +1351,7 @@
+ 	RALINK_TIMER_STRUCT *assoc_timer = NULL;
+ 	UCHAR SsidIe    = IE_SSID;
+ 	UCHAR SupRateIe = IE_SUPP_RATES;
+-#ifdef MBO_SUPPORT
++#if defined(MBO_SUPPORT) && defined(CONFIG_MAP_SUPPORT)
+ #ifdef WSC_INCLUDED
+ 	PWSC_CTRL pWscControl = &wdev->WscControl;
+ #endif /* WSC_INCLUDED */
+--- a/mt_wifi/common/fsm/sta_mgmt_cntl.c
++++ b/mt_wifi/common/fsm/sta_mgmt_cntl.c
+@@ -3104,7 +3104,7 @@
+ #ifdef MAC_REPEATER_SUPPORT
+ 	REPEATER_CLIENT_ENTRY *rept = NULL;
+ #endif
+-#ifdef CONFIG_MAP_SUPPORT
++#if defined(CONFIG_MAP_SUPPORT) || defined(MWDS)
+ 	MAC_TABLE_ENTRY * entry = NULL;
+ #endif
+ 
+--- a/mt_wifi/common/mgmt/be_phy.c
++++ b/mt_wifi/common/mgmt/be_phy.c
+@@ -695,8 +695,9 @@
+ 		else if (cfg->eht_conf.bw == EHT_BW_320)
+ 			config_bw = BW_320;
+ #endif
+-		else
+-			;
++		else {
++			/* No action for this state. */
++		}
+ 	}
+ 
+ 	return config_bw;
+--- a/mt_wifi/common/security/cmm_sec.c
++++ b/mt_wifi/common/security/cmm_sec.c
+@@ -2029,7 +2029,7 @@
+ 	*buf_len = 3;
+ 
+ 	if (oct_support)
+-		; /* not support now */
++		{ /* not support now */ }
+ }
+ 
+ VOID build_oci_ie(
+--- a/mt_wifi/common/security/cmm_wpa.c
++++ b/mt_wifi/common/security/cmm_wpa.c
+@@ -2236,7 +2236,7 @@
+ 		} else
+ #endif /* DOT11W_PMF_SUPPORT */
+ 		if (0)
+-			; /* for build pass */
++			{ /* for build pass */ }
+ 	}
+ 
+ 	return TRUE;
+--- a/mt_wifi/common/security/wpa3/bn_lib.c
++++ b/mt_wifi/common/security/wpa3/bn_lib.c
+@@ -3455,8 +3455,9 @@
+ 	int noinv;
+ 	rv = int_bn_mod_inverse(in, a, n, ctx, &noinv);
+ 
+-	if (noinv)
++	if (noinv) {
+ 		BNerr(BN_F_BN_MOD_INVERSE, BN_R_NO_INVERSE);
++	}
+ 
+ 	return rv;
+ }
+@@ -4555,8 +4556,9 @@
+ 		 * will overwrite it.
+ 		 */
+ 		int neg = num->neg;
+-		if (BN_rshift(rm, snum, norm_shift) == 0)/*ALPS05329896*/
++		if (BN_rshift(rm, snum, norm_shift) == 0) { /*ALPS05329896*/
+ 			BNerr(BN_F_BN_RSHIFT, BN_R_INVALID_SHIFT);
++		}
+ 		if (!BN_is_zero(rm))
+ 			rm->neg = neg;
+ 
+--- a/mt_wifi/feature/wapp/wapp.c
++++ b/mt_wifi/feature/wapp/wapp.c
+@@ -52,7 +52,7 @@
+ 	IN UCHAR channel,
+ 	IN UCHAR ret)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_cac_info *cac_info;
+ 
+ 	event.event_id = WAPP_CAC_STOP;
+@@ -176,7 +176,7 @@
+ {
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_dev_info *dev_info;
+ 
+ 	event.event_id = WAPP_DEV_QUERY_RSP;
+@@ -210,7 +210,7 @@
+ 
+ INT wapp_send_wdev_info_report(PRTMP_ADAPTER pAd, struct wifi_dev *wdev)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_dev_info *dev_info;
+ 
+ 	if (!wdev)
+@@ -238,7 +238,7 @@
+ {
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wdev_ht_cap *ht_cap;
+ 
+ 	event.event_id = WAPP_HT_CAP_QUERY_RSP;
+@@ -271,7 +271,7 @@
+ {
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wdev_vht_cap *vht_cap;
+ 	VHT_CAP_INFO drv_vht_cap;
+ 	VHT_OP_IE drv_vht_op;
+@@ -391,7 +391,7 @@
+ {
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wdev_misc_cap *misc_cap;
+ 
+ 	event.event_id = WAPP_MISC_CAP_QUERY_RSP;
+@@ -1127,7 +1127,7 @@
+ 	struct wapp_req *req)
+ {
+ 	INT i;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_client_info *cli_info;
+ 	MAC_TABLE_ENTRY *mac_entry;
+ 
+@@ -1143,7 +1143,11 @@
+ 			&& NdisCmpMemory(mac_entry->Addr, req->data.mac_addr, MAC_ADDR_LEN) == 0
+ 			&& mac_entry->wdev->if_dev
+ 			&& req->data.ifindex == RtmpOsGetNetIfIndex(mac_entry->wdev->if_dev)) {
++#ifdef CONFIG_MAP_SUPPORT
+ 			wapp_fill_client_info_new(pAd, cli_info, mac_entry);
++#else
++			wapp_fill_client_info(pAd, cli_info, mac_entry);
++#endif
+ #ifdef MAP_R2
+ 			/*printk("build sta ext params\n");*/
+ 			cli_info->ext_metric_info.sta_info.last_data_dl_rate = mac_entry->LastTxRate;
+@@ -1172,7 +1176,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	struct wapp_req *req)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	event.event_id = WAPP_CLI_LIST_QUERY_RSP;
+ 	event.ifindex = req->data.ifindex;
+@@ -1187,7 +1191,7 @@
+ {
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_client_info *cli_info;
+ 	MAC_TABLE_ENTRY *mac_entry;
+ 
+@@ -1207,7 +1211,11 @@
+ 				continue;
+ 			}
+ #ifdef CONFIG_MAP_SUPPORT
++#ifdef CONFIG_MAP_SUPPORT
+ 			wapp_fill_client_info_new(pAd, cli_info, mac_entry);
++#else
++			wapp_fill_client_info(pAd, cli_info, mac_entry);
++#endif
+ #else
+ 			wapp_fill_client_info(pAd, cli_info, mac_entry);
+ #endif
+@@ -1252,7 +1260,7 @@
+ 	PSTA_ADMIN_CONFIG pApCliEntry)
+ {
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_client_info *cli_info;
+ 
+ 	if (pApCliEntry) {
+@@ -1275,7 +1283,7 @@
+ 	MAC_TABLE_ENTRY *mac_entry)
+ {
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_client_info *cli_info;
+ 
+ 	if (mac_entry) {
+@@ -1287,7 +1295,11 @@
+ #ifdef MAP_R6
+ 			memset(cli_info, 0, sizeof(*cli_info));
+ #endif /* MAP_R6 */
++#ifdef CONFIG_MAP_SUPPORT
+ 			wapp_fill_client_info_new(pAd, cli_info, mac_entry);
++#else
++			wapp_fill_client_info(pAd, cli_info, mac_entry);
++#endif
+ 			wapp_send_wapp_qry_rsp(pAd, &event);
+ #ifdef MBO_SUPPORT
+ 		if (IS_MBO_ENABLE(wdev)) {
+@@ -1313,7 +1325,7 @@
+ 	UCHAR *mac_addr,
+ 	MAC_TABLE_ENTRY *mac_entry)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_client_info *cli_info;
+ 
+ 	event.event_id = WAPP_CLI_ALL_LEAVE_EVENT;
+@@ -1344,7 +1356,7 @@
+ 	UCHAR *mac_addr,
+ 	MAC_TABLE_ENTRY *mac_entry)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_client_info *cli_info;
+ 
+ 	event.event_id = WAPP_CLI_LEAVE_EVENT;
+@@ -1381,7 +1393,7 @@
+ 	MAC_TABLE_ENTRY *pEntry,
+ 	USHORT reason)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_client_info *cli_info;
+ 
+ 	if (pEntry->wdev->if_dev) {
+@@ -1420,7 +1432,7 @@
+ #ifdef APCLI_SUPPORT
+ 	u8 i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_client_info *cli_info;
+ 	MAC_TABLE_ENTRY *mac_entry;
+ 	PSTA_ADMIN_CONFIG apcli_entry;
+@@ -1458,7 +1470,11 @@
+ 			&& (RtmpOsGetNetIfIndex(wdev->if_dev) == req->data.ifindex)) {
+ 			mac_entry = entry_get(pAd, apcli_entry->MacTabWCID);
+ 			if (IS_ENTRY_PEER_AP(mac_entry)) {
++#ifdef CONFIG_MAP_SUPPORT
+ 				wapp_fill_client_info_new(pAd, cli_info, mac_entry);
++#else
++				wapp_fill_client_info(pAd, cli_info, mac_entry);
++#endif
+ 				wapp_send_wapp_qry_rsp(pAd, &event);
+ 				break;
+ 			}
+@@ -1476,7 +1492,7 @@
+ 	UCHAR *mac_addr,
+ 	MLME_QUEUE_ELEM *elem)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_probe_info *probe_info;
+ 	struct raw_rssi_info *raw_rssi;
+ 	RSSI_SAMPLE rssi;
+@@ -1568,7 +1584,7 @@
+ 	IN PMAC_TABLE_ENTRY pEntry)
+ {
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (pEntry && IS_ENTRY_CLIENT(pEntry)) {
+ 		MTWF_DBG(NULL, DBG_CAT_AP, CATAP_WAPP, DBG_LVL_INFO,
+@@ -1590,7 +1606,7 @@
+ 	IN PMNT_STA_ENTRY pMntEntry)
+ {
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (pEntry && IS_ENTRY_MONITOR(pEntry)) {
+ 		wdev = pEntry->wdev;
+@@ -1613,7 +1629,7 @@
+ 	IN UCHAR cac_enable,
+ 	IN USHORT cac_time)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_cac_info *cac_info = NULL;
+ 	event.event_id = WAPP_CAC_PERIOD_EVENT;
+ 	event.ifindex = ifindex;
+@@ -1628,7 +1644,7 @@
+ #ifdef DPP_R2_SUPPORT
+ VOID RTMPIoctlGetCCEResults(
+ 	IN PRTMP_ADAPTER pAd, struct wapp_req *req) {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	BSS_ENTRY *bss;
+ 	struct cce_vendor_ie_result result;
+ 	int i = 0, index = 0, j = 0;
+@@ -1767,7 +1783,7 @@
+ 	IN UINT32 ifindex,
+ 	IN UCHAR new_channel)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wapp_csa_info *csa_info;
+ 
+ 	event.event_id = WAPP_CSA_EVENT;
+@@ -1783,7 +1799,7 @@
+ 	IN STA_STATUS stat)
+ {
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (pEntry && IS_ENTRY_CLIENT(pEntry)) {
+ 		wdev = pEntry->wdev;
+@@ -1839,7 +1855,7 @@
+ #ifndef MAP_6E_SUPPORT
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wdev_op_class_info *op_class;
+ 
+ 	NdisZeroMemory((void *)&event, sizeof(struct wapp_event));
+@@ -1868,7 +1884,7 @@
+ void wext_send_dpp_frame_tx_status(PRTMP_ADAPTER pAd, struct wifi_dev *wdev,
+ 				BOOLEAN tx_error, UINT16 seq_no)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	struct wapp_dpp_frm_tx_status *req_data;
+ 
+ 	if (!wdev) {
+@@ -1984,7 +2000,7 @@
+ void wext_send_sta_info(PRTMP_ADAPTER pAd, struct wifi_dev *wdev,
+ 				MAC_TABLE_ENTRY *pEntry)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	struct wapp_sta_info *req_data;
+ 
+ 	if (!wdev) {
+@@ -2036,7 +2052,7 @@
+ void wext_send_dpp_uri_info(PRTMP_ADAPTER pAd, struct wifi_dev *wdev,
+ 				PWSC_CTRL pWscControl)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	struct wapp_uri_info *req_data;
+ 
+ 	if (!wdev) {
+@@ -2070,7 +2086,7 @@
+ {
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wdev_bss_info *bss_info;
+ 
+ 	NdisZeroMemory(&event, sizeof(event));
+@@ -2121,7 +2137,7 @@
+ {
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wdev_ap_metric *ap_metric;
+ 	BSS_STRUCT *mbss;
+ 
+@@ -2201,7 +2217,7 @@
+ {
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wdev_radio_metric *radio_metric;
+ 	int band_idx = 0;
+ 
+@@ -2259,7 +2275,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	struct wapp_req *req)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	event.event_id = WAPP_CH_UTIL_QUERY_RSP;
+ 	event.ifindex = req->data.ifindex;
+ 	event.data.ch_util = get_channel_utilization(pAd, event.ifindex);
+@@ -2273,7 +2289,7 @@
+ {
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	wdev_ap_config *ap_conf;
+ 
+ 	event.event_id = WAPP_AP_CONFIG_RSP;
+@@ -2303,7 +2319,7 @@
+ 	IN  PWSC_CREDENTIAL pCredential)
+ {
+ 
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	u8 index = 0;
+ 
+ 	if (wdev == NULL) {
+@@ -2362,7 +2378,7 @@
+ 	struct wifi_dev *wdev,
+ 	UINT8 bss_state)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (wdev->if_dev) {
+ 		event.event_id = WAPP_BSS_STATE_CHANGE;
+@@ -2379,7 +2395,7 @@
+ 	struct wifi_dev *wdev,
+ 	UINT8 ControlChannel)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (wdev->if_dev) {
+ 		event.event_id = WAPP_CH_CHANGE;
+@@ -2388,8 +2404,10 @@
+ 		event.data.ch_change_info.new_ch = (u_int8_t)ControlChannel;
+ 		event.data.ch_change_info.op_class =
+ 			get_regulatory_class(pAd, ControlChannel, wdev->PhyMode, wdev);
++#ifdef CONFIG_MAP_SUPPORT
+ 		event.data.eht_ch_change = wdev->eht_ch_change;
+ 		wdev->eht_ch_change = 0;
++#endif
+ 		wapp_send_wapp_qry_rsp(pAd, &event);
+ 	}
+ 	return 0;
+@@ -2400,7 +2418,7 @@
+ 	struct wifi_dev *wdev,
+ 	UINT8 ControlChannel)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (wdev->if_dev) {
+ 		event.event_id = WAPP_CH_CHANGE_R3;
+@@ -2418,7 +2436,7 @@
+ *	PRTMP_ADAPTER pAd,
+ *	)
+ *	{
+-*		struct wapp_event event;
++*		struct wapp_event event = {0};
+ *		event.event_id = WAPP_TX_POWER_CHANGE;
+ *		event.ifindex = ;
+ *		event.data.txpwr_change_info.interface_index =event.ifindex;
+@@ -2434,10 +2452,14 @@
+ 	PRTMP_ADAPTER pAd,
+ 	PSTA_ADMIN_CONFIG pApCliEntry)
+ {
+-	struct wapp_event event;
+-
+-	if (pApCliEntry->wdev.if_dev && (!pApCliEntry->wdev.bh_ready_sent
+-	    || apcli_assoc_state == WAPP_APCLI_DISASSOCIATED)) {
++	struct wapp_event event = {0};
++
++	if (pApCliEntry->wdev.if_dev
++#ifdef CONFIG_MAP_SUPPORT
++	    && (!pApCliEntry->wdev.bh_ready_sent
++	    || apcli_assoc_state == WAPP_APCLI_DISASSOCIATED)
++#endif
++	   ) {
+ 		event.event_id = WAPP_APCLI_ASSOC_STATE_CHANGE;
+ 		event.ifindex = pApCliEntry->wdev.if_dev->ifindex;
+ 		event.data.apcli_association_info.interface_index = event.ifindex;
+@@ -2458,7 +2480,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	PSTA_ADMIN_CONFIG pApCliEntry)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	event.event_id = WAPP_APCLI_ASSOC_STATE_CHANGE_VENDOR10;
+ 	event.ifindex = pApCliEntry->wdev.if_dev->ifindex;
+@@ -2476,7 +2498,7 @@
+ 	UCHAR bssload_low_thrd,
+ 	UCHAR bssload)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (wdev->if_dev) {
+ 		event.event_id = WAPP_BSSLOAD_CROSSING;
+@@ -2500,7 +2522,7 @@
+ 	USHORT status_code,
+ 	USHORT reason_code)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (wdev->if_dev) {
+ 		event.event_id = WAPP_STA_CNNCT_REJ;
+@@ -2760,7 +2782,7 @@
+ {
+ 	INT i;
+ 	struct wifi_dev *wdev;
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	event.event_id = WAPP_BSSLOAD_RSP;
+ 	event.ifindex = req->data.ifindex;
+@@ -2792,7 +2814,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	struct wapp_req *req)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	PMAC_TABLE_ENTRY mac_entry;
+ 	wapp_apcli_association_info *apcli_info;
+ 
+@@ -2815,7 +2837,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	struct wapp_req *req)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	PMAC_TABLE_ENTRY mac_entry;
+ 	wapp_client_info *cli_info;
+ 
+@@ -2839,7 +2861,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	struct wapp_req *req)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	PMAC_TABLE_ENTRY mac_entry;
+ 	wapp_client_info *cli_info;
+ 
+@@ -2964,7 +2986,7 @@
+ 	PRTMP_ADAPTER pAd, UINT32 value)
+ {
+ #ifdef CFG_SUPPORT_FALCON_SR
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	event.event_id = WAPP_SR_SUPPORT_MODE_RSP;
+ 	event.ifindex = pAd->CommonCfg.SRmode_req_ifindex;
+@@ -3021,7 +3043,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	struct wifi_dev *wdev)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	WSC_CTRL *pWscControl = &wdev->WscControl;
+ 
+ 	if (wdev->if_dev) {
+@@ -3045,7 +3067,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	struct wifi_dev *wdev)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (wdev->if_dev) {
+ 		event.len = 0;
+@@ -3060,7 +3082,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	PWSC_CTRL pWscControl)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	struct wapp_bhsta_info *bsta_info = &event.data.bhsta_info;
+ 	struct wifi_dev *wdev = (struct wifi_dev *)pWscControl->wdev;
+ 
+@@ -3070,10 +3092,12 @@
+ 		event.ifindex = RtmpOsGetNetIfIndex(wdev->if_dev);
+ 		bsta_info->peer_map_enable = 0;
+ 
++#ifdef CONFIG_MAP_SUPPORT
+ 		if (IS_MAP_ENABLE(pAd) &&
+ 			(pWscControl->RegData.PeerInfo.map_DevPeerRole & BIT(MAP_ROLE_BACKHAUL_STA))) {
+ 			bsta_info->peer_map_enable = 1;
+ 		}
++#endif
+ 
+ 		COPY_MAC_ADDR(bsta_info->connected_bssid, wdev->bssid);
+ 		COPY_MAC_ADDR(bsta_info->mac_addr, pWscControl->EntryAddr);
+@@ -3088,7 +3112,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	struct wifi_dev *wdev)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (wdev->if_dev) {
+ 		event.len = 0;
+@@ -3105,7 +3129,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	struct wifi_dev *wdev)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	UINT buflen = sizeof(struct wapp_event);
+ 
+ 	if (wdev->if_dev) {
+@@ -3129,7 +3153,7 @@
+ 	UINT32 ifindex,
+ 	UCHAR *ip)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	UCHAR *a4_missing_entry_ip;
+ 
+ 	event.event_id = WAPP_A4_ENTRY_MISSING_NOTIF;
+@@ -3151,7 +3175,7 @@
+ 	unsigned char ch_status
+ 	)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	if (wdev->if_dev) {
+ 		event.event_id = WAPP_RADAR_DETECT_NOTIF;
+@@ -3168,7 +3192,7 @@
+ INT wapp_send_lte_safe_chn_event(
+ 	PRTMP_ADAPTER pAd, UINT64 *safe_chn_bitmask)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	MTWF_DBG(pAd, DBG_CAT_AP, CATAP_WAPP, DBG_LVL_INFO,
+ 		"safe_chn_bitmask:%llu-%llu-%llu\n", safe_chn_bitmask[0],
+@@ -3184,7 +3208,7 @@
+ INT wapp_send_band_status_event(
+ 	PRTMP_ADAPTER pAd, struct wifi_dev *wdev, BOOLEAN status)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	MTWF_DBG(pAd, DBG_CAT_AP, CATAP_WAPP, DBG_LVL_INFO,
+ 		"update band status[%d]", status);
+@@ -3202,7 +3226,7 @@
+ 	PRTMP_ADAPTER pAd,
+ 	struct wifi_dev *wdev)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	MTWF_DBG(pAd, DBG_CAT_AP, CATAP_WAPP, DBG_LVL_INFO, "\n");
+ 	event.event_id = WAPP_R3_RECONFIG_TRIGGER;
+@@ -3218,7 +3242,7 @@
+ 	PRTMP_ADAPTER pAd, struct wifi_dev *wdev, UINT8 u1UlStatus)
+ {
+ 
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	event.event_id = WAPP_UPLINK_TRAFFIC_EVENT;
+ 	event.ifindex = RtmpOsGetNetIfIndex(wdev->if_dev);
+@@ -3234,7 +3258,7 @@
+ INT wapp_send_sr_self_srg_bm_event(
+ 	IN PRTMP_ADAPTER pAd, IN struct wifi_dev *wdev, IN PUINT8 prSrgBitmap)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 	struct _BSS_INFO_ARGUMENT_T *bssinfo = &wdev->bss_info_argument;
+ 	struct bss_color_ctrl *bss_color = &bssinfo->bss_color;
+ 
+@@ -3259,7 +3283,7 @@
+ INT wapp_send_sta_mode_rpt_event(
+ 	PRTMP_ADAPTER pAd, struct wifi_dev *wdev, BOOLEAN IsStaAllHe)
+ {
+-	struct wapp_event event;
++	struct wapp_event event = {0};
+ 
+ 	event.event_id = WAPP_STA_MODE_RPT_EVENT;
+ 	event.ifindex = RtmpOsGetNetIfIndex(wdev->if_dev);
+@@ -3293,7 +3317,7 @@
+ 	char *mcsptr_sta = NULL;
+ #endif
+ 	UINT8 he_ch_width = HE_BW_80;
+-	UINT8 txrx_stream;
++	UINT8 txrx_stream __maybe_unused;
+ 	UINT16	l;
+ 	INT custom_event_length;
+ 	UINT32 TotalLen;
+--- a/mt_wifi/include/common/mgmt/mgmt_entrytb.h
++++ b/mt_wifi/include/common/mgmt/mgmt_entrytb.h
+@@ -622,6 +622,8 @@
+ #endif
+ 	UINT32 TxBytesMAP;
+ 	UINT32 RxBytesMAP;
++#endif
++#if defined(CONFIG_MAP_SUPPORT) || defined(WAPP_SUPPORT)
+ 	UINT16 DisconnectReason;
+ #endif
+ 	UINT32 TxRxTime[4][2];
+--- a/mt_wifi/include/os/rt_linux.h
++++ b/mt_wifi/include/os/rt_linux.h
+@@ -38,6 +38,24 @@
+ #include <linux/ctype.h>
+ #include <linux/vmalloc.h>
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
++/* Keep the legacy strlcpy length result for callers which inspect it. */
++static inline size_t rtmp_strlcpy(char *dest, const char *src, size_t size)
++{
++	size_t len = strlen(src);
++
++	if (size) {
++		size_t copied = min_t(size_t, len, size - 1);
++
++		memcpy(dest, src, copied);
++		dest[copied] = '\0';
++	}
++	return len;
++}
++#define strlcpy rtmp_strlcpy
++#endif
++
++
+ #include <linux/wireless.h>
+ #include <net/iw_handler.h>
+ #if defined(CONFIG_CSO_SUPPORT)
+@@ -54,7 +72,11 @@
+ #include <linux/unistd.h>
+ #include <asm/uaccess.h>
+ #include <asm/types.h>
+-#include <asm/unaligned.h>	/* for get_unaligned() */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#include <linux/unaligned.h>
++#else
++#include <asm/unaligned.h>
++#endif	/* for get_unaligned() */
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27)
+ #include <linux/pid.h>
+@@ -974,8 +996,9 @@
+ #define OS_PKT_COPY(_pkt, _newSkb)  \
+ 	do {\
+ 		_newSkb = skb_copy(RTPKT_TO_OSPKT(_pkt), GFP_ATOMIC);	\
+-		if (_newSkb != NULL)					\
++		if (_newSkb != NULL) {					\
+ 			MEM_DBG_PKT_ALLOC_INC(_newSkb);			\
++		}							\
+ 	} while (0)
+ 
+ #define OS_PKT_TAIL_ADJUST(_pkt, _removedTagLen)							\
+@@ -1003,8 +1026,9 @@
+ #define OS_PKT_CLONE(_pAd, _pkt, _src, _flag)		\
+ 	do {\
+ 		_src = skb_clone(RTPKT_TO_OSPKT(_pkt), _flag);	\
+-		if (_src != NULL)				\
++		if (_src != NULL) {				\
+ 			MEM_DBG_PKT_ALLOC_INC(_src);		\
++		}	\
+ 	} while (0)
+ 
+ #define get_unaligned32							get_unaligned
+--- a/mt_wifi/include/rt_config.h
++++ b/mt_wifi/include/rt_config.h
+@@ -143,6 +143,11 @@
+ #include "routing_tab.h"
+ #endif /* ROUTING_TAB_SUPPORT */
+ 
++#ifndef CONFIG_MAP_SUPPORT
++#define IS_MAP_TURNKEY_ENABLE(_pAd) FALSE
++#define IS_MAP_ENABLE(_pAd) FALSE
++#endif
++
+ #ifdef A4_CONN
+ #include "a4_conn.h"
+ #endif
+--- a/mt_wifi/include/rtmp_def.h
++++ b/mt_wifi/include/rtmp_def.h
+@@ -2599,6 +2599,8 @@
+ #define WCID_SHIFT 0x200
+ #endif
+ 
++#ifndef MAC_ADDR_STR_LEN
+ #define MAC_ADDR_STR_LEN 17  /* in format of xx:xx:xx:xx:xx:xx*/
++#endif
+ 
+ #endif /* __RTMP_DEF_H__ */
+--- a/mt_wifi/mk/config/config_ap.mk
++++ b/mt_wifi/mk/config/config_ap.mk
+@@ -237,7 +237,7 @@
+ endif
+ #ifdef MWDS
+ ifeq ($(CONFIG_MWDS),y)
+-WFLAGS += -DMWDS -DROUTING_TAB_SUPPORT
++WFLAGS += -DMWDS -DA4_CONN -DROUTING_TAB_SUPPORT
+ endif
+ #endif /* MWDS*/
+ ifeq ($(CONFIG_MBSS_AS_WDS_AP_SUPPORT),y)
+--- a/mt_wifi/os/linux/rt_rbus_pci_util.c
++++ b/mt_wifi/os/linux/rt_rbus_pci_util.c
+@@ -68,7 +68,8 @@
+ 		PNDIS_PHYSICAL_ADDRESS phy_addr)
+ {
+ 	*va = kmalloc(Length, GFP_KERNEL);
+-	phy_addr = NULL;
++	if (phy_addr)
++		*phy_addr = 0;
+ }
+ 
+ void RTMP_FreeFirstTxBuffer(
+--- a/mt_wifi/protocol/be/mgmt_eht.c
++++ b/mt_wifi/protocol/be/mgmt_eht.c
+@@ -2191,8 +2191,9 @@
+ 			} else if ((peer->cap.rate.rx_nss_mcs[i].mcs0_7 != 0) && (peer->cap.rate.rx_nss_mcs[i].mcs0_7 < DOT11BE_MAX_STREAM)) {
+ 				peer_max_nss = peer->cap.rate.rx_nss_mcs[i].mcs0_7;
+ 				peer_max_mcs = BE_MCS_7;
+-			} else
+-				;
++			} else {
++				/* No action for this state. */
++			}
+ 		} else {
+ 			peer->cap.rate.rx_nss_mcs[i].mcs0_9 = eht_mcs_nss->eht_txrx_mcs_nss[i - 1].max_tx_rx_mcs0_9_nss & DOT11BE_MCS_NSS_MASK;
+ 			peer->cap.rate.tx_nss_mcs[i].mcs0_9 = (eht_mcs_nss->eht_txrx_mcs_nss[i - 1].max_tx_rx_mcs0_9_nss
+@@ -2214,8 +2215,9 @@
+ 			} else if ((peer->cap.rate.rx_nss_mcs[i].mcs0_9 != 0) && (peer->cap.rate.rx_nss_mcs[i].mcs0_9 < DOT11BE_MAX_STREAM)) {
+ 				peer_max_nss = peer->cap.rate.rx_nss_mcs[i].mcs0_9;
+ 				peer_max_mcs = BE_MCS_9;
+-			} else
+-				;
++			} else {
++				/* No action for this state. */
++			}
+ 		}
+ 	}
+ 	peer_max_nss = (peer_max_nss <= wlan_operate_get_tx_stream(wdev) ? peer_max_nss : wlan_operate_get_tx_stream(wdev));
+--- a/wlan_hwifi/chips.h
++++ b/wlan_hwifi/chips.h
+@@ -31,6 +31,11 @@
+ #ifndef __MTK_CHIP_H
+ #define __MTK_CHIP_H
+ #include <linux/list.h>
++#include <linux/pci.h>
++
++#ifndef PCI_IRQ_LEGACY
++#define PCI_IRQ_LEGACY PCI_IRQ_INTX
++#endif
+ #include "bus.h"
+ #include "core.h"
+ #include "mcu/mcu.h"
+--- a/wlan_hwifi/utility.h
++++ b/wlan_hwifi/utility.h
+@@ -32,18 +32,25 @@
+ #define __MTK_UTILITY_H__
+ 
+ #include "os/mt_linux.h"
++#include <linux/bitfield.h>
+ 
+ #define __mtk_bf_shf(x) (__builtin_ffsll(x) - 1)
+ 
++#ifndef field_prep
+ #define field_prep(_mask, _val)						\
+ 	({								\
+ 		((typeof(_mask))(_val) << __mtk_bf_shf(_mask)) & (_mask);	\
+ 	})
+ 
++#endif
++
++#ifndef field_get
+ #define field_get(_mask, _reg)						\
+ 	({								\
+ 		(typeof(_mask))(((_reg) & (_mask)) >> __mtk_bf_shf(_mask));	\
+ 	})
++
++#endif
+ 
+ #define SET_FIELD(_field, _val)	\
+ 	({	\

@@ -1,0 +1,32 @@
+Subject: mtwifi: reject MAP-only queries when their provider is disabled
+
+--- a/mt_wifi/os/linux/cfg80211/cfg80211.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211.c
+@@ -8058,6 +8058,7 @@
+ #ifdef WSC_INCLUDED
+ static int mtk_cfg80211_reply_wapp_wsc_profiles(struct wiphy *wiphy, const void *data, int len)
+ {
++#if defined(CONFIG_MAP_SUPPORT) && defined(CONFIG_STA_SUPPORT)
+ 	PRTMP_ADAPTER pAd;
+ 	UINT ifIndex = 0;
+ 	POS_COOKIE pObj;
+@@ -8087,6 +8088,9 @@
+ 			"mtk_cfg80211_vndr_cmd_reply_msg fail!\n");
+ 	os_free_mem(wsc_config);
+ 	return ret;
++#else
++	return -EOPNOTSUPP;
++#endif
+ }
+ #endif /* WSC_INCLUDED */
+ #endif /* WAPP_SUPPORT */
+@@ -8728,7 +8732,9 @@
+ 	misc_cap.max_num_of_cli = 64;
+ 	misc_cap.max_num_of_bss = 32;
+ 	misc_cap.num_of_bss = pAd->ApCfg.BssidNum;
++#ifdef CONFIG_MAP_SUPPORT
+ 	misc_cap.max_num_of_block_cli = BLOCK_LIST_NUM;
++#endif
+ 
+ 	MTWF_DBG(pAd, DBG_CAT_AP, CATAP_BCN, DBG_LVL_NOTICE,
+ 		"get MTK_NL80211_VENDOR_ATTR_GET_CAP_INFO_MISC_CAP\n");

@@ -1134,7 +1134,7 @@ qmi_proxy_loop_exit:
     return NULL;
 }
 
-static void qmidevice_detect(char **device_name, char **idproduct) {
+static void qmidevice_detect(char **device_name, char *idproduct) {
     struct dirent* ent = NULL;
     DIR *pDir;
 
@@ -1270,7 +1270,7 @@ int main(int argc, char *argv[]) {
     }
     
     if (cdc_wdm == NULL)
-        qmidevice_detect(&cdc_wdm, &getidproduct);
+        qmidevice_detect(&cdc_wdm, getidproduct);
     if (cdc_wdm == NULL) {
         dprintf("Fail to find any /dev/cdc-wdm device. break\n");
         return -1;

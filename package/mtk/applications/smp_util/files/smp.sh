@@ -1,8 +1,4 @@
 #!/bin/sh
-# SPDX-License-Identifier: GPL-2.0-only
-#
-# Copyright (C) 2022 MediaTek Inc.
-#
 
 OPTIMIZED_FOR="$1"
 CPU_LIST=`cat /proc/interrupts | sed -n '1p'`
@@ -28,54 +24,6 @@ CPU_RPS_ADD()
 	dbg2 "CPU${1}_RPS=\"\$CPU${1}_RPS $2\""
 }
 
-AN7563_MT7992()
-{
-	num_of_wifi=$1
-	storage=$2
-	DEFAULT_RPS=0
-
-	#Physical IRQ# setting
-	PCIe0=
-	eth_lan=69
-	eth_wan=70
-	if [ -d "/proc/warp_ctrl/warp0" ]; then
-		wifi1_irq=71
-		wifi2_irq=72
-		wifi3_irq=
-	else
-		wifi1_irq=71
-		wifi2_irq=72
-		wifi3_irq=
-	fi
-
-	# Please update the CPU binding in each cases.
-	# CPU#_AFFINITY="add binding irq number here"
-	# CPU#_RPS="add binding interface name here"
-	dbg "[AN7563_MT7992]"
-	if [ "$num_of_wifi" = "0" ]; then
-		CPU0_AFFINITY="$eth_lan"
-		CPU1_AFFINITY="$eth_wan"
-
-		CPU0_RPS=""
-		CPU1_RPS="$ethif1 $ethif2"
-	elif [ "$num_of_wifi" = "1" ]; then
-		CPU0_AFFINITY="$eth_lan $eth_wan"
-		CPU1_AFFINITY="$wifi1_irq"
-
-		CPU0_RPS="$ethif1 $ethif2 $wifi1 $wifi1_apcli0"
-		CPU1_RPS=""
-	elif [ "$num_of_wifi" = "2" ]; then
-		CPU0_AFFINITY="$wifi1_irq $wifi2_irq"
-		CPU1_AFFINITY="$eth_lan $eth_wan "
-
-		CPU0_RPS="$ethif1 $ethif2 $ethif3 $ethif4 $ethif5 $ethif6"
-		CPU1_RPS="$ethif1 $ethif2 $ethif3 $ethif4 $ethif5 $ethif6 $wifi1 $wifi2 $wifi1_apcli0 $wifi2_apcli0"
-
-	else
-		dbg "MT7992_whnat with $NUM_OF_WIFI Wi-Fi bands is not support"
-	fi
-}
-
 MT7990_whnat()
 {
 	num_of_wifi=$1
@@ -97,9 +45,9 @@ MT7990_whnat()
 		wifi2_irq=238
 		wifi3_irq=
 	else
-		wifi1_irq=237
-		wifi2_irq=238
-		wifi3_irq=
+        	wifi1_irq=237
+        	wifi2_irq=238
+        	wifi3_irq=
 	fi
 
 	# Please update the CPU binding in each cases.
@@ -166,9 +114,9 @@ MT7986_whnat()
 		wifi2_irq=237
 		wifi3_irq=
 	else
-		wifi1_irq=245
-		wifi2_irq=245
-		wifi3_irq=
+        	wifi1_irq=245
+        	wifi2_irq=245
+        	wifi3_irq=
 	fi
 
 	# Please update the CPU binding in each cases.
@@ -716,18 +664,19 @@ get_wifi_if_name()
 		wifi2_apcli="apclii"
 		wifi2_wds="wdsi"
 		wifi2_mesh="meshi"
-		wifi3="rax0"
-		wifi3_prefix="rax"
-		wifi3_apcli="apclix"
-		wifi3_wds="wdsx"
-		wifi3_mesh="meshx"
+		wifi3="rae0"
+		wifi3_prefix="rae"
+		wifi3_apcli="apclie"
+		wifi3_wds="wdse"
+		wifi3_mesh="meshe"
+
 	else
 		#wifi_if1s=`l1dat idx2if 1`
 		#wifi_if2s=`l1dat idx2if 2`
 		#wifi_if3s=`l1dat idx2if 3`
 		board=$(board_name)
 		case $board in
-		*7988*|*7523*)
+		*7988*)
 			wifi_if1s=`l1dat zone2if dev00`
 			wifi_if2s=`l1dat zone2if dev01`
 			wifi_if3s=`l1dat zone2if dev02`
@@ -841,13 +790,12 @@ module_exist()
 
 setup_model()
 {
-	board=$(board_name 2>/dev/null || echo "unknown")
+	board=$(board_name)
 	num_of_wifi=$(get_wifi_num)
 	mt_whnat_en=$(module_exist "mt_whnat")
 
 	case $board in
-	hiveton,h5000m|\
-	*7987*|*7988*)
+	*7988*)
 		MT7990_whnat $num_of_wifi
 		;;
 	*7986*)
@@ -855,9 +803,6 @@ setup_model()
 		;;
 	*7981*)
 		MT7981_whnat $num_of_wifi
-		;;
-	*7523*)
-		AN7563_MT7992 $num_of_wifi
 		;;
 	*)
 		if [ "$NUM_OF_CPU" = "4" ]; then
@@ -874,15 +819,14 @@ setup_model()
 				fi
 			fi
 		fi
-		#MT7990_whnat $num_of_wifi
+		MT7990_whnat $num_of_wifi
 		;;
 	esac
 }
 
 get_virtual_irq()
 {
-	# physical irq # position in /proc/interrups may vary with the number of CPU up
-	PHY_POS=`expr $NUM_OF_CPU + 3`
+	PHY_POS=`expr $NUM_OF_CPU + 3` #physical irq # position in /proc/interrups may vary with the number of CPU up
 	target_phy_irq=$1
 	cat /proc/interrupts | sed 's/:/ /g'| awk '$1 ~ /^[0-9]+$/' | while read line
 	do
@@ -899,7 +843,6 @@ get_virtual_irq()
 disable_gro_fraglist()
 {
 	for iface in /sys/class/net/*; do
-		[ -d "$iface" ] || continue
 		iface=$(basename "$iface")
 		if ethtool -k "$iface" | grep -q "rx-gro-list"; then
 			ethtool -K "$iface" rx-gro-list off

@@ -1,5 +1,8 @@
 #include "QMIThread.h"
 #include "query_pcie_mode.h"
+
+/* GCC 14: defined in main.c, used below. */
+int get_private_gateway(char *outgateway);
 extern char *strndup(const char *__string, size_t __n);
 
 //2021-03-24 willa.liu@fibocom.com changed begin for support mantis 0071817

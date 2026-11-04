@@ -77,7 +77,7 @@ function d8021xd_chk(devname, prefix, vif, enable)
         nixio.syslog("debug", "mtwifi: stop 8021xd")
     end
 
-    if enable then
+    if enable and mtkwifi.exists("/usr/bin/8021xd") then
         local profile = mtkwifi.search_dev_and_profile()[devname]
         local cfgs = mtkwifi.load_profile(profile)
         local auth_mode = cfgs.AuthMode
@@ -175,17 +175,13 @@ function mtwifi_up(devname)
             -- for non-dbdc mode,
             -- we have to bring up main_ifname first, main_ifname will create all other vifs.
             if mtkwifi.exists("/sys/class/net/"..dev.main_ifname) then
-                if cfgs.ApEnable ~= nil and cfgs.ApEnable == "0" then
+                if cfgs.DevEnable ~= nil and cfgs.DevEnable == "0" then
                     nixio.syslog("info", "mtwifi_up: "..devname.." is disabled")
                     return
                 end
                 nixio.syslog("info", "mtwifi_up: ifconfig "..dev.main_ifname.." up")
-                if mtkwifi.exists("/etc/init.d/wpad") then
-                    os.execute("/etc/init.d/wpad start")
-                else
-                    os.execute("ifconfig "..dev.main_ifname.." up")
-                    add_vif_into_lan(dev.main_ifname)
-                end
+                os.execute("ifconfig "..dev.main_ifname.." up")
+                add_vif_into_lan(dev.main_ifname)
             else
                 nixio.syslog("err", "mtwifi_up: main_ifname "..dev.main_ifname.." missing, quit!")
                 return
@@ -202,9 +198,6 @@ function mtwifi_up(devname)
             or string.match(vif, esc(dev.mesh_ifname).."[0-9]+"))
             then
                 nixio.syslog("debug", "mtwifi_up: ifconfig "..vif.." up")
-                if mtkwifi.exists("/etc/init.d/wpad") then
-                    os.execute("/etc/init.d/wpad start")
-                else
                 os.execute("ifconfig "..vif.." up")
             end
 
@@ -232,9 +225,6 @@ function mtwifi_up(devname)
 
     -- for ax7800 project, close the ra0.
     if string.find(dev.profile_path, "ax7800") then
-    	os.execute("ifconfig ra0 down")
-    end
-    if string.find(dev.profile_path, "ax5400") then
         os.execute("ifconfig ra0 down")
     end
 end
@@ -274,7 +264,6 @@ function mtwifi_down(devname)
             or string.match(vif, esc(dev.mesh_ifname).."[0-9]+")
             then
                 nixio.syslog("debug", "mtwifi_down: ifconfig "..vif.." down")
-                os.execute("killall hostapd")
                 os.execute("ifconfig "..vif.." down")
                 del_vif_from_lan(vif)
             -- else nixio.syslog("debug", "mtwifi_down: skip "..vif..", prefix not match "..pre)
@@ -356,9 +345,6 @@ function mtwifi_reload(devname)
     if string.find(dev.profile_path, "ax7800") then
     	os.execute("ifconfig ra0 down")
     end
-    if string.find(dev.profile_path, "ax5400") then
-        os.execute("ifconfig ra0 down")
-    end
 end
 
 function mtwifi_restart(devname)
@@ -367,24 +353,10 @@ function mtwifi_restart(devname)
     local mtkwifi = require("mtkwifi")
     local devs, l1parser = mtkwifi.__get_l1dat()
 
-    -- for AX8400 add 5G interface
-    local isRoot = false
-    if devname then
-        local dev, path, diff
-        local is7915 = false
-        dev = devs.devname_ridx[devname]
-        path = dev.profile_path
-        is7915 = string.find(path, "mt7915")
-        diff =  mtkwifi.diff_profile(path)
-        if is7915 and diff.BssidNum then
-            isRoot = true
-        end
-    end
-
     nixio.syslog("debug", "mtwifi_restart called!")
 
     -- if wifi driver is built-in, it's necessary action to reboot the device
-    if mtkwifi.exists("/sys/module/mt_wifi") == false or isRoot  then
+    if mtkwifi.exists("/sys/module/mt_wifi") == false then
         os.execute("echo reboot_required > /tmp/mtk/wifi/reboot_required")
         return
     end

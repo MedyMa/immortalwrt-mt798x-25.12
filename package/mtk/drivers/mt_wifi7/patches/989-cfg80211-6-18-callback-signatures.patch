@@ -1,0 +1,112 @@
+--- a/mt_wifi/os/linux/cfg80211/cfg80211.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211.c
+@@ -1546,6 +1546,9 @@
+  */
+ static int CFG80211_OpsWiphyParamsSet(
+ 	IN struct wiphy						*pWiphy,
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	int radio_idx,
++#endif
+ 	IN UINT32							Changed)
+ {
+ 	struct _RTMP_ADAPTER *pAd;
+@@ -3028,8 +3031,15 @@
+ static int CFG80211_OpsChangeBeacon(
+ 	struct wiphy *pWiphy,
+ 	struct net_device *netdev,
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	struct cfg80211_ap_update *update)
++#else
+ 	struct cfg80211_beacon_data *info)
+-{
++#endif
++{
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	struct cfg80211_beacon_data *info = &update->beacon;
++#endif
+ 	struct _RTMP_ADAPTER *pAd;
+ 	struct CMD_RTPRIV_IOCTL_80211_BEACON bcn;
+ 	UCHAR *beacon_head_buf = NULL;
+@@ -3289,7 +3299,11 @@
+ 	struct wiphy *pWiphy,
+ 	struct net_device *netdev,
+ 	struct cfg80211_chan_def *chandef,
+-	u32 cac_time_ms)
++	u32 cac_time_ms
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	, int link_id
++#endif
++)
+ {
+ 	struct _RTMP_ADAPTER *pAd = NULL;
+ 	struct DOT11_H *pDot11h = NULL;
+@@ -3297,6 +3311,9 @@
+ 	UCHAR BandIdx;
+ 	UCHAR rd_region = 0;
+ 	INT ret = FALSE;
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	(void)link_id;
++#endif
+ 
+ 	MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_CHN, DBG_LVL_NOTICE, "80211> ==>\n");
+ 
+@@ -3365,12 +3382,19 @@
+ 
+ static void CFG80211_OpsEndCac(
+ 	struct wiphy *pWiphy,
+-	struct net_device *netdev)
++	struct net_device *netdev
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	, unsigned int link_id
++#endif
++)
+ {
+ 	struct _RTMP_ADAPTER *pAd = NULL;
+ 	struct DOT11_H *pDot11h = NULL;
+ 	PDFS_PARAM pDfsParam = NULL;
+ 	UCHAR BandIdx;
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	(void)link_id;
++#endif
+ 
+ 	MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_CHN, DBG_LVL_NOTICE, "80211> ==>\n");
+ 
+@@ -3841,6 +3865,9 @@
+ 
+ static int CFG80211_OpsSetAntenna(
+ 	struct wiphy *wiphy,
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	int radio_idx,
++#endif
+ 	u32 tx_ant,
+ 	u32 rx_ant)
+ {
+@@ -3851,6 +3878,9 @@
+ 	u8 rx_ant_count = 0;
+ 	u32 ant_bitmap = 0;
+ 	CMD_RTPRIV_IOCTL_80211_ANTENNA ant_cnt;
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	(void)radio_idx;
++#endif
+ 
+ 	MTWF_DBG(NULL, DBG_CAT_HW, CATHW_PHY, DBG_LVL_INFO, "80211> ==>\n");
+ 
+@@ -3887,12 +3917,18 @@
+ 
+ static int CFG80211_OpsGetAntenna(
+ 	struct wiphy *wiphy,
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	int radio_idx,
++#endif
+ 	u32 *tx_ant,
+ 	u32 *rx_ant)
+ {
+ 	int ret = 0;
+ 	PRTMP_ADAPTER pAd = NULL;
+ 	CMD_RTPRIV_IOCTL_80211_ANTENNA ant_cnt;
++#if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 18, 0) <= CFG_CFG80211_VERSION)
++	(void)radio_idx;
++#endif
+ 
+ 	memset(&ant_cnt, 0, sizeof(CMD_RTPRIV_IOCTL_80211_ANTENNA));
+ 	MAC80211_PAD_GET(pAd, wiphy);

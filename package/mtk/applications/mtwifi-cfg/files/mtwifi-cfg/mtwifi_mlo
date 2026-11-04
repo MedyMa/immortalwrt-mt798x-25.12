@@ -11,7 +11,7 @@ local defs = require "mtwifi_defs"
 local STATE_DIR = "/etc/mtwifi-cfg"
 local STATE_FILE = STATE_DIR .. "/mlo-groups.json"
 local LOCK_FILE = "/var/lock/mtwifi-mlo-manager.lock"
-local MAX_MANAGED_GROUP = 16
+local MAX_MANAGED_GROUP = 1
 local lock_fd
 local MAX_REQUEST = 4096
 local OPERATION_TIMEOUT = 180
@@ -400,35 +400,19 @@ local function security_signature(iface)
 	local allowed_auth = authmode == "WPA3PSK" or authmode == "OWE"
 	local allowed_cipher = { AES = true, CCMP128 = true, CCMP256 = true, GCMP128 = true, GCMP256 = true }
 	if not allowed_auth or not allowed_cipher[cipher] then return nil end
-	local key = tostring(iface.key or "")
-	local pmf_mfpc, pmf_mfpr, pmf_sha256 = "0", "0", "0"
-	local ieee80211w = tostring(iface.ieee80211w)
-	if ieee80211w ~= "0" then
-		if ieee80211w == "1" or authmode == "WPA2PSKWPA3PSK" or
-			authmode == "WPA2PSKWPA3PSK,WPA3PSK_EXT" then
-			pmf_mfpc, pmf_mfpr, pmf_sha256 = "1", "0", "0"
-		elseif ieee80211w == "2" or authmode == "OWE" or authmode == "WPA3PSK,WPA3PSK_EXT" or
-			authmode == "WPA3PSK_EXT" or authmode == "WPA3PSK" or authmode == "WPA3" or authmode == "WPA3-192" then
-			pmf_mfpc, pmf_mfpr = "1", "1"
-			pmf_sha256 = authmode == "WPA3" and "1" or "0"
-		end
+	local pmf_mfpc = tostring(defs.vif_cfgs.PMFMFPC or "0")
+	local pmf_mfpr = tostring(defs.vif_cfgs.PMFMFPR or "0")
+	local pmf_sha256 = tostring(defs.vif_cfgs.PMFSHA256 or "0")
+	if authmode == "OWE" or authmode == "WPA3PSK" then
+		pmf_mfpc, pmf_mfpr, pmf_sha256 = "1", "1", "0"
+	elseif authmode == "WPA2PSKWPA3PSK" then
+		pmf_mfpc, pmf_mfpr, pmf_sha256 = "1", "0", "0"
 	end
-	local radius = authmode == "WPA" or authmode == "WPA2" or authmode == "WPA1WPA2" or
-		authmode == "WPA3WPA2" or authmode == "WPA3" or authmode == "WPA3-192"
+	-- This branch's AP writer uses shared profile defaults for 802.1X and
+	-- maps only auth mode, cipher, PSK and the PMF values above.
 	local values = {
-		authmode, cipher, key, pmf_mfpc, pmf_mfpr, pmf_sha256,
-		radius and tostring(iface.nasid or "") or "",
-		radius and tostring(iface.auth_secret or "") or "",
-		radius and tostring(iface.acct_secret or "") or "",
-		radius and tostring(iface.ownip or "") or "",
-		radius and tostring(iface.own_radius_port or "") or "",
-		radius and tostring(iface.rsn_preauth or "") or "",
-		radius and tostring(iface.auth_port or "1812") or "1812",
-		radius and tostring(iface.auth_server or "0") or "0",
-		radius and tostring(iface.acct_server or "0") or "0",
-		radius and tostring(iface.acct_port or "1813") or "1813",
-		radius and ((authmode == "WPA" or authmode == "WPA2") and "1" or "0") or "0",
-		not radius and tostring(iface.nasid or "") or ""
+		authmode, cipher, tostring(iface.key or ""), pmf_mfpc, pmf_mfpr,
+		pmf_sha256, scalar(defs.vif_cfgs.IEEE8021X) or "0"
 	}
 	return table.concat(values, "\0")
 end
@@ -505,8 +489,13 @@ local function build_status()
 	local inventory = {}
 	c:foreach("wireless", "wifi-iface", function(iface)
 		if iface.mode ~= "ap" or not iface.device then return end
+		if c:get("wireless", iface.device, "type") ~= "mtwifi" then return end
+		local legacy = (iface.mldgroup == nil or iface.mldgroup == "") and disabled(iface.mlo)
 		local device, htmode = device_info(c, iface[".name"])
-		if not device then return end
+		local supported = device ~= nil
+		if not supported and not legacy then return end
+		device = device or iface.device
+		htmode = htmode or c:get("wireless", device, "htmode") or ""
 		local group, valid = group_value(iface.mldgroup, iface.mlo)
 		local rec = valid and owned[group] or nil
 		inventory[#inventory + 1] = {
@@ -514,7 +503,8 @@ local function build_status()
 			band = band_name(c, device, htmode), ssid = scalar(iface.ssid) or "",
 			grouped = not valid or (group or 0) > 0,
 			managed = rec ~= nil,
-			eligible = not disabled(iface.wds),
+			eligible = supported and not disabled(iface.wds),
+			legacy = legacy,
 			disabled = disabled(iface.disabled) or disabled(c:get("wireless", device, "disabled"))
 		}
 	end)

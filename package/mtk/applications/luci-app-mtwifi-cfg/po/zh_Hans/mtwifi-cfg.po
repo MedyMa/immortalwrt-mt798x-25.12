@@ -1,14 +1,14 @@
 msgid ""
 msgstr "Content-Type: text/plain; charset=UTF-8\n"
 
-msgid "Enable 1024-QAM"
-msgstr "启用 1024-QAM"
-
-msgid "802.11ax WiFi6 Only"
-msgstr "只适合 802.11ax WiFi6"
-
 msgid "Target Wake Time"
 msgstr "目标唤醒时间（TWT）"
+
+msgid "EHT Restricted TWT"
+msgstr "EHT 受限 TWT"
+
+msgid "Controls the vendor EHT Restricted TWT capability. This is separate from HE Target Wake Time; leave unset to preserve the profile value."
+msgstr "控制厂商 EHT 受限 TWT 能力。该选项独立于 HE 目标唤醒时间；留空可保留配置文件中的值。"
 
 msgid "MU-MIMO DL"
 msgstr "下行 MU-MIMO"
@@ -31,21 +31,6 @@ msgstr "自动块确认"
 msgid "U-APSD"
 msgstr "U-APSD 省电模式"
 
-msgid "Force CCMP/GCMP-256 (AES)"
-msgstr "强制使用 CCMP/GCMP-256 (AES)"
-
-msgid "Zero-Wait DFS"
-msgstr "零等待 DFS"
-
-msgid "Dynamic Frequency Selection (DFS)"
-msgstr "动态频率选择（DFS）"
-
-msgid "Enable or disable IEEE 802.11h support (DFS)"
-msgstr "启用或禁用 IEEE 802.11h 以支持（DFS）"
-
-msgid "Advanced Dynamic Frequency Selection (DFS) technology is designed to seamlessly switch DFS channels without interrupting client connections."
-msgstr "高级动态频率选择（DFS）技术，旨在‌无缝切换 DFS 信道而不中断客户端连接‌。"
-
 msgid "Kick low RSSI station threshold"
 msgstr "弱信号剔除阈值"
 
@@ -55,129 +40,125 @@ msgstr "弱信号接入阈值"
 msgid "Wireless HWNAT"
 msgstr "无线硬件加速"
 
-msgid "Default %d"
-msgstr "默认 %d"
+msgid "Transmit Burst"
+msgstr "连续发送"
 
-msgid "Multi-Link Operation (MLO)"
-msgstr "多链路（MLO）"
+msgid "Transmit Preamble"
+msgstr "发送前导码"
 
-msgid "Enable MWDS"
-msgstr "启用 MWDS"
+msgid "Long"
+msgstr "长"
+
+msgid "Short"
+msgstr "短"
+
+msgid "Auto"
+msgstr "自动"
+
+msgid "IEEE 802.11h (DFS)"
+msgstr "IEEE 802.11h（DFS）"
+
+msgid "DFS"
+msgstr "动态频率选择（DFS）"
+
+msgid "Control the vendor DfsEnable profile field separately from IEEE 802.11h. Leave unset to preserve the profile setting."
+msgstr "单独控制厂商配置中的 DfsEnable 字段，与 IEEE 802.11h 分开设置。留空可保留配置文件中的设置。"
+
+msgid "Zero-Wait DFS"
+msgstr "零等待 DFS"
+
+msgid "Set the vendor zero-wait fields. MAC Repeater disables the active DfsZeroWait flag. Leave unset to preserve all profile values."
+msgstr "设置厂商零等待字段。启用 MAC Repeater 时，活动的 DfsZeroWait 标志会被禁用。留空可保留配置文件中的全部值。"
+
+msgid "Enabled"
+msgstr "启用"
+
+msgid "Disabled"
+msgstr "禁用"
 
 msgid "Wireless configuration error"
 msgstr "无线网络设置错误"
 
 msgid "At least one MBSSID needs to be reserved"
-msgstr "至少需要保留1个 MBSSID"
+msgstr "至少需要保留1个MBSSID"
 
-msgid "Configure AP its own IP address"
-msgstr "配置 AP 自身的 IP 地址"
+msgid "Enable MLO"
+msgstr "启用 MLO"
 
-msgid "Configure AP its own Port"
-msgstr "配置 AP 自身的端口"
+msgid "MLO is an advanced feature for compatible clients and is off by default. When enabled, radios in the same group must use the same network name, encryption method, and password."
+msgstr "MLO 是面向兼容客户端的高级功能，默认关闭。开启后，同一分组的无线名称、加密方式和密码必须一致。"
 
-msgid "own_ip_addr is global setting ,in this point, let all mbss set the same ip addr for safe."
-msgstr "own_ip_addr 是全局设置，基于这一点，为了安全起见，所有 MBSS 都应设置为相同的 IP 地址。"
+msgid "MLO Group"
+msgstr "MLO 分组"
 
-msgid "own_radius_port is also global setting , let all mbss set the same port."
-msgstr "own_radius_port 同是全局设置，所有 MBSS 也应设置为相同的端口。"
+msgid "Default: 1 when enabled"
+msgstr "启用时默认：1"
 
-msgid "Short Preamble"
-msgstr "短前导码"
+msgid "Choose the MLO group to join. Radios in the same group use the same network name and security settings."
+msgstr "选择要加入的 MLO 分组；同一分组使用相同的无线名称和安全设置。"
 
-msgid "WDS Mode"
-msgstr "WDS 模式"
+msgid "Use profile setting"
+msgstr "使用配置文件设置"
 
-msgid "Repeater Mode"
-msgstr "中继模式（WDS）"
+msgid "HE LDPC (all AP BSSIDs)"
+msgstr "HE LDPC（所有 AP BSSID）"
 
-msgid "Bridge Mode"
-msgstr "桥接模式（WDS）"
+msgid "Applies one HeLdpc value to the radio’s AP BSSIDs. Leave unset to preserve the profile tokens."
+msgstr "将同一 HeLdpc 值应用于此射频的所有 AP BSSID。留空可保留配置文件中的各项设置。"
 
-msgid "Lazy Mode"
-msgstr "懒人模式（WDS）"
+msgid "MLO group must be between 0 and 16"
+msgstr "MLO 分组必须介于 0 和 16 之间"
 
-msgid "WDS mode is only available between MTK devices."
-msgstr "WDS 模式仅在 MTK 设备之间可用。"
+msgid "MLO group %s requires matching SSID and security settings"
+msgstr "MLO 分组 %s 中的接口必须使用相同的 SSID 和安全设置"
 
-msgid "WDS PHY Mode"
-msgstr "WDS PHY 模式"
+msgid "VHT 1024-QAM (5 GHz)"
+msgstr "VHT 1024-QAM（5 GHz）"
 
-msgid "If GREENFIELD seems to be unstable,try to use OFDM instead.HE/EHT is only available for 11AX/11BE devices."
-msgstr "如果使用 GREENFIELD 不稳定，请尝试改用 OFDM。HE/EHT 仅适用于 11AX/11BE 设备。"
+msgid "Vendor VHT extension; this is not HE or EHT 1024-QAM. Leave unset to preserve the profile setting."
+msgstr "厂商 VHT 扩展；这不是 HE 或 EHT 1024-QAM。留空可保留配置文件中的设置。"
 
-msgid ""
-"Where Wi-Fi Multimedia (WMM) Mode QoS is disabled, clients may be limited to "
-"802.11a/802.11g rates."
-msgstr ""
-"如果禁用 Wi-Fi 多媒体 （WMM） 模式 QoS，则客户端的速率可能限制为 "
-"802.11a/802.11g。"
+msgid "MLO Group"
+msgstr "MLO 分组"
 
-msgid "WNMNotify"
-msgstr "WNM 通知"
+msgid "0 disables MLO; interfaces in the same group must use identical SSID and security settings. Leave unset to preserve the profile setting."
+msgstr "0 表示禁用 MLO；同组接口必须使用相同的 SSID 和安全设置。留空可保留配置文件中的设置。"
 
-msgid "802.11v: Enable WNM notification."
-msgstr "802.11v: 启用 WNM 通知。"
+msgid "Use profile setting"
+msgstr "使用配置文件设置"
 
-msgid "The client has successfully disconnected"
-msgstr "客户端已成功断开"
+msgid "HE LDPC (all AP BSSIDs)"
+msgstr "HE LDPC（所有 AP BSSID）"
 
-msgid "Failed to disconnect client: %s"
-msgstr "断开客户端失败：%s"
+msgid "Applies one HeLdpc value to the radio’s AP BSSIDs. Leave unset to preserve the profile tokens."
+msgstr "将同一 HeLdpc 值应用于此射频的所有 AP BSSID。留空可保留配置文件中的各项设置。"
 
-msgid "Disconnect client: %s"
-msgstr "断开客户端：%s"
+msgid "MLO group must be between 0 and 16"
+msgstr "MLO 分组必须介于 0 和 16 之间"
 
-msgid "iwpriv failed: "
-msgstr "iwpriv 失败："
+msgid "MLO group %s requires matching SSID and security settings"
+msgstr "MLO 分组 %s 中的接口必须使用相同的 SSID 和安全设置"
 
-msgid "mwctl failed: "
-msgstr "mwctl 失败："
+msgid "VHT 1024-QAM (5 GHz)"
+msgstr "VHT 1024-QAM（5 GHz）"
 
-msgid "MLD: %s"
-msgstr "MLD：%s"
+msgid "Vendor VHT extension; this is not HE or EHT 1024-QAM. Leave unset to preserve the profile setting."
+msgstr "厂商 VHT 扩展；这不是 HE 或 EHT 1024-QAM。留空可保留配置文件中的设置。"
 
-msgid "(%d links)"
-msgstr "（%d 链路）"
+msgid "MAC Address"
+msgstr "MAC 地址"
 
-msgid "Link %d"
-msgstr "链路 %d"
+msgid "driver default (%s)"
+msgstr "驱动默认（%s）"
 
-msgid "Enable Multi-AP functionality"
-msgstr "启用 Multi-AP"
+msgid "no override"
+msgstr "不覆盖"
 
-msgid "Backhaul BSS"
-msgstr "回传 AP (Backhaul BSS)"
+msgid "Override default MAC address - the range of usable addresses might be limited by the driver"
+msgstr "覆盖默认 MAC 地址 - 可用地址的范围可能受限于驱动"
 
-msgid "Fronthaul BSS"
-msgstr "前传 AP (Fronthaul BSS)"
-
-msgid "Both Backhaul BSS and Fronthaul BSS"
-msgstr "前传 AP + 回传 AP"
-
-msgid "Back to settings"
-msgstr "返回设置"
-
-msgid "Wireless Hairpin"
-msgstr "无线端口回流（Hairpin）"
-
-msgid "It is primarily designed to address the issue of inability to communicate directly between clients within the same WiFi network."
-msgstr "主要用于解决同一 WiFi 下，客户端之间无法直接通信的问题。"
-
-msgid "Multi-Link Operation (MLO), enables simultaneous use of multiple radio links for improved performance and reliability."
-msgstr "多链路操作（MLO）使得可以同时使用多个无线链路，从而提高性能和可靠性。"
-
-msgid "MWDS feature, used to process those 4-addr of connected APClient or STA."
-msgstr "MWDS功能，用于处理已连接的 AP 客户端或 STA 的4地址帧。"
-
-msgid "VLAN ID"
-msgstr "VLAN ID"
-
-msgid "VLAN ID for bridge VLAN filtering. Set this to match your network VLAN configuration. Common values: 7 (guest), 70 (IoT), 73 (corporate), 74 (lab)."
-msgstr "用于网桥 VLAN 过滤的 VLAN ID。请将其设置为与您的网络 VLAN 配置相匹配。常见值：7（访客）、70（物联网）、73（企业）、74（实验室）。"
-
-msgid "VLAN ID must be between 1 and 4094"
-msgstr "VLAN ID 必须介于1 和 4094 之间"
+msgid "Enables The 802.11k standard provides information to discover the best available access point"
+msgstr "启用 802.11k 自动寻找发现最佳可用接入点的信息"
 
 msgid "Another MLO operation is in progress"
 msgstr "另一个 MLO 操作正在进行"
@@ -425,8 +406,11 @@ msgstr "操作"
 msgid "MLO status"
 msgstr "MLO 状态"
 
-msgid "Enable MLO"
-msgstr "启用 MLO"
+msgid "Restore"
+msgstr "恢复内容"
+
+msgid "Change summary"
+msgstr "变更摘要"
 
 msgid "Manage"
 msgstr "管理"
@@ -446,8 +430,20 @@ msgstr "无线配置仍在应用或恢复；恢复记录已保存，请稍后查
 msgid "MLO could not be applied; the previous wireless settings were restored."
 msgstr "MLO 应用失败，已恢复之前的无线设置。"
 
-msgid "Restore"
-msgstr "恢复内容"
+msgid "Legacy MLO settings"
+msgstr "旧版 MLO 配置"
 
-msgid "Change summary"
-msgstr "变更摘要"
+msgid "Legacy MLO flags occupy these radios. Turn off the old group before choosing radios."
+msgstr "旧版 MLO 配置占用了这些射频。请先关闭旧组，再选择需要的频段。"
+
+msgid "Stage legacy MLO removal"
+msgstr "关闭旧版 MLO 配置"
+
+msgid "Save this interface, then choose Save & Apply. Reopen it to select MLO radios."
+msgstr "请先保存此接口并点击“保存并应用”，再重新打开以选择 MLO 射频。"
+
+msgid "Wireless settings changed. Reload this page before clearing legacy MLO flags."
+msgstr "无线配置已变化，请刷新页面后再清理旧版 MLO 配置。"
+
+msgid "Only legacy MLO flags are cleared. Wireless names, passwords and network bindings are preserved."
+msgstr "此操作仅关闭旧版 MLO 标志，保留现有无线名称、密码和网络绑定。"

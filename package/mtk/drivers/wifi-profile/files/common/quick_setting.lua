@@ -280,7 +280,6 @@ function __set_wifi_security(cfgs, diff, device, devname)
             local vif = {}
             vif.idx = i
             vif.vifname = device.ext_ifname..tostring(i-1)
-            vif.ext_ifname = device.ext_ifname
             vif.AuthMode = auth_new1 and auth_new1[i] or auth_old1[i]
             vif.EncrypType = encr_new1 and encr_new1[i] or encr_old1[i]
             vif.KeyID = keyid_new1 and keyid_new1[i] or keyid_old1[i]
@@ -404,10 +403,9 @@ function __set_wifi_security(cfgs, diff, device, devname)
                 iwpriv %s set RADIUS_Server=%s;
                 iwpriv %s set RADIUS_Port=%s;
                 iwpriv %s set RADIUS_Key=%s;
-                iwpriv %s set IEEE8021X=0;
-                8021xd -p %s -i %s -d 3;]],
+                iwpriv %s set IEEE8021X=0;]],
             vif.vifname, vif.vifname, vif.EncrypType, vif.vifname, vif.RADIUS_Server,
-            vif.vifname,vif.RADIUS_Port, vif.vifname, vif.RADIUS_Key, vif.vifname, vif.ext_ifname, vif.vifname)
+            vif.vifname,vif.RADIUS_Port, vif.vifname, vif.RADIUS_Key, vif.vifname)
         elseif vif.AuthMode == "WPA3" then
             commands = string.format([[
                 iwpriv %s set AuthMode=WPA3;
@@ -601,7 +599,6 @@ function match_dev_parm_no_ssid(key)
     local dat_iw_table = {
         BeaconPeriod = "BeaconPeriod",
         TxPower = "TxPower",
-        SREnable = "srcfgsren"
     }
 
     return dat_iw_table[key]

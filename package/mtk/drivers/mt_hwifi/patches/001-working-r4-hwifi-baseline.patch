@@ -1,0 +1,419 @@
+Subject: Preserve the 24.10 R4 hWiFi source baseline
+
+--- a/mt_wifi/ap/ap.c
++++ b/mt_wifi/ap/ap.c
+@@ -34,10 +34,6 @@
+ #if defined(VOW_SUPPORT) && defined(CONFIG_AP_SUPPORT)
+ extern VOID vow_avg_pkt_len_reset(struct _RTMP_ADAPTER *ad);
+ extern VOID vow_avg_pkt_len_calculate(struct _MAC_TABLE_ENTRY *entry);
+-#endif
+-
+-#ifdef CONFIG_6G_SUPPORT
+-static INT ap_6g_cfg_deinit(RTMP_ADAPTER *pAd, struct wifi_dev *wdev);
+ #endif
+ 
+ #ifdef IAPP_SUPPORT
+@@ -573,9 +569,6 @@
+ VOID APShutdown(RTMP_ADAPTER *pAd)
+ {
+ 	BSS_STRUCT *pMbss = &pAd->ApCfg.MBSSID[MAIN_MBSSID];
+-#ifdef CONFIG_6G_SUPPORT
+-	UINT32 idx;
+-#endif
+ 
+ 	MTWF_DBG(pAd, DBG_CAT_INTF, CATINTF_DOWN, DBG_LVL_INFO, "--->\n");
+ #ifdef MT_MAC
+@@ -585,10 +578,6 @@
+ #else
+ 	MlmeRadioOff(pAd);
+ 	APStop(pAd, pMbss, AP_BSS_OPER_ALL);
+-#endif
+-#ifdef CONFIG_6G_SUPPORT
+-	for (idx = 0; idx < pAd->ApCfg.BssidNum && idx < MAX_MBSSID_NUM(pAd); idx++)
+-		ap_6g_cfg_deinit(pAd, &pAd->ApCfg.MBSSID[idx].wdev);
+ #endif
+ 	/*remove sw related timer and table*/
+ 	rtmp_ap_exit(pAd);
+@@ -759,17 +748,11 @@
+ }
+ 
+ #ifdef CONFIG_6G_SUPPORT
+-INT ap_6g_cfg_init(RTMP_ADAPTER *pAd, struct wifi_dev *wdev)
++static INT ap_6g_cfg_init(RTMP_ADAPTER *pAd, struct wifi_dev *wdev)
+ {
+ 	NDIS_STATUS Status = NDIS_STATUS_SUCCESS;
+ 	pap_6g_cfg pap_cfg = &wdev->ap6g_cfg;
+ 	pdiscov_iob dsc_iob = &pap_cfg->dsc_iob;
+-
+-	if (dsc_iob->pkt_buf) {
+-		MTWF_DBG(pAd, DBG_CAT_INTF, CATINTF_UP, DBG_LVL_INFO,
+-			 "discovery pkt_buf already initialized: 0x%p\n", dsc_iob->pkt_buf);
+-		return TRUE;
+-	}
+ 
+ 	NdisZeroMemory(pap_cfg, sizeof(ap_6g_cfg));
+ 
+@@ -786,14 +769,8 @@
+ 		Status = MlmeAllocateMemory(pAd, (PVOID)&dsc_iob->pkt_buf);
+ 		MTWF_DBG(pAd, DBG_CAT_INTF, CATINTF_UP, DBG_LVL_INFO,
+ 				 "alloc discovery pkt_buf 0x%p\n", dsc_iob->pkt_buf);
+-		if (Status != NDIS_STATUS_SUCCESS || !dsc_iob->pkt_buf) {
+-			if (dsc_iob->pkt_buf) {
+-				MlmeFreeMemory(dsc_iob->pkt_buf);
+-				dsc_iob->pkt_buf = NULL;
+-			}
+-			NdisFreeSpinLock(&dsc_iob->pkt_lock);
++		if (Status == NDIS_STATUS_FAILURE)
+ 			return FALSE;
+-		}
+ 	} else {
+ 		MTWF_DBG(pAd, DBG_CAT_INTF, CATINTF_UP, DBG_LVL_ERROR,
+ 		"discovery pkt_buf allocated!\n");
+@@ -1272,7 +1249,8 @@
+ 	/* Tx Power Percentage value via profile */
+ 	TxPowerDropCtrl(pAd, pAd->CommonCfg.ucTxPowerPercentage, ucBandIdx);
+ 
+-	/* Keep the hardware default: profile-startup CCK stream control is unsupported. */
++	/* Config Tx CCK Stream */
++	TxCCKStreamCtrl(pAd, pAd->CommonCfg.CCKTxStream, ucBandIdx);
+ 
+ #if defined(TX_POWER_CONTROL_SUPPORT) || defined(TX_POWER_CONTROL_SUPPORT_V2)
+ 	if (arch_ops && arch_ops->arch_txpower_boost)
+@@ -9451,24 +9429,11 @@
+ 
+ 	if (wifi_sys_open(wdev) != TRUE) {
+ 		MTWF_DBG(pAd, DBG_CAT_INTF, CATINTF_UP, DBG_LVL_ERROR, "open fail!!!\n");
+-		wdev->state = 0;
+ 		return FALSE;
+ 	}
+ 
+ 	MTWF_DBG(pAd, DBG_CAT_INTF, CATINTF_UP, DBG_LVL_INFO,
+ 		"AP inf up for ra_%x(func_idx) OmacIdx=%d\n", wdev->func_idx, wdev->OmacIdx);
+-
+-#ifdef CONFIG_6G_SUPPORT
+-	if (ap_6g_cfg_init(pAd, wdev) != TRUE) {
+-		MTWF_DBG(pAd, DBG_CAT_INTF, CATINTF_UP, DBG_LVL_ERROR,
+-			 "6 GHz discovery buffer initialization failed\n");
+-		if (wifi_sys_close(wdev) != TRUE)
+-			MTWF_DBG(pAd, DBG_CAT_INTF, CATINTF_UP, DBG_LVL_ERROR,
+-				 "close wdev after discovery buffer failure failed\n");
+-		wdev->state = 0;
+-		return FALSE;
+-	}
+-#endif
+ 
+ 	MlmeRadioOn(pAd, wdev);
+ 
+@@ -9567,6 +9532,10 @@
+ 		}
+ 	}
+ 
++#endif
++
++#ifdef CONFIG_6G_SUPPORT
++	ap_6g_cfg_init(pAd, wdev);
+ #endif
+ 
+ #ifdef WSC_INCLUDED
+--- a/mt_wifi/ap/ap_cfg.c
++++ b/mt_wifi/ap/ap_cfg.c
+@@ -25068,18 +25068,6 @@
+ 				goto end;
+ 			}
+ 			pAd->ApCfg.MBSSID[MAIN_MBSSID].mbss_idx = MAIN_MBSSID;
+-#ifdef CONFIG_6G_SUPPORT
+-			if (ap_6g_cfg_init(pAd, wdev) != TRUE) {
+-				MTWF_DBG(pAd, DBG_CAT_INIT, CATINIT_INTF, DBG_LVL_ERROR,
+-					 "6 GHz discovery buffer initialization failed\n");
+-				wdev->bAllowBeaconing = FALSE;
+-				if (wifi_sys_close(wdev) != TRUE)
+-					MTWF_DBG(pAd, DBG_CAT_INIT, CATINIT_INTF, DBG_LVL_ERROR,
+-						 "close wdev after discovery buffer failure failed\n");
+-				Status = NDIS_STATUS_FAILURE;
+-				goto end;
+-			}
+-#endif
+ 			APStartUpForMbss(pAd, &pAd->ApCfg.MBSSID[MAIN_MBSSID]);
+ 			APStartRekeyTimer(pAd, wdev);
+ 		}
+--- a/mt_wifi/common/cmm_cfg.c
++++ b/mt_wifi/common/cmm_cfg.c
+@@ -12969,10 +12969,6 @@
+ 		return FALSE;
+ 	}
+ 
+-	/* The profile defaults below preserve TMAC CR values, not host timeouts. */
+-	if (pAd->CommonCfg.ack_cts_enable == FALSE)
+-		return TRUE;
+-
+ 	idx = hc_get_hw_band_idx(pAd);
+ 
+ 	if (pAd->CommonCfg.distance > 0) {
+--- a/mt_wifi/common/cmm_info.c
++++ b/mt_wifi/common/cmm_info.c
+@@ -12486,7 +12486,6 @@
+ 	if (one_shot && test_and_set_bit(0, &mac_table_dumped))
+ 		return TRUE;
+ 
+-
+ 	MTWF_PRINT("%s(): arg=%s\n", __func__, (arg == NULL ? "" : arg));
+ 
+ 	if (arg && strlen(arg)) {
+--- a/mt_wifi/include/ap/ap.h
++++ b/mt_wifi/include/ap/ap.h
+@@ -396,7 +396,6 @@
+ VOID APShutdown(RTMP_ADAPTER *pAd);
+ 
+ #ifdef CONFIG_6G_SUPPORT
+-INT ap_6g_cfg_init(RTMP_ADAPTER *pAd, struct wifi_dev *wdev);
+ NDIS_STATUS ap_6g_build_discovery_frame(RTMP_ADAPTER *pAd, struct wifi_dev *wdev);
+ INT ap_6g_set_frame_offload(RTMP_ADAPTER *pAd, struct wifi_dev *wdev);
+ #endif
+--- a/wlan_hwifi/bus/mtk_pci_dma.c
++++ b/wlan_hwifi/bus/mtk_pci_dma.c
+@@ -1336,6 +1336,22 @@
+ 	return 0;
+ }
+ 
++static inline bool
++pci_dma_ind_reason_hw_path_ok(u32 ind_reason)
++{
++	/* Error/flush indications may still reach the software RX checks.
++	 * They are not confirmation that the saved PPE entry is reusable.
++	 */
++	switch (ind_reason) {
++	case IND_REASON_STEP_ONE:
++	case IND_REASON_WITHIN:
++	case IND_REASON_TIMEOUT_STEP_ONE:
++		return true;
++	default:
++		return false;
++	}
++}
++
+ static int
+ pci_dma_rxdmad_parser(struct pci_trans *trans,
+ 	struct pci_dma_desc *desc, struct mtk_bus_rx_info *rx_info)
+@@ -1354,13 +1370,14 @@
+ 	rx_info->more = !GET_FIELD(RXDMAD_LS0, dw1);
+ 	rx_info->ip_frag = GET_FIELD(RXDMAD_F, dw3);
+ 
+-	if (dw3 & RXDMAD_PPE_VLD_MASK) {
+-		rx_info->ppe_entry = GET_FIELD(RXDMAD_PPE_ENTRY, dw3);
+-		rx_info->csrn = GET_FIELD(RXDMAD_CSRN, dw3);
+-
+-		if (GET_FIELD(RXDMAD_IND_REASON, dw2) != IND_REASON_CANNOT_DO_REORDER)
+-			rx_info->hw_path = true;
+-	}
++	/* Keep this descriptor's authority independent of a reused RX context. */
++	rx_info->hw_path = false;
++	rx_info->ppe_entry = 0;
++	rx_info->csrn = 0;
++	rx_info->pn_chk_fail = false;
++	rx_info->repeat_pkt = 0;
++	rx_info->old_pkt = 0;
++	rx_info->drop = RXDMAD_NON_DROP;
+ 
+ 	if (dw1 & RXDMAD_VER_MASK) {
+ 		if (GET_FIELD(RXDMAD_PN_CHK_FAIL, dw1) ||
+@@ -1377,6 +1394,22 @@
+ 				RXDMAD_VER_ZREO_DROP : RXDMAD_NON_DROP;
+ 	}
+ 
++	if (dw3 & RXDMAD_PPE_VLD_MASK) {
++		u32 ind_reason = GET_FIELD(RXDMAD_IND_REASON, dw2);
++
++		rx_info->ppe_entry = GET_FIELD(RXDMAD_PPE_ENTRY, dw3);
++		rx_info->csrn = GET_FIELD(RXDMAD_CSRN, dw3);
++		rx_info->hw_path = pci_dma_ind_reason_hw_path_ok(ind_reason) &&
++				   !rx_info->pn_chk_fail && !rx_info->drop;
++
++#ifdef CONFIG_HWIFI_DBG
++		if (trans->rro_cfg && ind_reason < IND_REASON_MAX) {
++			struct hw_rro_cfg *rro_cfg = trans->rro_cfg;
++
++			rro_cfg->rro_dbg.rxdmad_reason_cnt[ind_reason]++;
++		}
++#endif
++	}
+ 
+ 	mtk_dbg(MTK_BUS, "%s: rxdmad_version = %d\n", __func__,
+ 						GET_FIELD(RXDMAD_VER, dw1));
+--- a/wlan_hwifi/bus/mtk_rro.c
++++ b/wlan_hwifi/bus/mtk_rro.c
+@@ -872,6 +872,10 @@
+ 	seq_printf(s, "max_msdu_num: %u\n", rro_dbg->max_msdu_num);
+ 	seq_printf(s, "max_pg_num: %u\n", rro_dbg->max_pg_num);
+ 
++	for (i = 0; i < IND_REASON_MAX; i++)
++		seq_printf(s, "rxdmad_reason_%02d: %u\n", i,
++			rro_dbg->rxdmad_reason_cnt[i]);
++
+ 	for (i = 0; i < MAX_MSDU_CNT_ARR_SIZE; i++) {
+ 		seq_printf(s, "msdu%02d_cnt = 0x%8x", i + 1, rro_dbg->msdu_cnt[i]);
+ 
+--- a/wlan_hwifi/bus/mtk_rro.h
++++ b/wlan_hwifi/bus/mtk_rro.h
+@@ -231,6 +231,7 @@
+ 	u32 msdu_cnt[MAX_MSDU_CNT_ARR_SIZE];
+ 	u32 sign_ok_cnt;
+ 	u32 sign_fail_cnt;
++	u32 rxdmad_reason_cnt[IND_REASON_MAX];
+ };
+ 
+ struct hw_rro_cfg {
+--- a/wlan_hwifi/bus/mtk_wed.c
++++ b/wlan_hwifi/bus/mtk_wed.c
+@@ -112,6 +112,7 @@
+ 	int ret;
+ 
+ 	wed->irq = irq;
++	wed->irq_requested = false;
+ 	name = wed->irq_name;
+ 
+ 	ret = snprintf(name, MAX_IRQ_NAME_LEN, "%s-wed", to_name(trans));
+@@ -123,8 +124,10 @@
+ 	ret = request_irq(irq, mtk_bus_dma_irq_handler,
+ 		IRQF_SHARED, name, &trans->vec_data[0]);
+ end:
++	wed->irq_error = ret;
++	wed->irq_requested = ret == 0;
+ 	if (ret)
+-		dev_err(to_device(trans), "%s(): Request wed irq failed\n", __func__);
++		dev_err(to_device(trans), "%s(): Request wed irq failed: %d\n", __func__, ret);
+ }
+ 
+ static void
+@@ -133,10 +136,13 @@
+ 	struct wed_trans *wed = to_wed_trans(priv_data);
+ 	struct pci_trans *trans = to_pci_trans(priv_data);
+ 
+-	if (irq == wed->irq)
++	if (irq == wed->irq && wed->irq_requested) {
+ 		free_irq(wed->irq, &trans->vec_data[0]);
+-	else
+-		mtk_dbg(MTK_BUS, "warp_irq(%d) != wed->irq(%d)\n", __func__);
++		wed->irq_requested = false;
++	}
++	else if (irq != wed->irq)
++		mtk_dbg(MTK_BUS, "%s: warp_irq(%u) != wed->irq(%u)\n",
++			__func__, irq, wed->irq);
+ }
+ 
+ static void
+@@ -328,7 +334,6 @@
+ wed_warp_ver_notify(void *priv_data, u8 ver, u8 warp_sub_ver,
+ 		u8 warp_ver_brnach, int hw_cap)
+ {
+-	struct mtk_hw_dev *dev = to_hw_dev(priv_data);
+ 	struct pci_trans *trans = to_pci_trans(priv_data);
+ 	struct wed_trans *wed_trans = to_wed_trans(trans);
+ 
+@@ -338,14 +343,8 @@
+ 	wed_trans->wed_ver = ver;
+ 	wed_trans->wed_sub_ver = warp_sub_ver;
+ 
+-	if (hw_cap & WED_HW_CAP_RRO_DBG_MODE)
+-		set_bit(PCI_FLAG_WHNAT_RRO_DBG, &trans->flags);
+-	if (hw_cap & WED_HW_CAP_RRO_DBG_MEMCPY_MODE)
+-		set_bit(PCI_FLAG_WHNAT_RRO_DBG_MEMCPY, &trans->flags);
+-	if (hw_cap & WED_HW_CAP_RX_OFFLOAD)
+-		set_bit(HWIFI_FLAG_RX_OFFLOAD, &dev->flags);
+-	if (hw_cap & WED_HW_CAP_RX_WOCPU)
+-		set_bit(HWIFI_FLAG_BA_OFFLOAD, &dev->flags);
++	/* Publish offload capabilities only after attachment is verified. */
++	wed_trans->warp_caps = hw_cap;
+ }
+ 
+ static u32
+@@ -927,6 +926,8 @@
+ 	struct mtk_chip_hw_cap *hw_cap = dev->chip_drv->hw_caps;
+ 	struct wifi_hw *wed_hw;
+ 	bool is_master = test_bit(BUS_TRANS_FLAG_MASTER, &bus_trans->flag);
++	bool resetting = test_bit(HWIFI_STATE_RESET, &dev->state);
++	bool previously_enabled = trans->enable;
+ 	int ret = 0;
+ 
+ 	/*initial as false*/
+@@ -967,15 +968,41 @@
+ 		wed_hw->src = SLAVE_SRC;
+ 
+ 	wed_pci_cap_get(ptrans, dev, wed_hw);
+-	if (!test_bit(HWIFI_STATE_RESET, &dev->state))
++	if (!resetting) {
++		trans->irq_error = 0;
++		trans->irq_requested = false;
+ 		ret = warp_register_client(wed_hw, &wed_ops);
+-
+-	trans->enable = (ret == WED_INVAL) ? false : true;
+-	if (trans->enable)
++		if (!ret && !trans->irq_requested) {
++			ret = trans->irq_error ? trans->irq_error : -ENXIO;
++			warp_client_remove(hw);
++		}
++	} else if (!previously_enabled)
++		goto end;
++
++	/* Every negative errno means no usable WED instance. */
++	trans->enable = ret == 0;
++	if (ret)
++		trans->wifi_hw = NULL;
++	if (trans->enable) {
++		if (trans->warp_caps & WED_HW_CAP_RRO_DBG_MODE)
++			set_bit(PCI_FLAG_WHNAT_RRO_DBG, &ptrans->flags);
++		if (trans->warp_caps & WED_HW_CAP_RRO_DBG_MEMCPY_MODE)
++			set_bit(PCI_FLAG_WHNAT_RRO_DBG_MEMCPY, &ptrans->flags);
++		if (trans->warp_caps & WED_HW_CAP_RX_OFFLOAD)
++			set_bit(HWIFI_FLAG_RX_OFFLOAD, &dev->flags);
++		if (trans->warp_caps & WED_HW_CAP_RX_WOCPU)
++			set_bit(HWIFI_FLAG_BA_OFFLOAD, &dev->flags);
+ 		wed_set_device(wed_hw, hw);
++	}
+ 
+ end:
+-	return trans->dma_ops->init_device(hw);
++	ret = trans->dma_ops->init_device(hw);
++	if (ret && trans->enable && !resetting) {
++		warp_client_remove(hw);
++		trans->wifi_hw = NULL;
++		trans->enable = false;
++	}
++	return ret;
+ }
+ 
+ static void
+@@ -986,8 +1013,11 @@
+ 
+ 	trans->dma_ops->exit_device(hw);
+ 
+-	if (trans->enable && !test_bit(HWIFI_STATE_RESET, &dev->state))
++	if (trans->enable && !test_bit(HWIFI_STATE_RESET, &dev->state)) {
+ 		warp_client_remove(hw);
++		trans->wifi_hw = NULL;
++		trans->enable = false;
++	}
+ }
+ 
+ static void
+@@ -1349,7 +1379,8 @@
+ 	if (trans->enable) {
+ 		for (idx = 0; idx < max_src_num; idx++)
+ 			tx_token_num[idx] = hw_dev->ext_tx_tk_nums_master;
+-		tx_token_num[1] = hw_dev->ext_tx_tk_nums_slave;
++		if (max_src_num > 1)
++			tx_token_num[1] = hw_dev->ext_tx_tk_nums_slave;
+ 	} else {
+ 		return trans->dma_ops->get_tx_token_num(hw, tx_token_num, max_src_num);
+ 	}
+--- a/wlan_hwifi/bus/mtk_wed.h
++++ b/wlan_hwifi/bus/mtk_wed.h
+@@ -88,6 +88,9 @@
+ 	const struct mtk_bus_io_ops *io_ops;
+ 	const struct mtk_bus_dma_ops *dma_ops;
+ 	struct wifi_hw *wifi_hw;
++	u32 warp_caps;
++	int irq_error;
++	bool irq_requested;
+ };
+ 
+ struct wed_driver {

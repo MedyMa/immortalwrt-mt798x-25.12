@@ -7,9 +7,11 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=mt_wifi_cmn
+PKG_RELEASE:=3
 PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_NAME)
-PKG_VERSION:=1
-
+PKG_FILE_DEPENDS:=$(CURDIR)/src/
+PKG_CONFIG_DEPENDS:=CONFIG_MTK_WIFI7_CFG80211_SUPPORT
+PKG_VERSION:=24.10.20261104
 include $(INCLUDE_DIR)/package.mk
 
 define KernelPackage/mt_wifi_cmn
@@ -38,11 +40,12 @@ endif
 NOSTDINC_FLAGS += -DMT_WIFI_COMMON_SUPPORT
 
 define Build/Compile
-	+$(KERNEL_MAKE) $(PKG_JOBS) \
+	+$(MAKE) $(PKG_JOBS) -C "$(LINUX_DIR)" \
+		$(KERNEL_MAKE_FLAGS) \
 		M="$(PKG_BUILD_DIR)" \
 		EXTRA_CFLAGS="$(EXTRA_CFLAGS)" \
 		NOSTDINC_FLAGS="$(NOSTDINC_FLAGS)" \
-		KBUILD_EXTRA_SYMBOLS="$(wildcard $(PKG_SYMVERS_DIR)/*.symvers)" \
+		KBUILD_EXTRA_SYMBOLS="$(filter-out $(PKG_SYMVERS_DIR)/mt_wifi_osal.symvers,$(wildcard $(PKG_SYMVERS_DIR)/*.symvers))" \
 		modules
 endef
 

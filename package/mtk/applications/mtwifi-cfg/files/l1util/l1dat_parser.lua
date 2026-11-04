@@ -265,11 +265,7 @@ function l1dat_parser.load_l1_profile(path)
         else
             devs[ridx][dev.main_ifname] = dev
 
-            if dev.subidx then
-                devname = dev.INDEX.."_"..dev.mainidx.."_"..dev.subidx
-            else
-                devname = dev.INDEX.."_"..dev.mainidx
-            end
+            devname = dev.INDEX.."_"..dev.mainidx
             devs[dridx][devname] = dev
 
             for i = 1, l1dat_parser.MAX_NUM_EXTIF - 1 do  -- ifname idx is from 0

@@ -1,0 +1,14 @@
+--- a/mt_wifi/os/linux/cfg80211/cfg80211.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211.c
+@@ -2611,8 +2611,9 @@
+ 	MTWF_DBG(NULL, DBG_CAT_TX, CATTX_MGMT, DBG_LVL_DEBUG, "80211> Mgmt Channel = %d\n", ChanId);
+ 
+ 	/* Send the Frame with basic rate 6 */
+-    if (no_cck)
+-		; /*pAd->isCfgDeviceInP2p = TRUE; */
++    if (no_cck) {
++		/* pAd->isCfgDeviceInP2p = TRUE; */
++	}
+ 
+ 	*pCookie = COOkIE_VALUE;
+ #ifndef HOSTAPD_AUTO_CH_SUPPORT

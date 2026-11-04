@@ -9,9 +9,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME:=wifi-profile
-PKG_RELEASE:=4
-PKG_BUILD_DEPENDS:=
-PKG_FILE_DEPENDS:=
+PKG_RELEASE:=5
 PKG_LICENSE:=GPL-2.0
 
 PKG_KCONFIG:= \
@@ -23,7 +21,6 @@ PKG_KCONFIG:= \
 	third_card_name \
 	WIFI_NORMAL_SETTING \
 	WIFI_QUICK_SETTING \
-	WIFI_SCRIPT_SUPPORT \
 	MTK_WIFI7_CHIP_MT7990 \
 	MTK_WIFI7_CHIP_MT7992 \
 	MTK_WIFI7_CHIP_MT7993 \
@@ -33,9 +30,6 @@ PKG_KCONFIG:= \
 	MTK_WIFI7_2ADIE_TRIBAND
 
 PKG_CONFIG_DEPENDS:=$(foreach c, $(PKG_KCONFIG),$(if $(CONFIG_$c),CONFIG_$(c)))
-PKG_CONFIG_DEPENDS+= \
-	CONFIG_TARGET_mediatek_filogic_DEVICE_bananapi_bpi-r4 \
-	CONFIG_TARGET_mediatek_filogic_a73_DEVICE_bananapi_bpi-r4
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -72,30 +66,10 @@ if PACKAGE_wifi-profile
 endif
 endef
 
-define Package/wifi-script
-  SECTION:=MTK Properties
-  CATEGORY:=MTK Properties
-  SUBMENU:=Drivers
-  DEPENDS:=+wifi-dats
-  TITLE:=LUCI WiFi scripts
-  VERSION:=$(PKG_RELEASE)
-  MENU:=1
-endef
-
-define Package/wifi-script/description
-  This package install luci wifi scripts.
-endef
-
-define Package/wifi-script/config
-if PACKAGE_wifi-script
-endif
-endef
-
 define Package/wifi-dats
   SECTION:=MTK Properties
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
-  DEPENDS:=+WIFI_SCRIPT_SUPPORT:datconf-lua +WIFI_SCRIPT_SUPPORT:lua +WIFI_SCRIPT_SUPPORT:libuci-lua
   TITLE:=MTK WiFi l1 & l2 dat files
   VERSION:=$(PKG_RELEASE)
   MENU:=1
@@ -107,7 +81,6 @@ endef
 
 define Package/wifi-dats/config
 if PACKAGE_wifi-dats
-	#source "$(SOURCE)/l1profile.config.in"
 	menuconfig first_card
 		bool "1st card"
 		default y
@@ -142,10 +115,6 @@ if PACKAGE_wifi-dats
 		default "MT7990" if MTK_WIFI7_CHIP_MT7990
 	endif
 
-	config WIFI_SCRIPT_SUPPORT
-		bool "wifi script support"
-		default n
-
 	config MTK_WIFI7_PROFILING_SUPPORT
 		bool "wifi7 profiling dat files"
 		default n
@@ -171,56 +140,13 @@ define Package/wifi-profile/install
 	fi
 endef
 
-define Package/wifi-script/install
-	$(INSTALL_DIR) $(1)/lib/wifi/
-	$(INSTALL_DIR) $(1)/lib/netifd/wireless/
-	$(INSTALL_DIR) $(1)/etc/uci-defaults/
-
-	$(INSTALL_DATA) ./files/common/mt79xx/lib/wifi/mtk.sh $(1)/lib/wifi/
-	$(INSTALL_BIN) ./files/common/mt79xx/lib/netifd/wireless/mtk.sh $(1)/lib/netifd/wireless/
-	$(INSTALL_DATA) ./files/common/mt79xx/etc/uci-defaults/10_mt79xx_dbdc $(1)/etc/uci-defaults/10_mt79xx_dbdc
-endef
-
 define Package/wifi-dats/install
-	$(INSTALL_DIR) $(1)/sbin/
 	$(INSTALL_DIR) $(1)/etc/wireless/mediatek/
-#ifneq ($(CONFIG_MTK_WIFI7_PROFILING_SUPPORT),y)
-#	python ./make-l1profile.py $(TOPDIR)/.config $(1)/etc/wireless/l1profile.dat > /dev/null
-#endif
-
-	if [ "$$(CONFIG_WIFI_SCRIPT_SUPPORT)" = "y" ]; then \
-		$(INSTALL_DIR) $(1)/sbin/; \
-		$(INSTALL_DIR) $(1)/lib/wifi/; \
-		if [ "$$(CONFIG_MTK_WIFI7_UNIFIED_COMMAND)" = "y" ]; then \
-			$(INSTALL_BIN) ./files/unified_script/wifi $(1)/sbin/; \
-			$(INSTALL_BIN) ./files/unified_script/mtwifi.lua $(1)/lib/wifi/; \
-			$(INSTALL_BIN) ./files/unified_script/mtkdat.lua $(1)/lib/wifi/; \
-			$(INSTALL_BIN) ./files/unified_script/hostapd.lua $(1)/lib/wifi/; \
-			$(INSTALL_BIN) ./files/unified_script/hostapd_wps_er_action.lua $(1)/lib/wifi/; \
-			$(INSTALL_BIN) ./files/unified_script/supplicant.lua $(1)/lib/wifi/; \
-			$(INSTALL_BIN) ./files/unified_script/set_bcn.lua $(1)/lib/wifi/; \
-			$(INSTALL_BIN) ./files/unified_script/set_mgmt_rx.lua $(1)/lib/wifi/; \
-			$(INSTALL_BIN) ./files/unified_script/supplicant_scan_action.sh $(1)/lib/wifi/; \
-			if [ "$$(CONFIG_WIFI_QUICK_SETTING)" = "y" ] ; then \
-				$(INSTALL_BIN) ./files/unified_script/quick_setting.lua $(1)/lib/wifi/; \
-			fi; \
-		fi; \
-	fi
-
-	$(INSTALL_BIN) ./files/common/mt79xx/sbin/cpuusage $(1)/sbin/
 
 ifneq ($(CONFIG_MTK_WIFI7_PROFILING_SUPPORT),y)
 	# Example combination Eagle.
 	if [ "$$(CONFIG_first_card_name)" = "MT7990" -o "$$(CONFIG_second_card_name)" = "MT7990" ] ; then \
 		$(INSTALL_DATA) ./files/mt7990/* $(1)/etc/wireless/mediatek/; \
-		if { [ "$$(CONFIG_TARGET_mediatek_filogic_DEVICE_bananapi_bpi-r4)" = "y" ] || \
-		     [ "$$(CONFIG_TARGET_mediatek_filogic_a73_DEVICE_bananapi_bpi-r4)" = "y" ]; } && \
-		   [ "$$(CONFIG_MTK_WIFI7_SKU_TYPE)" = "BE14000" ]; then \
-			cat ./files/bpi-r4-be14/l1profile-extra.dat >> $(1)/etc/wireless/mediatek/l1profile.dat; \
-			sed -i 's/^E2pAccessMode=.*/E2pAccessMode=1/' $(1)/etc/wireless/mediatek/mt7990.1.dat; \
-			$(INSTALL_DIR) $(1)/lib/preinit; \
-			$(INSTALL_DATA) ./files/bpi-r4-be14/81_be14_profile_fixup $(1)/lib/preinit/; \
-		fi; \
 		if [ "$$(CONFIG_MTK_WIFI7_SKU_TYPE)" = "BE19000" ] ; then \
 			sed -i "s/MT7990_EEPROM_iFEM233.bin/MT7990_EEPROM.bin/" $(1)/etc/wireless/mediatek/l1profile.dat; \
 		elif [ "$$(CONFIG_MTK_WIFI7_SKU_TYPE)" = "BE13000_255" ] ; then \
@@ -265,13 +191,7 @@ endif
 	if [ -f "$(1)/etc/wireless/mediatek/l1profile.dat" ]; then \
 		mv $(1)/etc/wireless/mediatek/l1profile.dat $(1)/etc/wireless/l1profile.dat ; \
 	fi
-
-	if [ "$$(CONFIG_PACKAGE_hostapd-common)" != "y" ] ; then \
-		$(INSTALL_DIR) $(1)/etc/rc.button; \
-		$(INSTALL_BIN) ./files/common/wps-hotplug.sh $(1)/etc/rc.button/wps; \
-	fi
 endef
 
 $(eval $(call BuildPackage,wifi-dats))
-$(eval $(call BuildPackage,wifi-script))
 $(eval $(call BuildPackage,wifi-profile))

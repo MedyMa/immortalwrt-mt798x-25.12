@@ -1,0 +1,60 @@
+Subject: mtwifi: serialize cfg80211 registration and release resources exactly once
+
+--- a/mt_wifi/os/linux/rt_linux.c
++++ b/mt_wifi/os/linux/rt_linux.c
+@@ -1654,7 +1654,17 @@
+ 
+ #if (KERNEL_VERSION(2, 5, 0) <= LINUX_VERSION_CODE)
+ #if (KERNEL_VERSION(2, 6, 31) <= LINUX_VERSION_CODE)
+-	tmp_ptr = (void *)pNetDev->netdev_ops;
++#if defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
++	if (pNetDev->priv_destructor == RtmpOSNetDevOpsFree) {
++		/* The unregister path owns ops, including a deferred free under RTNL.
++		 * An attach failure before registration still needs manual cleanup.
++		 */
++		if (pNetDev->reg_state == NETREG_UNINITIALIZED)
++			RtmpOSNetDevOpsFree(pNetDev);
++		tmp_ptr = NULL;
++	} else
++#endif
++		tmp_ptr = (void *)pNetDev->netdev_ops;
+ #endif
+ 	free_netdev(pNetDev);
+ #if (KERNEL_VERSION(2, 6, 31) <= LINUX_VERSION_CODE)
+@@ -1688,6 +1698,7 @@
+ 	}
+ 
+ 	pNetDevOps = (void *)pNetDev->netdev_ops;
++	pNetDev->netdev_ops = NULL;
+ 	if (pNetDevOps)
+ 		vfree(pNetDevOps);
+ }
+@@ -1974,13 +1985,17 @@
+ #endif
+ 
+ #if	defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
++	if (!pNetDev->ieee80211_ptr)
++		return NDIS_STATUS_FAILURE;
+ 	pNetDev->priv_destructor = RtmpOSNetDevOpsFree;
+ 	if (rtnl_locked) {
+ 		ret = cfg80211_register_netdevice(pNetDev);
+ 	} else {
+ 		if (rtnl_lock_killable())
+ 			return -EINTR;
++		wiphy_lock(pNetDev->ieee80211_ptr->wiphy);
+ 		ret = cfg80211_register_netdevice(pNetDev);
++		wiphy_unlock(pNetDev->ieee80211_ptr->wiphy);
+ 		rtnl_unlock();
+ 	}
+ #else
+--- a/mt_wifi/hw_ctrl/physical_device_workq.c
++++ b/mt_wifi/hw_ctrl/physical_device_workq.c
+@@ -206,6 +206,8 @@
+ 	struct physical_device *ph_dev = (struct physical_device *)physical_dev;
+ 
+ 	if (ph_dev->ph_dev_wq) {
++		/* flush_workqueue() does not drain work still waiting on its timer. */
++		cancel_delayed_work_sync(&ph_dev->ph_dev_work);
+ 		mt_flush_workqueue(ph_dev->ph_dev_wq);
+ 		mt_destroy_workqueue(ph_dev->ph_dev_wq);
+ 		ph_dev->ph_dev_wq = NULL;

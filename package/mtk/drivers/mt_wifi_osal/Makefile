@@ -2,9 +2,15 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=mt_wifi_osal
-PKG_RELEASE:=1
+PKG_RELEASE:=4
 PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_NAME)/wifi_osal
 PKG_SOURCE:=mt_wifi_osal-a53418.tar.xz
+PKG_SOURCE_URL:=https://raw.githubusercontent.com/MedyMa/immortalwrt-mt798x-25.12/main/dl
+PKG_HASH:=dfa4b178f198504a707dec957242f8ede1a732823e940faa6304c723ac3224ad
+PKG_CONFIG_DEPENDS:=CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT \
+	CONFIG_MTK_WIFI_OSAL_DEBUG CONFIG_MTK_WIFI_OSAL_CUSTOM_VPRINTK \
+	CONFIG_MTK_WIFI_OSAL_CUSTOM_VPRINTK_FACILITY CONFIG_MTK_WIFI_OSAL_NETIF_RX_DISPATCH \
+	CONFIG_MTK_WIFI7_VLAN_GTK_SUPPORT CONFIG_MTK_WIFI7_CCN67_SPLIT_MAC_SUPPORT
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -13,16 +19,14 @@ define KernelPackage/$(PKG_NAME)
   SUBMENU:=Drivers
   TITLE:=MediaTek WiFi OS Abstraction Layer
   DEPENDS:=+MTK_WIFI_OSAL_CFG80211_SUPPORT:kmod-cfg80211
+  CONFLICTS:=kmod-mt_wifi_cmn
   FILES:=$(PKG_BUILD_DIR)/mt_wifi_osal.ko
   AUTOLOAD:=$(call AutoLoad,60,$(if $(CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT), cfg80211) mt_wifi_osal,1)
 endef
 
-BACKPORT_VERSION := $(shell \
-    find $(KERNEL_BUILD_DIR) $(KERNEL_BUILD_DIR)/mac80211-regular -maxdepth 1 -type d -name 'backports-*' | \
-    xargs basename | \
-    awk -F'-' '/backports-/ {print $2}' \
-)
-EXTRA_KCONFIG += CFG_CFG80211_VERSION:=$(word 2,$(subst -, ,$(BACKPORT_VERSION)))
+BACKPORT_VERSION = $(sort $(patsubst backports-%,%,$(notdir \
+	$(wildcard $(KERNEL_BUILD_DIR)/backports-* $(KERNEL_BUILD_DIR)/mac80211-regular/backports-*))))
+EXTRA_KCONFIG += CFG_CFG80211_VERSION=$(firstword $(BACKPORT_VERSION))
 
 PKG_EXTRA_CFLAGS:= $(if $(CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT), -DCFG80211_SUPPORT) \
 		$(if $(CONFIG_MTK_WIFI_OSAL_DEBUG), -DMT_DEBUG) \
@@ -31,7 +35,7 @@ PKG_EXTRA_CFLAGS:= $(if $(CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT), -DCFG80211_SUP
 		$(if $(CONFIG_MTK_WIFI7_CCN67_SPLIT_MAC_SUPPORT), -DCCN67_SPLIT_MAC_SUPPORT) \
 		$(if $(CONFIG_MTK_WIFI_OSAL_NETIF_RX_DISPATCH), -DCONFIG_NETIF_RX_DISPATCH)
 
-PKG_EXTRA_CFLAGS += -Wno-error=missing-prototypes -Wno-error=implicit-function-declaration -Wno-empty-body
+PKG_EXTRA_CFLAGS += -Wno-error=missing-prototypes -Wno-empty-body
 
 NOSTDINC_FLAGS :=
 ifeq ($(CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT),y)
@@ -52,12 +56,15 @@ define KernelPackage/$(PKG_NAME)/config
 endef
 
 define Build/Compile
+	$(if $(CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT),\
+		$(if $(filter 1,$(words $(BACKPORT_VERSION))),true,\
+			$(error OSAL requires one matching mac80211 backport version; found $(BACKPORT_VERSION))))
 	+$(KERNEL_MAKE) $(PKG_JOBS) \
 		M="$(PKG_BUILD_DIR)" \
 		NOSTDINC_FLAGS="$(NOSTDINC_FLAGS)" \
 		EXTRA_CFLAGS="$(PKG_EXTRA_CFLAGS) $(EXTRA_CFLAGS)" \
 		$(EXTRA_KCONFIG) \
-		KBUILD_EXTRA_SYMBOLS="$(wildcard $(PKG_SYMVERS_DIR)/*.symvers)" \
+		KBUILD_EXTRA_SYMBOLS="$(filter-out $(PKG_SYMVERS_DIR)/mt_wifi_cmn.symvers,$(wildcard $(PKG_SYMVERS_DIR)/*.symvers))" \
 		modules
 endef
 

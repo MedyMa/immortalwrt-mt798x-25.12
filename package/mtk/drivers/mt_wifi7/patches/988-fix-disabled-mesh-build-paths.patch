@@ -1,0 +1,60 @@
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_ap.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_ap.c
+@@ -2576,6 +2576,7 @@
+ {
+ 	struct wifi_dev *wdev = &pAd->ApCfg.MBSSID[ifIndex].wdev;
+ 
++#ifdef CONFIG_MAP_SUPPORT
+ 	if (wdev && (IS_MAP_TURNKEY_ENABLE(pAd)) &&
+ 			(wdev->MAPCfg.DevOwnRole & BIT(MAP_ROLE_BACKHAUL_BSS)) &&
+ 			(!(wdev->MAPCfg.DevOwnRole & BIT(MAP_ROLE_FRONTHAUL_BSS)))) {
+@@ -2583,6 +2584,7 @@
+ 				"disallowing ACL for Backhaul BSS, DevOwnRole=%u\n", wdev->MAPCfg.DevOwnRole);
+ 		return FALSE;
+ 	}
++#endif /* CONFIG_MAP_SUPPORT */
+ 
+ #ifdef ACL_BLK_COUNT_SUPPORT
+ 	if (mode != 2) {
+--- a/mt_wifi/os/linux/cfg80211/cfg80211.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211.c
+@@ -5701,7 +5701,7 @@
+ 	struct wifi_dev *wdev;
+ 	struct nlattr *tb[MTK_NL80211_VENDOR_ATTR_SET_ACTION_MAX + 1];
+ 	int ret;
+-	u16 punctured_bitmap = 0;
++	u16 punctured_bitmap __maybe_unused = 0;
+ 	MAC80211_PAD_GET(pAd, wiphy);
+ 	MTWF_DBG(pAd, DBG_CAT_CFG, CATCFG_DBGLOG, DBG_LVL_NOTICE,
+ 			"ifname: %s, iftype: %d\n", pNetDev->name, wl_dev->iftype);
+@@ -6203,7 +6203,7 @@
+ }
+ 
+ static const struct
+-nla_policy SUBCMD_EASYMESH_POLICY[];
++nla_policy SUBCMD_EASYMESH_POLICY[MTK_NL80211_VENDOR_ATTR_EASYMESH_MAX + 1];
+ 
+ static int mtk_cfg80211_reply_ap_mld(struct wiphy *wiphy, struct bmgr_mlo_dev *mld);
+ 
+@@ -6217,9 +6217,9 @@
+ 	struct nlattr *tb[MTK_NL80211_VENDOR_ATTR_EASYMESH_MAX + 1];
+ 	ULONG priv_flags;
+ 	POS_COOKIE pObj;
+-	char *cmd;
+-	int ret, cmd_len;
+-	UCHAR map_en = 0;
++	char *cmd __maybe_unused;
++	int ret, cmd_len __maybe_unused;
++	UCHAR map_en __maybe_unused = 0;
+ 
+ 	MAC80211_PAD_GET(pAd, wiphy);
+ 	MTWF_DBG(pAd, DBG_CAT_CFG, CATCFG_DBGLOG, DBG_LVL_INFO,
+@@ -8329,7 +8329,7 @@
+ 	return ret;
+ }
+ #endif /* WAPP_SUPPORT */
+-static int mtk_cfg80211_reply_wifi_ver(struct wiphy *wiphy, const void *data, int len)
++static int __maybe_unused mtk_cfg80211_reply_wifi_ver(struct wiphy *wiphy, const void *data, int len)
+ {
+ 	PRTMP_ADAPTER pAd;
+ 	RTMP_STRING driver_ver[16];
