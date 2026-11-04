@@ -39,6 +39,7 @@ enum npu_fw_log_level {
 	__NPU_FW_LOG_LEVEL_MAX,
 };
 
+bool mtk_npu_is_ready(void);
 int mtk_npu_misc_set_dfs_scale(u8 dfs_scale);
 int mtk_npu_misc_set_ppe_num(void);
 int mtk_npu_misc_set_fw_log_level(enum npu_fw_log_level level);

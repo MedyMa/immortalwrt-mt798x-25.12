@@ -1,0 +1,23 @@
+Subject: [PATCH] arm64: dts: mediatek: restore BPI-R4 2.5G PHY LED pinctrl
+
+The 24.10 board baseline defines pinctrl groups in the shared BPI-R4 DTSI
+instead of including mt7988a-pinctrl.dtsi. Keep the internal 2.5G PHY LED
+group there as well: the existing 2g5 and PoE variants both reference it.
+Without it, even a standard R4 kernel build fails in the full dtbs target.
+
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dtsi
+@@ -518,6 +518,13 @@
+ 		};
+ 	};
+ 
++	i2p5gbe_led0_pins: 2p5gbe-led0-pins {
++		mux {
++			function = "led";
++			groups = "2p5gbe_led0";
++		};
++	};
++
+ 	pwm0_pins: pwm0-pins {
+ 		mux {
+ 			groups = "pwm0";

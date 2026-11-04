@@ -113,51 +113,32 @@ static int l2tpv2_cls_entry_setup(struct npu_tnl_info *tnl_info,
 			   CLS_DESC_VALID_LOWER_HALF_WORD_BIT |
 			   CLS_DESC_VALID_DPORT_BIT);
 	CLS_DESC_MASK_DATA(cdesc, l4_dport, CLS_DESC_L4_DPORT_MASK, 1701);
-	CLS_DESC_MASK_DATA(cdesc, l4_hdr_usr_data, 0x80030000, 0x00020000);
+	CLS_DESC_MASK_DATA(cdesc, l4_hdr_usr_data, 0xBEFF0000, 0x00020000);
 
 	return 0;
 }
 
 /* Helpers to obtain tunnel params from ppp netdev */
 static int l2tpv2_param_obtain_from_netdev(struct net_device *dev,
-					   struct npu_params *params)
+					struct npu_params *params)
 {
+	struct ppp_tunnel_info info;
 	struct npu_l2tp_params *l2tpp;
-	struct l2tp_session *session;
-	struct l2tp_tunnel *tunnel;
-	struct sock *sk;
-	int ret = 0;
+	int ret;
 
 	if (!dev || !params)
 		return -EINVAL;
-
-	sk = ppp_netdev_get_sock(dev);
-	if (IS_ERR(sk) || !sk)
-		return -EINVAL;
-
-	sock_hold(sk);
-	session = (struct l2tp_session *)(sk->sk_user_data);
-	if (!session) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (session->magic != L2TP_SESSION_MAGIC) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	tunnel = session->tunnel;
-
+	ret = ppp_netdev_get_tunnel_info(dev, &info);
+	if (ret)
+		return ret;
+	if (info.kind != PPP_TUNNEL_L2TP || info.version != 2)
+		return -EOPNOTSUPP;
 	l2tpp = &params->tunnel.l2tp;
-	l2tpp->dl_tid = htons(tunnel->tunnel_id);
-	l2tpp->dl_sid = htons(session->session_id);
-	l2tpp->ul_tid = htons(tunnel->peer_tunnel_id);
-	l2tpp->ul_sid = htons(session->peer_session_id);
-out:
-	sock_put(sk);
-
-	return ret;
+	l2tpp->dl_tid = htons(info.tunnel_id);
+	l2tpp->dl_sid = htons(info.session_id);
+	l2tpp->ul_tid = htons(info.peer_tunnel_id);
+	l2tpp->ul_sid = htons(info.peer_session_id);
+	return 0;
 }
 
 static void l2tpv2_hdr_pull(struct sk_buff *skb, u16 hdrflags)
@@ -192,8 +173,8 @@ static inline bool l2tpv2_hdr_valid(struct sk_buff *skb, u16 hdrflags)
 		!(hdrflags & L2TP_HDRFLAG_O));
 }
 
-#if KERNEL_VERSION(6, 12, 0) <= LINUX_VERSION_CODE
-static void l2tpv2_tnl_flow_param_setup(const struct net_device_path *path,
+#if IS_ENABLED(CONFIG_MTK_NPU_FLOW)
+static int l2tpv2_tnl_flow_param_setup(const struct net_device_path *path,
 					struct npu_params *params)
 {
 	struct npu_l2tp_params *l2tpp = &params->tunnel.l2tp;
@@ -202,24 +183,27 @@ static void l2tpv2_tnl_flow_param_setup(const struct net_device_path *path,
 
 	/* TODO: set L2, L3, and L4 params in their own layer */
 	params->mac.type = NPU_MAC_ETH;
-	memcpy(params->mac.eth.h_dest, path->tunnel.h_dest, ETH_ALEN);
-	memcpy(params->mac.eth.h_source, path->tunnel.h_source, ETH_ALEN);
+	memcpy(params->mac.eth.h_dest, path->tunnel_2410.h_dest, ETH_ALEN);
+	memcpy(params->mac.eth.h_source, path->tunnel_2410.h_source, ETH_ALEN);
 	params->mac.eth.h_proto = htons(ETH_P_IP);
 
 	params->network.type = NPU_NETWORK_IP;
-	ipp->sip = path->tunnel.sip.ip;
-	ipp->dip = path->tunnel.dip.ip;
+	ipp->sip = path->tunnel_2410.sip.ip;
+	ipp->dip = path->tunnel_2410.dip.ip;
 	ipp->proto = IPPROTO_UDP;
+	ipp->ttl = path->tunnel_2410.ttl;
+	ipp->tos = path->tunnel_2410.tos;
 
 	params->transport.type = NPU_TRANSPORT_UDP;
-	udpp->sport = path->tunnel.sport;
-	udpp->dport = path->tunnel.dport;
+	udpp->sport = path->tunnel_2410.sport;
+	udpp->dport = path->tunnel_2410.dport;
 
 	params->tunnel.type = NPU_TUNNEL_L2TP_V2;
-	l2tpp->ul_tid = path->tunnel.l2tp.ul_tid;
-	l2tpp->dl_tid = path->tunnel.l2tp.dl_tid;
-	l2tpp->ul_sid = path->tunnel.l2tp.ul_sid;
-	l2tpp->dl_sid = path->tunnel.l2tp.dl_sid;
+	l2tpp->ul_tid = path->tunnel_2410.l2tp.ul_tid;
+	l2tpp->dl_tid = path->tunnel_2410.l2tp.dl_tid;
+	l2tpp->ul_sid = path->tunnel_2410.l2tp.ul_sid;
+	l2tpp->dl_sid = path->tunnel_2410.l2tp.dl_sid;
+	return 0;
 }
 #endif
 
@@ -404,57 +388,32 @@ static int l2tpv2_tnl_l2_param_update(struct npu_params *params,
 
 static bool l2tpv2_tnl_decap_offloadable(struct sk_buff *skb)
 {
-	struct l2tp_flag_hdr *l2tp;
-	struct l2tp_flag_hdr l2tph;
-	struct iphdr *ip;
-	struct udphdr *udp;
-	bool ret = true;
-	u16 hdrflags;
-	u32 ip_len;
+	struct l2tp_flag_hdr flag_copy, *flag;
+	struct ppp_hdr ppp_copy, *ppp;
+	struct udphdr udp_copy, *udp;
+	const struct iphdr *ip = ip_hdr(skb);
+	unsigned int offset = ip->ihl * 4, header_len;
+	u16 flags;
 
-	ip = ip_hdr(skb);
 	if (ip->protocol != IPPROTO_UDP)
 		return false;
-
-	ip_len = ip_hdr(skb)->ihl * 4;
-
-	skb_pull(skb, ip_len);
-
-	udp = udp_hdr(skb);
-	if (udp->dest != htons(UDP_L2TP_PORT) || udp->source != htons(UDP_L2TP_PORT)) {
-		ret = false;
-		goto restore_ip;
-	}
-	skb_pull(skb, sizeof(struct udphdr));
-
-	l2tp = skb_header_pointer(skb, 0, sizeof(struct l2tp_flag_hdr), &l2tph);
-	if (!l2tp) {
-		ret = false;
-		goto restore_udp;
-	}
-	hdrflags = ntohs(l2tp->flag_ver);
-	if (!l2tpv2_hdr_valid(skb, hdrflags)) {
-		ret = false;
-		goto restore_udp;
-	}
-
-	l2tpv2_hdr_pull(skb, hdrflags);
-
-	if (!mtk_npu_ppp_valid(skb)) {
-		ret = false;
-		goto restore_l2tp;
-	}
-
-restore_l2tp:
-	l2tpv2_hdr_push(skb, hdrflags);
-
-restore_udp:
-	skb_push(skb, sizeof(struct udphdr));
-
-restore_ip:
-	skb_push(skb, ip_len);
-
-	return ret;
+	udp = skb_header_pointer(skb, offset, sizeof(udp_copy), &udp_copy);
+	if (!udp || udp->source != htons(UDP_L2TP_PORT) ||
+	    udp->dest != htons(UDP_L2TP_PORT))
+		return false;
+	offset += sizeof(udp_copy);
+	flag = skb_header_pointer(skb, offset, sizeof(flag_copy), &flag_copy);
+	if (!flag)
+		return false;
+	flags = ntohs(flag->flag_ver);
+	if (!l2tpv2_hdr_valid(skb, flags) || (flags & L2TP_HDRFLAG_RSVD))
+		return false;
+	header_len = sizeof(flag_copy) + sizeof(struct udp_l2tp_data_hdr) +
+		     ((flags & L2TP_HDRFLAG_L) ? sizeof(struct l2tp_len_hdr) : 0);
+	ppp = skb_header_pointer(skb, offset + header_len, sizeof(ppp_copy), &ppp_copy);
+	return ppp && ntohs(udp->len) >= sizeof(udp_copy) + header_len + sizeof(ppp_copy) &&
+	       ppp->addr == PPP_ALLSTATIONS && ppp->ctrl == PPP_UI &&
+	       ntohs(ppp->proto) == PPP_IP;
 }
 
 static void l2tpv2_tnl_param_restore(struct npu_params *old, struct npu_params *new)
@@ -518,7 +477,7 @@ static void l2tpv2_tnl_statistic_clear(struct npu_tnl_type *tnl_type)
 static struct npu_tnl_type l2tpv2_type = {
 	.type_name = TYPE_NAME_L2TPV2,
 	.cls_entry_setup = l2tpv2_cls_entry_setup,
-#if KERNEL_VERSION(6, 12, 0) <= LINUX_VERSION_CODE
+#if IS_ENABLED(CONFIG_MTK_NPU_FLOW)
 	.ndev_path_type = DEV_PATH_L2TP,
 	.tnl_flow_param_setup = l2tpv2_tnl_flow_param_setup,
 #endif

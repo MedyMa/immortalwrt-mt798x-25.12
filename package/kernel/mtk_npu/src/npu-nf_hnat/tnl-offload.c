@@ -7,8 +7,11 @@
 
 #include <linux/err.h>
 #include <linux/module.h>
+#include <linux/if_arp.h>
+#include <linux/ppp_channel.h>
 
 #include <net/flow_offload.h>
+#include <net/ip.h>
 #include <net/netfilter/nf_flow_table.h>
 
 #include <mtk_eth_soc.h>
@@ -35,8 +38,14 @@
 static int mtk_npu_nf_hnat_tnl_info_cls_setup(struct npu_tnl_info *tnl_info);
 static void mtk_npu_nf_hnat_tnl_info_cls_destroy(struct npu_tnl_info *tnl_info);
 
-static const struct npu_tnl_info_ops hnat_tnl_info_ops = {
-	.owner = THIS_MODULE,
+static void hnat_flush_index(u32 index)
+{
+	hnat_tunnel_flush(index + __NPU_TUNNEL_TYPE_MAX);
+}
+
+static struct npu_tnl_info_ops hnat_tnl_info_ops = {
+	.flush = mtk_npu_tnl_info_flush_one_ppe_tnl,
+	.flush_index = hnat_flush_index,
 	.cls_setup = mtk_npu_nf_hnat_tnl_info_cls_setup,
 	.cls_destroy = mtk_npu_nf_hnat_tnl_info_cls_destroy,
 };
@@ -44,32 +53,36 @@ static struct npu_nf_hnat_statistic hnat_ts;
 
 static inline void inc_tnl_hnat_decap_offloadable_statistic_success(void)
 {
-	hnat_ts.decap_offloadable.success++;
+	atomic64_inc(&hnat_ts.decap_offloadable.success);
 }
 
 static inline void inc_tnl_hnat_decap_offloadable_statistic_fail(void)
 {
-	hnat_ts.decap_offloadable.fail++;
-}
-
-static inline void inc_tnl_hnat_decap_offload_statistic_success(void)
-{
-	hnat_ts.decap_offload.success++;
+	atomic64_inc(&hnat_ts.decap_offloadable.fail);
 }
 
 static inline void inc_tnl_hnat_decap_offload_statistic_fail(void)
 {
-	hnat_ts.decap_offload.fail++;
-}
-
-static inline void inc_tnl_hnat_encap_offload_statistic_success(void)
-{
-	hnat_ts.encap_offload.success++;
+	atomic64_inc(&hnat_ts.decap_offload.fail);
 }
 
 static inline void inc_tnl_hnat_encap_offload_statistic_fail(void)
 {
-	hnat_ts.encap_offload.fail++;
+	atomic64_inc(&hnat_ts.encap_offload.fail);
+}
+
+static void mtk_npu_hnat_setup_result(struct npu_nf_hnat_statistic_counter *counter,
+				    int ret)
+{
+	/* Learning queues a firmware update before any PPE publication. Those
+	 * packets intentionally fall back until the ACK; this is not a FW error.
+	 */
+	if (ret == -EAGAIN)
+		atomic64_inc(&counter->pending_sync);
+	else if (ret)
+		atomic64_inc(&counter->fail);
+	else
+		atomic64_inc(&counter->success);
 }
 
 
@@ -192,21 +205,15 @@ static int mtk_npu_nf_hnat_tnl_info_cls_setup(struct npu_tnl_info *tnl_info)
 	if (IS_ERR(tcls))
 		return PTR_ERR(tcls);
 
-	if (!tnl_params->cdrt_idx) {
-		ret = tnl_type->cls_entry_setup(tnl_info, &tcls->cls->cdesc);
-		if (ret) {
-			NPU_NOTICE("npu cls entry setup failed: %d\n", ret);
-			goto cls_entry_unprepare;
-		}
-	} else {
-		/*
-		 * since CLS is already filled up with outer protocol rule
-		 * we only update CLS tport here to let matched packet to go through
-		 * QDMA and specify the destination port to NPU
-		 */
-		CLS_DESC_DATA(&tcls->cls->cdesc, tport_idx, NR_EIP197_QDMA_TPORT);
-		CLS_DESC_DATA(&tcls->cls->cdesc, fport, PSE_PORT_TDMA);
-		CLS_DESC_DATA(&tcls->cls->cdesc, qid, 15);
+	/* Crypto/EIP197 is outside this 24.10 tunnel port. No guessed TPORT. */
+	if (tnl_params->cdrt_idx) {
+		ret = -EOPNOTSUPP;
+		goto cls_entry_unprepare;
+	}
+	ret = tnl_type->cls_entry_setup(tnl_info, &tcls->cls->cdesc);
+	if (ret) {
+		NPU_NOTICE("npu cls entry setup failed: %d\n", ret);
+		goto cls_entry_unprepare;
 	}
 
 cls_entry_write:
@@ -237,115 +244,28 @@ static void mtk_npu_nf_hnat_tnl_info_cls_destroy(struct npu_tnl_info *tnl_info)
 		CLS_DESC_DATA(&tcls->cls->cdesc, tport_idx, 2);
 }
 
-static bool mtk_npu_nf_hnat_ppe_tnl_match(struct foe_entry *entry, u32 tnl_idx)
-{
-	u32 bind_tnl_idx;
-
-	if (unlikely(!entry))
-		return false;
-
-	switch (entry->bfib1.pkt_type) {
-	case IPV4_HNAPT:
-		if (entry->ipv4_hnapt.tport_id != NR_TDMA_TPORT
-		    &&  entry->ipv4_hnapt.tport_id != NR_TDMA_QDMA_TPORT)
-			return false;
-
-		bind_tnl_idx = entry->ipv4_hnapt.tops_entry - __NPU_TUNNEL_TYPE_MAX;
-
-		break;
-	default:
-		return false;
-	}
-
-	/* unexpected tunnel index */
-	if (bind_tnl_idx >= __NPU_TUNNEL_TYPE_MAX)
-		return false;
-
-	if (tnl_idx == __NPU_TUNNEL_TYPE_MAX || tnl_idx == bind_tnl_idx)
-		return true;
-
-	return false;
-}
-
+/* HNAT owns FOE locking, MIB retirement and software shadow lifetime. */
 void mtk_npu_tnl_info_flush_one_ppe_tnl_no_lock(struct npu_tnl_info *tnl_info)
 {
-	struct foe_entry *entry;
-	u32 max_entry;
-	u32 ppe_id;
-	u32 eidx;
-
-	if (unlikely(!tnl_info || !hnat_priv))
+	if (!tnl_info)
 		return;
-
-	/* tnl info's lock should be held */
 	lockdep_assert_held(&tnl_info->lock);
-
-	/* clear all NPU related PPE entries */
-	for (ppe_id = 0; ppe_id < MAX_PPE_NUM; ppe_id++) {
-		max_entry = mtk_npu_netsys_ppe_get_max_entry_num(ppe_id);
-		for (eidx = 0; eidx < max_entry; eidx++) {
-			entry = hnat_get_foe_entry(ppe_id, eidx);
-			if (IS_ERR(entry))
-				break;
-
-			spin_lock_bh(&hnat_priv->entry_lock);
-			if (entry_hnat_is_bound(entry) &&
-			    mtk_npu_nf_hnat_ppe_tnl_match(entry, tnl_info->tnl_idx))
-				__entry_delete(entry);
-			spin_unlock_bh(&hnat_priv->entry_lock);
-		}
-	}
-
-	hnat_cache_ebl(1);
-
-	/* make sure all data is written to dram PPE table */
-	wmb();
+	hnat_tunnel_flush(tnl_info->tnl_idx + __NPU_TUNNEL_TYPE_MAX);
 }
 
 void mtk_npu_tnl_info_flush_one_ppe_tnl(struct npu_tnl_info *tnl_info)
 {
-	unsigned long flag = 0;
-
-	if (unlikely(!tnl_info))
+	if (!tnl_info)
 		return;
-
-	spin_lock_irqsave(&tnl_info->lock, flag);
-
+	/* HNAT nests BH locks while draining its ledger. Keep IRQs enabled. */
+	spin_lock_bh(&tnl_info->lock);
 	mtk_npu_tnl_info_flush_one_ppe_tnl_no_lock(tnl_info);
-
-	spin_unlock_irqrestore(&tnl_info->lock, flag);
+	spin_unlock_bh(&tnl_info->lock);
 }
 
 void mtk_npu_tnl_info_flush_all_ppe_tnl(void)
 {
-	struct foe_entry *entry;
-	u32 max_entry;
-	u32 ppe_id;
-	u32 eidx;
-
-	if (!hnat_priv)
-		return;
-
-	/* clear all NPU related PPE entries */
-	for (ppe_id = 0; ppe_id < MAX_PPE_NUM; ppe_id++) {
-		max_entry = mtk_npu_netsys_ppe_get_max_entry_num(ppe_id);
-		for (eidx = 0; eidx < max_entry; eidx++) {
-			entry = hnat_get_foe_entry(ppe_id, eidx);
-			if (IS_ERR(entry))
-				break;
-
-			spin_lock_bh(&hnat_priv->entry_lock);
-			if (entry_hnat_is_bound(entry) &&
-			    mtk_npu_nf_hnat_ppe_tnl_match(entry, __NPU_TUNNEL_TYPE_MAX))
-				__entry_delete(entry);
-			spin_unlock_bh(&hnat_priv->entry_lock);
-		}
-	}
-
-	hnat_cache_ebl(1);
-
-	/* make sure all data is written to dram PPE table */
-	wmb();
+	hnat_tunnel_flush(0);
 }
 
 static inline void mtk_npu_nf_hnat_tnl_info_preserve(struct npu_tnl_type *tnl_type,
@@ -372,46 +292,103 @@ static inline void mtk_npu_nf_hnat_tnl_info_preserve(struct npu_tnl_type *tnl_ty
 		tnl_type->tnl_param_restore(&old->params, &new->params);
 }
 
-/* tnl_info->lock should be held before calling this function */
+static bool mtk_npu_egress_matches(const struct npu_tnl_info *info,
+				 const struct hnat_tunnel_token *token)
+{
+	return token && info->underlay == token->underlay &&
+	       info->egress == token->egress &&
+	       info->egress_flags == token->egress_flags &&
+	       info->vlan_proto == token->vlan_proto &&
+	       info->vlan_tci == token->vlan_tci &&
+	       info->pppoe_sid == token->pppoe_sid;
+}
+
+static void mtk_npu_egress_replace(struct npu_tnl_info *info,
+				   const struct hnat_tunnel_token *token)
+{
+	/* Caller owns the tunnel lock; no borrowed session/socket escapes. */
+	dev_hold(token->underlay);
+	dev_hold(token->egress);
+	if (info->underlay)
+		dev_put(info->underlay);
+	if (info->egress)
+		dev_put(info->egress);
+	info->underlay = token->underlay;
+	info->egress = token->egress;
+	info->egress_flags = token->egress_flags;
+	info->vlan_proto = token->vlan_proto;
+	info->vlan_tci = token->vlan_tci;
+	info->pppoe_sid = token->pppoe_sid;
+}
+
+/* Caller holds tbl_lock with BH disabled and IRQs enabled. This function
+ * takes info->lock and may nest HNAT's BH locks during egress retirement.
+ */
 static int mtk_npu_nf_hnat_tnl_info_setup(struct npu_tnl_input *tnl_input,
 					  struct npu_tnl_type *tnl_type,
 					  struct npu_tnl_info *tnl_info,
 					  struct npu_tnl_params *tnl_params)
 {
 	struct sk_buff *skb = tnl_input->hnat.skb;
-	struct net_device *old_dev = NULL;
+	struct net_device *dev = tnl_input->hnat.dev;
+	const struct hnat_tunnel_token *token = tnl_input->hnat.token;
 	bool has_diff = false;
-	int ret;
+	bool egress_diff = false;
+	int ret = 0;
 
-	if (unlikely(!skb || !tnl_info || !tnl_params))
+	if (unlikely(!skb || !dev || !tnl_info || !tnl_params ||
+		     dev_net(dev) != &init_net))
 		return -EPERM;
 
 	spin_lock(&tnl_info->lock);
 	npu_diag_link(skb, tnl_info);
-	if (tnl_info->status & TNL_STA_UPDATING) {
+	if (dev->type == ARPHRD_PPP && !ppp_netdev_tunnel_offload_allowed(dev)) {
 		spin_unlock(&tnl_info->lock);
-		return -EAGAIN;
+		return -EOPNOTSUPP;
 	}
-
-	ret = mtk_npu_tnl_info_ops_set_no_lock(tnl_info, &hnat_tnl_info_ops);
-	if (ret) {
+	if ((tnl_info->status & (TNL_STA_DELETING | TNL_STA_DELETING_SKIP_PCE)) ||
+	    (tnl_info->dev && tnl_info->dev != dev)) {
 		spin_unlock(&tnl_info->lock);
-		return ret;
+		return -EBUSY;
 	}
+	if (skb_hnat_is_encap(skb)) {
+		if (!token || !token->underlay || !token->egress ||
+		    !netif_running(token->underlay) || !netif_running(token->egress)) {
+			spin_unlock(&tnl_info->lock);
+			return -ENODEV;
+		}
+		egress_diff = !mtk_npu_egress_matches(tnl_info, token);
+		if (egress_diff) {
+			/* Session/VID changes are not in firmware's ABI. Retire PPE
+			 * actions before allowing another host-side egress epoch.
+			 */
+			if (tnl_info->egress)
+				mtk_npu_tnl_info_flush_one_ppe_tnl_no_lock(tnl_info);
+			mtk_npu_egress_replace(tnl_info, token);
+		}
+	}
+	if (!tnl_info->dev) {
+		dev_hold(dev);
+		tnl_info->dev = dev;
+	}
+	tnl_info->ops = &hnat_tnl_info_ops;
 
 	mtk_npu_nf_hnat_tnl_info_preserve(tnl_type, &tnl_info->cache, tnl_params);
 
-	has_diff = memcmp(&tnl_info->cache, tnl_params, sizeof(*tnl_params));
+	has_diff = egress_diff || memcmp(&tnl_info->cache, tnl_params, sizeof(*tnl_params));
 	if (has_diff) {
+		if (!++tnl_info->generation)
+			tnl_info->generation++;
 		memcpy(&tnl_info->cache, tnl_params, sizeof(*tnl_params));
 		mtk_npu_tnl_info_hash_no_lock(tnl_info);
 	}
 
 	if (skb_hnat_is_decap(skb)) {
 		/* the net_device is used to forward pkt to decap'ed inf when Rx */
-		old_dev = mtk_npu_tnl_info_set_dev_no_lock(tnl_info, skb->dev);
 		tnl_info->cache.params.mtu = READ_ONCE(skb->dev->mtu);
 		if (!tnl_info_decap_is_enable(tnl_info)) {
+			if (!++tnl_info->generation)
+				tnl_info->generation++;
 			has_diff = true;
 			tnl_info_decap_enable(tnl_info);
 		}
@@ -419,6 +396,8 @@ static int mtk_npu_nf_hnat_tnl_info_setup(struct npu_tnl_input *tnl_input,
 		/* set skb_hnat_tops(skb) to tunnel index for ppe binding */
 		skb_set_npu_tnl_idx(skb, tnl_info->tnl_idx);
 		if (!tnl_info_encap_is_enable(tnl_info)) {
+			if (!++tnl_info->generation)
+				tnl_info->generation++;
 			has_diff = true;
 			tnl_info_encap_enable(tnl_info);
 		}
@@ -426,25 +405,33 @@ static int mtk_npu_nf_hnat_tnl_info_setup(struct npu_tnl_input *tnl_input,
 
 	if (has_diff)
 		mtk_npu_tnl_info_submit_no_tnl_lock(tnl_info);
-
+	/* Do not publish a PPE binding while firmware synchronization is pending. */
+	if (!(tnl_info->status & TNL_STA_UPDATED) ||
+	    (tnl_info->status & (TNL_STA_UPDATING | TNL_STA_QUEUED)) ||
+	    memcmp(&tnl_info->cache, &tnl_info->tnl_params, sizeof(tnl_info->cache)))
+		ret = -EAGAIN;
+	else if (tnl_input->hnat.generation) {
+		*tnl_input->hnat.generation = tnl_info->generation;
+		if (tnl_input->hnat.token)
+			tnl_input->hnat.token->allocation = tnl_info->allocation_cookie;
+	}
 	npu_diag_link(skb, tnl_info);
 	spin_unlock(&tnl_info->lock);
-	if (old_dev)
-		dev_put(old_dev);
-
-	return 0;
+	return ret;
 }
 
 static bool mtk_npu_tnl_decap_offloadable(struct sk_buff *skb)
 {
 	struct flow_offload_hw_path hw_path = { 0 };
 	struct npu_tnl_type *tnl_type;
-	struct iphdr *iph;
+	struct iphdr copy, *iph;
 	u32 offload_tnl_type_num;
 	u32 cnt;
 	u32 i;
 
-	if (secpath_exists(skb))
+	if (!mtk_npu_is_ready() || dev_net(skb->dev) != &init_net)
+		return (hnat_diag_note(skb, HNAT_DIAG_NPU_NOT_READY, 0, 0, -1, 0, -1), false);
+	if (skb_hnat_cdrt(skb) || secpath_exists(skb))
 		return (hnat_diag_note(skb, HNAT_DIAG_SECURITY_POLICY, 0, 0, -1, 0, -1), false);
 
 	if (unlikely(!mtk_npu_mcu_alive())) {
@@ -459,9 +446,10 @@ static bool mtk_npu_tnl_decap_offloadable(struct sk_buff *skb)
 		return (hnat_diag_note(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL, 0, 0, -1, 0, -1), false);
 	}
 
-	iph = ip_hdr(skb);
-	/* TODO: currently decap only support ipv4 */
-	if (iph->version != 4)
+	iph = skb_header_pointer(skb, skb_network_offset(skb), sizeof(copy), &copy);
+	/* Only a complete, unfragmented IPv4 outer header is supported. */
+	if (!iph || iph->version != 4 || iph->ihl != 5 || ip_is_fragment(iph) ||
+	    !pskb_may_pull(skb, skb_network_offset(skb) + iph->ihl * 4))
 		return (hnat_diag_note(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL, 0, 0, -1, 0, -1), false);
 
 	hw_path.dev = skb->dev;
@@ -528,9 +516,20 @@ static int mtk_npu_tnl_decap_offload(struct sk_buff *skb)
 		return (hnat_diag_note(skb, npu_diag_reason(-ENODEV), -ENODEV, 2, -1, 0, -1), -ENODEV);
 	}
 
+	/* Every parser below restores known, removed headers in headroom.
+	 * Keep those reads above the 16-byte descriptor, and reject unknown
+	 * inner/outer formats before any push operation.
+	 */
+	if (skb->protocol != htons(ETH_P_IP) ||
+	    !pskb_may_pull(skb, sizeof(struct iphdr)) ||
+	    ip_hdr(skb)->version != 4 ||
+	    skb_headroom(skb) < 16 + 64 + (skb_hnat_is_pppoe(skb) ? 8 : 0))
+		return (hnat_diag_note(skb, npu_diag_reason(-EOPNOTSUPP), -EOPNOTSUPP, 2, -1, 0, -1), -EOPNOTSUPP);
+
 	memset(&tnl_params, 0, sizeof(struct npu_tnl_params));
 	memset(&tnl_input, 0, sizeof(struct npu_tnl_input));
 	tnl_input.hnat.skb = skb;
+	tnl_input.hnat.dev = skb->dev;
 
 	/* push removed ethernet header back first */
 	if (tnl_type->has_inner_eth)
@@ -569,8 +568,7 @@ static int mtk_npu_tnl_decap_offload(struct sk_buff *skb)
 	skb_hnat_tops(skb) = 0;
 	skb_hnat_is_decap(skb) = 0;
 
-	(ret == 0 ? inc_tnl_hnat_decap_offload_statistic_success() :
-		    inc_tnl_hnat_decap_offload_statistic_fail());
+	mtk_npu_hnat_setup_result(&hnat_ts.decap_offload, ret);
 
 	if (ret)
 		hnat_diag_note(skb, npu_diag_reason(ret), ret, 2, -1, 0, -1);
@@ -605,7 +603,8 @@ static int mtk_npu_tnl_l2_update(struct sk_buff *skb, struct ethhdr *eth)
 	return ret;
 }
 
-static int __mtk_npu_tnl_encap_offload(struct sk_buff *skb, struct ethhdr *eth)
+static int __mtk_npu_tnl_encap_offload(struct sk_buff *skb, struct ethhdr *eth,
+				      struct net_device *dev, struct hnat_tunnel_token *token)
 {
 	struct npu_tnl_params tnl_params;
 	struct npu_tnl_input tnl_input;
@@ -622,6 +621,11 @@ static int __mtk_npu_tnl_encap_offload(struct sk_buff *skb, struct ethhdr *eth)
 	memset(&tnl_params, 0, sizeof(struct npu_tnl_params));
 	memset(&tnl_input, 0, sizeof(struct npu_tnl_input));
 
+	/* Protocol parsers move only known outer headers. Make that bounded
+	 * prefix linear before any pull/push; payload fragments stay untouched.
+	 */
+	if (!pskb_may_pull(skb, min_t(unsigned int, skb->len, 128)))
+		return -ENOMEM;
 	ret = mtk_npu_encap_param_setup(skb,
 					eth,
 					&tnl_params.params,
@@ -632,6 +636,9 @@ static int __mtk_npu_tnl_encap_offload(struct sk_buff *skb, struct ethhdr *eth)
 	tnl_params.npu_entry_proto = tnl_type->tnl_proto_type;
 	tnl_params.cdrt_idx = skb_hnat_cdrt(skb);
 	tnl_input.hnat.skb = skb;
+	tnl_input.hnat.dev = dev;
+	tnl_input.hnat.generation = &token->generation;
+	tnl_input.hnat.token = token;
 
 	return mtk_npu_tnl_offload(&tnl_input,
 				   tnl_type,
@@ -639,11 +646,14 @@ static int __mtk_npu_tnl_encap_offload(struct sk_buff *skb, struct ethhdr *eth)
 				   mtk_npu_nf_hnat_tnl_info_setup);
 }
 
-static int mtk_npu_tnl_encap_offload(struct sk_buff *skb, struct ethhdr *eth)
+static int mtk_npu_tnl_encap_offload(struct sk_buff *skb, struct ethhdr *eth,
+				  struct net_device *dev, struct hnat_tunnel_token *token)
 {
 	int ret;
 
-	if (unlikely(!skb || !eth)) {
+	if (unlikely(!skb || !eth || !dev || !token ||
+		     !mtk_npu_is_ready() || skb_hnat_cdrt(skb) ||
+		     dev_net(dev) != &init_net)) {
 		inc_tnl_hnat_encap_offload_statistic_fail();
 		return (hnat_diag_note(skb, npu_diag_reason(-EINVAL), -EINVAL, 1, -1, 0, -1), -EINVAL);
 	}
@@ -662,10 +672,11 @@ static int mtk_npu_tnl_encap_offload(struct sk_buff *skb, struct ethhdr *eth)
 	if (skb_hnat_cdrt(skb))
 		ret = mtk_npu_tnl_l2_update(skb, eth);
 	else
-		ret = __mtk_npu_tnl_encap_offload(skb, eth);
+		ret = __mtk_npu_tnl_encap_offload(skb, eth, dev, token);
+	if (!ret)
+		token->index = skb_hnat_tops(skb) - __NPU_TUNNEL_TYPE_MAX;
 
-	(ret == 0 ? inc_tnl_hnat_encap_offload_statistic_success() :
-		    inc_tnl_hnat_encap_offload_statistic_fail());
+	mtk_npu_hnat_setup_result(&hnat_ts.encap_offload, ret);
 
 	if (ret)
 		hnat_diag_note(skb, npu_diag_reason(ret), ret, 1, -1, 0, -1);
@@ -677,39 +688,69 @@ static bool mtk_npu_nf_hnat_tnl_is_encrypted_offloadable(struct sk_buff *skb)
 	return skb && !skb_hnat_cdrt(skb) && skb_dst(skb) && dst_xfrm(skb_dst(skb));
 }
 
-static struct net_device *mtk_npu_get_tnl_dev(u8 npu_crsn)
+static struct net_device *mtk_npu_get_tnl_dev(u8 reason, struct mtk_npu_rx_meta *meta)
 {
-	struct npu_tnl_info *tnl_info;
+	struct npu_tnl_info *info;
+	struct net_device *dev = NULL;
+	unsigned long flags;
 
-	u32 tnl_idx = npu_crsn;
-
-	if (tnl_idx < NPU_CRSN_TNL_ID_START || tnl_idx > NPU_CRSN_TNL_ID_END)
-		return ERR_PTR(-EINVAL);
-
-	tnl_idx = tnl_idx - NPU_CRSN_TNL_ID_START;
-
-	tnl_info = mtk_npu_tnl_info_get_by_idx(tnl_idx);
-	if (IS_ERR(tnl_info))
-		return ERR_PTR(PTR_ERR(tnl_info));
-
-	return tnl_info->dev;
+	if (!mtk_npu_is_ready() || !mtk_npu_mcu_alive() ||
+	    reason < NPU_CRSN_TNL_ID_START || reason > NPU_CRSN_TNL_ID_END)
+		return NULL;
+	info = mtk_npu_tnl_info_get_by_idx(reason - NPU_CRSN_TNL_ID_START);
+	if (IS_ERR(info))
+		return NULL;
+	spin_lock_irqsave(&info->lock, flags);
+	if (mtk_npu_tnl_offload_ready() &&
+	    info->dev && (info->status & TNL_STA_UPDATED) &&
+	    !(info->status & (TNL_STA_UPDATING | TNL_STA_QUEUED |
+			      TNL_STA_DELETING | TNL_STA_DELETING_SKIP_PCE)) &&
+	    info->synced_generation == info->generation &&
+	    (info->dev->type != ARPHRD_PPP ||
+	     ppp_netdev_tunnel_offload_allowed(info->dev)) &&
+	    tnl_info_decap_is_enable(info) && netif_running(info->dev)) {
+		dev = info->dev;
+		meta->entry = info->tnl_idx + __NPU_TUNNEL_TYPE_MAX;
+		meta->tunnel_ifindex = dev->ifindex;
+		meta->generation = info->generation;
+		meta->allocation = info->allocation_cookie;
+		npu_tnl_record_rx_no_lock(info, meta->rx_frame_len);
+		dev_hold(dev);
+	}
+	spin_unlock_irqrestore(&info->lock, flags);
+	return dev;
 }
 
 static int mcu_netstop_pre_enter(struct mcu_state_notifier *notifier)
 {
-	mtk_npu_tnl_info_flush_all_ppe_tnl();
-
 	mtk_npu_tnl_info_backup_all();
+	mtk_npu_tnl_info_flush_all_ppe_tnl();
 
 	return 0;
 }
 
 static int mcu_init_pre_leave(struct mcu_state_notifier *notifier)
 {
-	mtk_npu_misc_set_ppe_num();
+	int ret;
+
+	ret = mtk_npu_misc_set_ppe_num();
+	if (ret)
+		return ret;
+	/* Firmware may relocate the table on every boot/recovery. */
+	ret = mtk_npu_tnl_offload_post_init(NULL);
+	if (ret)
+		return ret;
 
 	mtk_npu_tnl_info_restore_all();
 
+	return 0;
+}
+
+static int mcu_freerun_pre_enter(struct mcu_state_notifier *notifier)
+{
+	/* Some reset events return from NETSTOP without a cold INIT. */
+	if (!mtk_npu_tnl_offload_ready())
+		return mcu_init_pre_leave(notifier);
 	return 0;
 }
 
@@ -721,9 +762,123 @@ static struct mcu_state_notifier mcu_init_notifier = {
 	.pre_leave = mcu_init_pre_leave,
 };
 
+static struct mcu_state_notifier mcu_freerun_notifier = {
+	.pre_enter = mcu_freerun_pre_enter,
+};
+
 static struct npu_tnl_offload_ops nf_hnat_tnl_ops = {
 	.tnl_is_encrypted_offloadable = mtk_npu_nf_hnat_tnl_is_encrypted_offloadable,
 };
+
+static bool mtk_npu_bind_lock(struct net_device *dev, struct hnat_tunnel_token *token)
+{
+	struct npu_tnl_info *info;
+
+	if (!mtk_npu_is_ready() || !mtk_npu_mcu_alive())
+		return false;
+	info = mtk_npu_tnl_info_get_by_idx(token->index);
+	if (IS_ERR(info))
+		return false;
+	spin_lock_bh(&info->lock);
+	if (!mtk_npu_tnl_offload_ready() ||
+	    info->dev != dev || !netif_running(dev) ||
+	    (dev->type == ARPHRD_PPP && !ppp_netdev_tunnel_offload_allowed(dev)) ||
+	    !mtk_npu_egress_matches(info, token) ||
+	    !netif_running(token->underlay) || !netif_running(token->egress) ||
+	    info->generation != token->generation ||
+	    info->allocation_cookie != token->allocation ||
+	    info->synced_generation != info->generation ||
+	    !(info->status & TNL_STA_UPDATED) ||
+	    (info->status & (TNL_STA_UPDATING | TNL_STA_QUEUED |
+			    TNL_STA_DELETING | TNL_STA_DELETING_SKIP_PCE)) ||
+	    !tnl_info_encap_is_enable(info) ||
+	    memcmp(&info->cache, &info->tnl_params, sizeof(info->cache))) {
+		spin_unlock_bh(&info->lock);
+		return false;
+	}
+	token->private = info;
+	return true;
+}
+
+static bool mtk_npu_rx_bind_lock(const struct mtk_npu_rx_meta *meta,
+				 struct hnat_tunnel_token *token)
+{
+	struct npu_tnl_info *info;
+
+	if (!mtk_tnl_rx_meta_current(meta) || meta->entry < 32 || meta->entry >= 64 ||
+	    !mtk_npu_is_ready() || !mtk_npu_mcu_alive())
+		return false;
+	info = mtk_npu_tnl_info_get_by_idx(meta->entry - 32);
+	if (IS_ERR(info))
+		return false;
+	spin_lock_bh(&info->lock);
+	if (!mtk_npu_tnl_offload_ready() || !info->dev ||
+	    (u32)info->dev->ifindex != meta->tunnel_ifindex || !netif_running(info->dev) ||
+	    info->generation != meta->generation ||
+	    info->allocation_cookie != meta->allocation ||
+	    info->synced_generation != info->generation ||
+	    !(info->status & TNL_STA_UPDATED) ||
+	    (info->status & (TNL_STA_UPDATING | TNL_STA_QUEUED |
+			    TNL_STA_DELETING | TNL_STA_DELETING_SKIP_PCE)) ||
+	    !tnl_info_decap_is_enable(info) ||
+	    (info->dev->type == ARPHRD_PPP &&
+	     !ppp_netdev_tunnel_offload_allowed(info->dev))) {
+		spin_unlock_bh(&info->lock);
+		return false;
+	}
+	token->index = meta->entry - 32;
+	token->private = info;
+	return true;
+}
+
+static void mtk_npu_bind_unlock(struct hnat_tunnel_token *token)
+{
+	struct npu_tnl_info *info = token->private;
+
+	spin_unlock_bh(&info->lock);
+}
+
+static const struct hnat_tunnel_ops packet_ops = {
+	.decap_offloadable = mtk_npu_tnl_decap_offloadable,
+	.decap_offload = mtk_npu_tnl_decap_offload,
+	.encap_offload = mtk_npu_tnl_encap_offload,
+	.bind_lock = mtk_npu_bind_lock,
+	.rx_bind_lock = mtk_npu_rx_bind_lock,
+	.bind_unlock = mtk_npu_bind_unlock,
+};
+static const struct mtk_tnl_rx_ops rx_ops = { .get_dev = mtk_npu_get_tnl_dev };
+static const struct ppp_tunnel_offload_ops ppp_ops = {
+	.quiesce = mtk_npu_tnl_info_quiesce_ppp,
+	.invalidate = mtk_npu_tnl_info_invalidate_ppp,
+};
+
+int mtk_npu_nf_hnat_tnl_offload_start(void)
+{
+	int ret;
+
+	ret = ppp_tunnel_offload_register(&ppp_ops);
+	if (ret)
+		return ret;
+	ret = mtk_tnl_rx_register(&rx_ops);
+	if (ret)
+		goto ppp_remove;
+	ret = hnat_tunnel_register(&packet_ops);
+	if (ret)
+		mtk_tnl_rx_unregister(&rx_ops);
+	if (!ret)
+		return 0;
+ppp_remove:
+	ppp_tunnel_offload_unregister(&ppp_ops);
+	return ret;
+}
+
+void mtk_npu_nf_hnat_tnl_offload_stop(void)
+{
+	ppp_tunnel_offload_unregister(&ppp_ops);
+	hnat_tunnel_unregister(&packet_ops);
+	mtk_tnl_rx_unregister(&rx_ops);
+	mtk_npu_tnl_info_flush_all_ppe_tnl();
+}
 
 int mtk_npu_nf_hnat_tnl_offload_init(void)
 {
@@ -732,80 +887,90 @@ int mtk_npu_nf_hnat_tnl_offload_init(void)
 	ret = mtk_npu_tnl_offload_ops_register(&nf_hnat_tnl_ops);
 	if (ret)
 		return ret;
-
-	mtk_npu_gretap_init();
-
-	mtk_npu_l2tpv2_init();
-
-	mtk_npu_pptp_init();
-
-	mtk_npu_vxlan_init();
-
-	ret = mtk_npu_mcu_state_notifier_register(MCU_STATE_TYPE_NETSTOP,
-						  &mcu_netstop_notifier);
+	ret = mtk_npu_mcu_state_notifier_register(MCU_STATE_TYPE_NETSTOP, &mcu_netstop_notifier);
 	if (ret)
-		goto err_protocols;
-	ret = mtk_npu_mcu_state_notifier_register(MCU_STATE_TYPE_INIT,
-						  &mcu_init_notifier);
-	if (ret) {
-		mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_NETSTOP,
-						      &mcu_netstop_notifier);
-		goto err_protocols;
-	}
-
-	WRITE_ONCE(mtk_tnl_encap_offload, mtk_npu_tnl_encap_offload);
-	WRITE_ONCE(mtk_tnl_decap_offload, mtk_npu_tnl_decap_offload);
-	WRITE_ONCE(mtk_tnl_decap_offloadable, mtk_npu_tnl_decap_offloadable);
-	WRITE_ONCE(mtk_get_tnl_dev, mtk_npu_get_tnl_dev);
-
-	return 0;
-
-err_protocols:
-	mtk_npu_vxlan_deinit();
+		goto ops_remove;
+	ret = mtk_npu_mcu_state_notifier_register(MCU_STATE_TYPE_INIT, &mcu_init_notifier);
+	if (ret)
+		goto netstop_remove;
+	ret = mtk_npu_mcu_state_notifier_register(MCU_STATE_TYPE_FREERUN,
+						&mcu_freerun_notifier);
+	if (ret)
+		goto init_remove;
+	ret = mtk_npu_gretap_init();
+	if (ret)
+		goto freerun_remove;
+	ret = mtk_npu_l2tpv2_init();
+	if (ret)
+		goto gre_remove;
+	ret = mtk_npu_vxlan_init();
+	if (ret)
+		goto l2tp_remove;
+	ret = mtk_npu_pptp_init();
+	if (ret)
+		goto vxlan_remove;
+	ret = mtk_npu_misc_set_ppe_num();
+	if (!ret)
+		return 0;
 	mtk_npu_pptp_deinit();
+vxlan_remove:
+	mtk_npu_vxlan_deinit();
+l2tp_remove:
 	mtk_npu_l2tpv2_deinit();
+gre_remove:
 	mtk_npu_gretap_deinit();
+freerun_remove:
+	mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_FREERUN, &mcu_freerun_notifier);
+init_remove:
+	mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_INIT, &mcu_init_notifier);
+netstop_remove:
+	mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_NETSTOP, &mcu_netstop_notifier);
+ops_remove:
 	mtk_npu_tnl_offload_ops_unregister(&nf_hnat_tnl_ops);
 	return ret;
 }
 
 void mtk_npu_nf_hnat_tnl_offload_deinit(void)
 {
-	WRITE_ONCE(mtk_tnl_encap_offload, NULL);
-	WRITE_ONCE(mtk_tnl_decap_offload, NULL);
-	WRITE_ONCE(mtk_tnl_decap_offloadable, NULL);
-	WRITE_ONCE(mtk_get_tnl_dev, NULL);
-	synchronize_net();
-
+	mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_FREERUN, &mcu_freerun_notifier);
+	mtk_npu_pptp_deinit();
+	mtk_npu_vxlan_deinit();
+	mtk_npu_l2tpv2_deinit();
+	mtk_npu_gretap_deinit();
 	mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_INIT, &mcu_init_notifier);
 	mtk_npu_mcu_state_notifier_unregister(MCU_STATE_TYPE_NETSTOP, &mcu_netstop_notifier);
-
-	mtk_npu_tnl_info_flush_all_ppe_tnl();
-
-	mtk_npu_gretap_deinit();
-
-	mtk_npu_l2tpv2_deinit();
-
-	mtk_npu_pptp_deinit();
-
-	mtk_npu_vxlan_deinit();
-
 	mtk_npu_tnl_offload_ops_unregister(&nf_hnat_tnl_ops);
 }
 
 void mtk_npu_nf_hnat_statistic_show(struct seq_file *s)
 {
-	seq_printf(s, "decap offloadable|success: %llu|fail: %llu|\n",
-		   hnat_ts.decap_offloadable.success, hnat_ts.decap_offloadable.fail);
-	seq_printf(s, "decap offload    |success: %llu|fail: %llu|\n",
-		   hnat_ts.decap_offload.success, hnat_ts.decap_offload.fail);
-	seq_printf(s, "encap offload    |success: %llu|fail: %llu|\n",
-		   hnat_ts.encap_offload.success, hnat_ts.encap_offload.fail);
+	seq_puts(s, "unit=host_eligibility_and_setup_events; not_hardware_bytes_or_forwarding_proof\n");
+	seq_printf(s, "decap offloadable|success: %lld|fail: %lld|\n",
+		   atomic64_read(&hnat_ts.decap_offloadable.success),
+		   atomic64_read(&hnat_ts.decap_offloadable.fail));
+	seq_printf(s, "decap offload    |success: %lld|fail: %lld|pending_sync: %lld|\n",
+		   atomic64_read(&hnat_ts.decap_offload.success),
+		   atomic64_read(&hnat_ts.decap_offload.fail),
+		   atomic64_read(&hnat_ts.decap_offload.pending_sync));
+	seq_printf(s, "encap offload    |success: %lld|fail: %lld|pending_sync: %lld|\n",
+		   atomic64_read(&hnat_ts.encap_offload.success),
+		   atomic64_read(&hnat_ts.encap_offload.fail),
+		   atomic64_read(&hnat_ts.encap_offload.pending_sync));
 }
 
 void mtk_npu_nf_hnat_statistic_clear(void)
 {
-	memset(&hnat_ts, 0, sizeof(struct npu_nf_hnat_statistic));
+	struct npu_nf_hnat_statistic_counter *counters[] = {
+		&hnat_ts.decap_offloadable, &hnat_ts.decap_offload,
+		&hnat_ts.encap_offload,
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(counters); i++) {
+		atomic64_set(&counters[i]->success, 0);
+		atomic64_set(&counters[i]->fail, 0);
+		atomic64_set(&counters[i]->pending_sync, 0);
+	}
 }
 
 void mtk_npu_nf_hnat_statistic_enable(bool en)

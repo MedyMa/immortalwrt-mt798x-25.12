@@ -99,7 +99,7 @@ static int vxlan_cls_entry_setup(struct npu_tnl_info *tnl_info,
 			   CLS_DESC_VALID_LOWER_HALF_WORD_BIT |
 			   CLS_DESC_VALID_DPORT_BIT);
 	CLS_DESC_MASK_DATA(cdesc, l4_dport, CLS_DESC_L4_DPORT_MASK, 4789);
-	CLS_DESC_MASK_DATA(cdesc, l4_hdr_usr_data, 0xFFFF0000, 0x08000000);
+	CLS_DESC_MASK_DATA(cdesc, l4_hdr_usr_data, 0xFFFFFFFF, 0x08000000);
 
 	return 0;
 }
@@ -113,7 +113,8 @@ static inline bool vxlan_offload_valid(struct sk_buff *skb)
 	if (!vxlan)
 		return false;
 
-	return (VXLAN_HF_VNI & vxlan->vx_flags);
+	return vxlan->vx_flags == VXLAN_HF_VNI &&
+	       !(vxlan->vx_vni & htonl(0xff));
 }
 
 static int vxlan_udp_decap_param_setup(struct sk_buff *skb, struct npu_params *params)
@@ -223,43 +224,18 @@ static int vxlan_tnl_l2_param_update(struct npu_params *params,
 
 static bool vxlan_tnl_decap_offloadable(struct sk_buff *skb)
 {
-	struct udphdr *udp;
-	struct udphdr udph;
-	struct iphdr *ip;
-	bool ret = true;
-	u32 ip_len;
+	struct udphdr udp_copy, *udp;
+	struct vxlanhdr vx_copy, *vx;
+	const struct iphdr *ip = ip_hdr(skb);
+	unsigned int offset = ip->ihl * 4;
 
-	ip = ip_hdr(skb);
 	if (ip->protocol != IPPROTO_UDP)
 		return false;
-
-	ip_len = ip_hdr(skb)->ihl * 4;
-
-	/* check udp */
-	skb_pull(skb, ip_len);
-	udp = skb_header_pointer(skb, 0, sizeof(struct udphdr), &udph);
-	if (!udp) {
-		ret = false;
-		goto restore_ip;
-	}
-
-	if (ntohs(udp->dest) != UDP_VXLAN_PORT) {
-		ret = false;
-		goto restore_ip;
-	}
-
-	skb_pull(skb, sizeof(struct udphdr));
-	if (!vxlan_offload_valid(skb)) {
-		ret = false;
-		goto restore_udp;
-	}
-
-restore_udp:
-	skb_push(skb, sizeof(struct udphdr));
-restore_ip:
-	skb_push(skb, ip_len);
-
-	return ret;
+	udp = skb_header_pointer(skb, offset, sizeof(udp_copy), &udp_copy);
+	vx = skb_header_pointer(skb, offset + sizeof(udp_copy), sizeof(vx_copy), &vx_copy);
+	return udp && vx && udp->dest == htons(UDP_VXLAN_PORT) &&
+	       ntohs(udp->len) >= sizeof(udp_copy) + sizeof(vx_copy) + ETH_HLEN &&
+	       vx->vx_flags == VXLAN_HF_VNI && !(vx->vx_vni & htonl(0xff));
 }
 
 static void vxlan_tnl_param_restore(struct npu_params *old, struct npu_params *new)

@@ -253,9 +253,8 @@ int mtk_trm_cpu_utilization(enum core_id core, u32 *cpu_utilization)
 	if ((unsigned int)core > CORE_MGMT || !cpu_utilization)
 		return -EINVAL;
 
-	if (!mtk_npu_is_ready() || !mtk_npu_mcu_alive()) {
+	if (!mtk_npu_mcu_alive())
 		return -EAGAIN;
-	}
 
 	memset(&msg, 0, sizeof(struct mailbox_msg));
 	msg.msg1 = TRM_CMD_TYPE_CPU_UTILIZATION;
@@ -272,15 +271,17 @@ int mtk_trm_cpu_utilization(enum core_id core, u32 *cpu_utilization)
 			    &result,
 			    trm_cpu_utilization_ret_handler);
 	if (ret) {
-		dev_warn_ratelimited(npu.dev, "send CPU_UTILIZATION cmd failed(%d)\n", ret);
+		dev_warn_ratelimited(npu.dev, "CPU utilization core %u request failed: %d\n",
+				     (unsigned int)core, ret);
 		return ret;
 	}
 
-	if (result.error)
+	if (result.error) {
+		dev_warn_ratelimited(npu.dev, "Invalid CPU utilization reply for core %u: %d\n",
+				     (unsigned int)core, result.error);
 		return result.error;
-
+	}
 	*cpu_utilization = result.percent;
-
 	return 0;
 }
 

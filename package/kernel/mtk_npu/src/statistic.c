@@ -48,7 +48,7 @@ static void fw_statistic_show_core_offload_fw_tnl(struct seq_file *s,
 			   read16_statistic(&tunnel->tnl_decap_done[i]));
 		seq_printf(s, "tunnel encap fail: %u|tunnel decap fail: %u|\n",
 			   read16_statistic(&tunnel->tnl_encap_fail[i]),
-			   read16_statistic(&tunnel->tnl_encap_fail[i]));
+			   read16_statistic(&tunnel->tnl_decap_fail[i]));
 	}
 }
 
@@ -373,27 +373,22 @@ static const struct file_operations mcu_statistic_ops = {
 
 int mtk_npu_statistic_init(struct platform_device *pdev)
 {
-	/*
-	 * TODO: statistic
-	 * struct dentry *dir;
-	 * uintptr_t addr;
+	struct dentry *dir;
 
-	 * addr = mtk_npu_tnl_mgmt_fw_statistic_addr_get() - MGMT_PERI_BASE;
-	 * fw_pkt_stat = (struct npu_pkt_stat *)addr;
+	dir = debugfs_create_dir("statistic", npu_debugfs_root);
+	if (IS_ERR_OR_NULL(dir))
+		return dir ? PTR_ERR(dir) : -ENOMEM;
 
-	 * dir = debugfs_create_dir("statistic", npu_debugfs_root);
+	debugfs_create_file("tunnel", 0444, dir, NULL, &tnl_statistic_ops);
+	debugfs_create_file("mcu", 0444, dir, NULL, &mcu_statistic_ops);
+	npu_statistic_dir = dir;
 
-	 * debugfs_create_file("tunnel", 0444, dir, NULL, &tnl_statistic_ops);
-
-	 * debugfs_create_file("mcu", 0444, dir, NULL, &mcu_statistic_ops);
-
-	 * debugfs_create_file("fw_statistic", 0444, dir, NULL, &fw_statistic_ops);
-
-	 * mtk_npu_tnl_statistic_enable(true);
-	 * mtk_npu_mcu_statistic_enable(true);
-
-	 * npu_statistic_dir = dir;
+	/* Only host-maintained event counters are available through this ABI.
+	 * The firmware statistic address API is absent in this source release;
+	 * do not guess an MMIO address or expose its 16-bit values as byte totals.
 	 */
+	mtk_npu_tnl_statistic_enable(true);
+	mtk_npu_mcu_statistic_enable(true);
 
 	return 0;
 }

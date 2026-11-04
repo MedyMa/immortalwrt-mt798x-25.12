@@ -413,10 +413,7 @@ static ssize_t mcast_enable_store(struct device *dev, struct device_attribute *a
 		return -EINVAL;
 
 	ret = mtk_npu_mcast_enable(val);
-	if (ret)
-		return ret;
-
-	return count;
+	return ret ? ret : count;
 }
 
 static int mcast_group_insert(const char *buf)

@@ -10,17 +10,19 @@
 
 #include "npu/debugfs.h"
 #include "npu/internal.h"
+#include "npu/npu.h"
 #include "npu/tunnel.h"
 
 static int debugfs_tnl_info_cls_setup(struct npu_tnl_info *tnl_info);
 static void debugfs_tnl_info_cls_destroy(struct npu_tnl_info *tnl_info);
 
-static const struct npu_tnl_info_ops debugfs_tnl_info_ops = {
+static struct npu_tnl_info_ops debugfs_tnl_info_ops = {
 	.cls_setup = debugfs_tnl_info_cls_setup,
 	.cls_destroy = debugfs_tnl_info_cls_destroy,
 };
 
 struct dentry *npu_debugfs_root;
+static struct dentry *npu_tunnel_debugfs;
 
 static int debugfs_tnl_info_cls_setup(struct npu_tnl_info *tnl_info)
 {
@@ -110,13 +112,7 @@ static int npu_tnl_add_new_tnl(const char *buf)
 	if (IS_ERR(tnl_info))
 		return -ENOMEM;
 
-	spin_lock_bh(&tnl_info->lock);
-	ret = mtk_npu_tnl_info_ops_set_no_lock(tnl_info, &debugfs_tnl_info_ops);
-	spin_unlock_bh(&tnl_info->lock);
-	if (ret) {
-		mtk_npu_tnl_info_delete(tnl_info);
-		return ret;
-	}
+	tnl_info->ops = &debugfs_tnl_info_ops;
 
 	tnl_info->flag |= TNL_INFO_DEBUG;
 	memcpy(&tnl_info->cache, &tnl_params, sizeof(struct npu_tnl_params));
@@ -135,7 +131,10 @@ static ssize_t npu_tnl_write(struct file *file, const char __user *buffer,
 	int nchar = 0;
 	int ret = 0;
 
-	if (count > sizeof(buf))
+	if (!mtk_npu_is_ready())
+		return -ENODEV;
+
+	if (count >= sizeof(buf))
 		return -ENOMEM;
 
 	if (copy_from_user(buf, buffer, count))
@@ -158,6 +157,7 @@ static ssize_t npu_tnl_write(struct file *file, const char __user *buffer,
 }
 
 static const struct file_operations npu_tnl_fops = {
+	.owner = THIS_MODULE,
 	.open = simple_open,
 	.write = npu_tnl_write,
 };
@@ -165,13 +165,27 @@ static const struct file_operations npu_tnl_fops = {
 int mtk_npu_debugfs_init(struct platform_device *pdev)
 {
 	npu_debugfs_root = debugfs_create_dir("npu", NULL);
+	if (IS_ERR(npu_debugfs_root))
+		return PTR_ERR(npu_debugfs_root);
 
-	debugfs_create_file("tunnel", 0444, npu_debugfs_root, NULL, &npu_tnl_fops);
+	npu_tunnel_debugfs = debugfs_create_file("tunnel", 0200, npu_debugfs_root,
+					 NULL, &npu_tnl_fops);
 
 	return 0;
 }
 
+void mtk_npu_debugfs_quiesce(void)
+{
+	/* Removing a proxy file waits for an already admitted write. Keep
+	 * the relay parent alive until logger has drained its own work.
+	 */
+	debugfs_remove(npu_tunnel_debugfs);
+	npu_tunnel_debugfs = NULL;
+}
+
 void mtk_npu_debugfs_deinit(struct platform_device *pdev)
 {
+	mtk_npu_debugfs_quiesce();
 	debugfs_remove_recursive(npu_debugfs_root);
+	npu_debugfs_root = NULL;
 }

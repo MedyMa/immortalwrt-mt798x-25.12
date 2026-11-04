@@ -14,7 +14,7 @@ static inline void inc_udp_statistic_encap_success(enum npu_tunnel_type type)
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -28,7 +28,7 @@ static inline void inc_udp_statistic_encap_null_hdr_ptr(enum npu_tunnel_type typ
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -42,7 +42,7 @@ static inline void inc_udp_statistic_decap_success(enum npu_tunnel_type type)
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -56,7 +56,7 @@ static inline void inc_udp_statistic_decap_null_hdr_ptr(enum npu_tunnel_type typ
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);

@@ -12,12 +12,13 @@
 #include "npu/protocol/network/ip.h"
 
 #include <mtk_eth_soc.h>
+#include <mtk_tnl.h>
 
 static inline void inc_eth_statistic_encap_success(enum npu_tunnel_type type)
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -31,7 +32,7 @@ static inline void inc_eth_statistic_encap_unsupport_proto(enum npu_tunnel_type 
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -45,7 +46,7 @@ static inline void inc_eth_statistic_decap_success(enum npu_tunnel_type type)
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -59,7 +60,7 @@ static inline void inc_eth_statistic_decap_unsupport_proto(enum npu_tunnel_type 
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -73,7 +74,7 @@ static inline void inc_eth_statistic_decap_null_hdr_ptr(enum npu_tunnel_type typ
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -122,11 +123,19 @@ int mtk_npu_eth_decap_param_setup(struct sk_buff *skb, struct npu_params *params
 {
 	struct ethhdr *eth;
 	struct ethhdr ethh;
+	bool pppoe;
+	unsigned int restore_len;
 	int ret = 0;
 
-	skb_push(skb, sizeof(struct ethhdr));
-	if (skb_tnl_is_pppoe(skb))
-		skb_push(skb, PPPOE_SES_HLEN);
+	/* The producer uses the shared MT7988 headroom descriptor. Do not
+	 * interpret ordinary packet bytes or uninitialised headroom as flags.
+	 */
+	pppoe = skb_headroom(skb) >= sizeof(struct mtk_tnl_desc) &&
+		is_tnl_tag_valid(skb) && skb_tnl_is_pppoe(skb);
+	restore_len = sizeof(struct ethhdr) + (pppoe ? PPPOE_SES_HLEN : 0);
+	if (skb_headroom(skb) < restore_len)
+		return -EINVAL;
+	skb_push(skb, restore_len);
 
 	eth = skb_header_pointer(skb, 0, sizeof(struct ethhdr), &ethh);
 	if (unlikely(!eth)) {
@@ -151,9 +160,7 @@ int mtk_npu_eth_decap_param_setup(struct sk_buff *skb, struct npu_params *params
 	params->mac.eth.h_proto = eth->h_proto;
 
 out:
-	skb_pull(skb, sizeof(struct ethhdr));
-	if (skb_tnl_is_pppoe(skb))
-		skb_pull(skb, PPPOE_SES_HLEN);
+	skb_pull(skb, restore_len);
 
 	if (!ret)
 		inc_eth_statistic_decap_success(params->tunnel.type);

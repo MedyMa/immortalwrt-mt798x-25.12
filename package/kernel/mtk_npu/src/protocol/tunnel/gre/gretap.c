@@ -98,7 +98,7 @@ static int gretap_cls_entry_setup(struct npu_tnl_info *tnl_info,
 			   CLS_DESC_L4_VALID_MASK,
 			   CLS_DESC_VALID_UPPER_HALF_WORD_BIT |
 			   CLS_DESC_VALID_LOWER_HALF_WORD_BIT);
-	CLS_DESC_MASK_DATA(cdesc, l4_hdr_usr_data, 0x0000FFFF, 0x00006558);
+	CLS_DESC_MASK_DATA(cdesc, l4_hdr_usr_data, 0xFFFFFFFF, 0x00006558);
 
 	return 0;
 }
@@ -178,7 +178,7 @@ static bool gretap_tnl_decap_offloadable(struct sk_buff *skb)
 	if (unlikely(!pgre))
 		return false;
 
-	if (ntohs(pgre->protocol) != ETH_P_TEB)
+	if (pgre->flags || ntohs(pgre->protocol) != ETH_P_TEB)
 		return false;
 
 	return true;

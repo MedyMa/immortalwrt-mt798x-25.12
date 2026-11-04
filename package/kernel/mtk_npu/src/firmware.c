@@ -11,7 +11,6 @@
 #include <linux/err.h>
 #include <linux/firmware.h>
 #include <linux/io.h>
-#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
@@ -22,7 +21,7 @@
 #include "npu/mem-test.h"
 #include "npu/mcu.h"
 
-/* Firmware tables use the management core's alias of the NPU SRAM. */
+/* Firmware uses the management-core alias, not the AP MMIO address. */
 int mtk_npu_fw_offset(u32 addr, size_t len, u32 *offset)
 {
 	const u32 mgmt_base = 0x09100000;
@@ -30,17 +29,16 @@ int mtk_npu_fw_offset(u32 addr, size_t len, u32 *offset)
 
 	if (!offset)
 		return -EINVAL;
-	if (!npu.base || !len || addr < mgmt_base || !IS_ALIGNED(addr, sizeof(u32)))
+	if (!npu.base)
+		return -ENODEV;
+	if (!len || addr < mgmt_base || !IS_ALIGNED(addr, sizeof(u32)))
 		return -ERANGE;
-
 	ofs = addr - mgmt_base;
 	if (ofs > npu.size || len > npu.size - ofs)
 		return -ERANGE;
-
-	*offset = ofs;
+	*offset = addr - mgmt_base;
 	return 0;
 }
-EXPORT_SYMBOL(mtk_npu_fw_offset);
 
 #define NPU_MGMT_IMG				"mediatek/tops-mgmt.img"
 #define NPU_OFFLOAD_IMG				"mediatek/tops-offload.img"
@@ -770,22 +768,6 @@ int mtk_npu_fw_bring_up_default_cores(void)
 	return ret;
 }
 
-void mtk_npu_fw_stop_default_cores(void)
-{
-	u32 core;
-
-	/* Stall and reset all cores before their clocks and power are removed. */
-	npu_write(TOP_CORE_NPU_CTRL, 1);
-	npu_write(TOP_CORE_NPU_SW_RST, 1);
-	for (core = 0; core < CORE_OFFLOAD_NUM; core++) {
-		npu_write(CLUST_CORE_NPU_CTRL(core), 1);
-		npu_write(CLUST_CORE_NPU_SW_RST(core), 1);
-	}
-
-	/* Complete the posted reset writes before power-down. */
-	npu_read(CLUST_CORE_NPU_SW_RST(CORE_OFFLOAD_NUM - 1));
-}
-
 #if defined(CONFIG_MTK_NPU_CORE_DEBUG)
 static void mtk_npu_fw_enable_core_debug(void)
 {
@@ -800,6 +782,21 @@ static void mtk_npu_fw_enable_core_debug(void)
 		npu_write(CLUST_CORE_OCD_CTRL(i), 0x1);
 }
 #endif /* defined(CONFIG_MTK_NPU_CORE_DEBUG) */
+
+void mtk_npu_fw_stop_default_cores(void)
+{
+	u32 core;
+
+	/* Use the same stall/reset bits as the firmware boot sequence. */
+	npu_write(TOP_CORE_NPU_CTRL, 1);
+	npu_write(TOP_CORE_NPU_SW_RST, 1);
+	for (core = 0; core < CORE_OFFLOAD_NUM; core++) {
+		npu_write(CLUST_CORE_NPU_CTRL(core), 1);
+		npu_write(CLUST_CORE_NPU_SW_RST(core), 1);
+	}
+	/* Complete the posted reset writes before clock and power removal. */
+	npu_read(CLUST_CORE_NPU_SW_RST(CORE_OFFLOAD_NUM - 1));
+}
 
 void mtk_npu_fw_clean_up(void)
 {

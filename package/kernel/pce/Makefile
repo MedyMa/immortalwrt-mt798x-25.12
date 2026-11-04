@@ -7,7 +7,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=pce
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_FILE_DEPENDS:=$(CURDIR)/src/
 
 include $(INCLUDE_DIR)/package.mk
@@ -43,8 +43,6 @@ define KernelPackage/pce
   TITLE:= MTK Packet Classification Engine Driver
   FILES+=$(PKG_BUILD_DIR)/pce.ko
   KCONFIG:=
-  DEPENDS:= \
-	PACKAGE_kmod-mediatek_hnat:kmod-mediatek_hnat
 endef
 
 define KernelPackage/pce/description

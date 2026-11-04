@@ -8,7 +8,7 @@ NPU_KERNEL_PKGS+= \
 	npu-nf_hnat \
 	npu-nf_hnat-autoload
 
-ifeq ($(CONFIG_PACKAGE_kmod-npu-nf_hnat),y)
+ifneq ($(filter y m,$(CONFIG_PACKAGE_kmod-npu-nf_hnat)),)
 EXTRA_KCONFIG+= \
 	CONFIG_MTK_NPU_HNAT=$(CONFIG_MTK_NPU_HNAT)
 endif # CONFIG_PACKAGE_kmod-npu-nf_hnat
@@ -17,11 +17,13 @@ define KernelPackage/npu-nf_hnat
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:=MediaTek Network Processor Unit with HNAT Kernel Driver
-  FILES+=$(PKG_BUILD_DIR)/npu-nf_hnat/npu-nf_hnat.ko
-  KCONFIG:=
+  DEFAULT:=y if MTK_NPU_24_10_TUNNEL_BACKEND
+  KCONFIG:= CONFIG_MTK_PPP_TUNNEL_INFO=y
   DEPENDS:= \
+	@MTK_NPU_24_10_TUNNEL_BACKEND \
 	kmod-npu \
-	kmod-mediatek_hnat \
+	+kmod-mediatek_hnat \
+	+MTK_NPU_24_10_MCAST_BACKEND:kmod-npu-mcast \
 	+@MTK_NPU_HNAT
 endef
 
@@ -35,7 +37,7 @@ define KernelPackage/npu-nf_hnat-autoload
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:= MediaTek Network Processor Unit with HNAT Kernel Driver Auto Load
-  AUTOLOAD:=$(call AutoLoad,71,npu-nf_hnat)
+  DEFAULT:=y if MTK_NPU_24_10_TUNNEL_BACKEND
   KCONFIG:=
   DEPENDS:= \
 	kmod-npu-nf_hnat \

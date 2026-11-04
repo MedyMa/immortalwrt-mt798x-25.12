@@ -138,7 +138,7 @@ u32 mtk_npu_netsys_ppe_get_max_entry_num(u32 ppe_id)
 	else
 		return PPE_DEFAULT_ENTRY_SIZE << 5; /* max entry count */
 
-	tbl_entry_num = ppe_read(ppe, PPE_TBL_CFG);
+	tbl_entry_num = ppe_read(ppe, PPE_TBL_CFG) & GENMASK(2, 0);
 	if (tbl_entry_num > 5)
 		return PPE_DEFAULT_ENTRY_SIZE << 5;
 
@@ -166,28 +166,30 @@ static int mtk_npu_netsys_base_init(struct platform_device *pdev)
 
 	eth_pdev = of_find_device_by_node(fe_mem);
 	if (!eth_pdev) {
-		ret = -ENODEV;
+		ret = -EPROBE_DEFER;
 		goto out;
 	}
 
-	if (!eth_pdev->dev.driver) {
-		ret = -EFAULT;
-		goto out;
+	if (!eth_pdev->dev.driver || !platform_get_drvdata(eth_pdev)) {
+		ret = -EPROBE_DEFER;
+		goto put_device;
 	}
 
 	if (of_address_to_resource(fe_mem, 0, &res)) {
 		ret = -ENXIO;
-		goto out;
+		goto put_device;
 	}
 
 	netsys.base = devm_ioremap(&pdev->dev, res.start, resource_size(&res));
 	if (!netsys.base) {
 		ret = -ENOMEM;
-		goto out;
+		goto put_device;
 	}
 
 	netsys.eth = platform_get_drvdata(eth_pdev);
 
+put_device:
+	put_device(&eth_pdev->dev);
 out:
 	of_node_put(fe_mem);
 
@@ -200,10 +202,19 @@ static int mtk_npu_netsys_ppe_num_init(struct platform_device *pdev)
 	u32 val = 0;
 	int ret = 0;
 
-	/* Todo: nf_hnat and flowblock has different way to get ppe_num
-	 * Maybe we could seperate ppe_num_init in npu-nf_hnat.ko and
-	 * npu-flow.ko
-	 */
+#if IS_ENABLED(CONFIG_MTK_NPU_FLOW)
+	unsigned int i;
+
+	if (!netsys.eth || !netsys.eth->soc->ppe_num ||
+	    netsys.eth->soc->ppe_num > ARRAY_SIZE(netsys.eth->ppe))
+		return -ENODEV;
+	for (i = 0; i < netsys.eth->soc->ppe_num; i++)
+		if (!netsys.eth->ppe[i] || !netsys.eth->ppe[i]->foe_table)
+			return -EPROBE_DEFER;
+	netsys.ppe_num = netsys.eth->soc->ppe_num;
+	return 0;
+#endif
+
 	netsys.ppe_num = 3;
 
 	hnat = of_parse_phandle(pdev->dev.of_node, "hnat", 0);
@@ -219,6 +230,8 @@ static int mtk_npu_netsys_ppe_num_init(struct platform_device *pdev)
 		netsys.ppe_num = val;
 
 	of_node_put(hnat);
+	if (!netsys.ppe_num || netsys.ppe_num > ARRAY_SIZE(netsys.eth->ppe))
+		return -ERANGE;
 
 	return 0;
 }
@@ -228,8 +241,8 @@ static void mtk_npu_netsys_dsa_mode_init(struct platform_device *pdev)
 	struct device_node *node;
 
 	node = of_find_node_by_name(NULL, "switch");
-	if (node)
-		netsys.dsa_mode = true;
+	netsys.dsa_mode = node && of_device_is_available(node);
+	of_node_put(node);
 }
 
 int mtk_npu_netsys_init(struct platform_device *pdev)

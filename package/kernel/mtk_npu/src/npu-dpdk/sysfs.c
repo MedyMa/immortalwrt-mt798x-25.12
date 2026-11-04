@@ -4,6 +4,7 @@
  *
  */
 
+#include <linux/capability.h>
 #include "npu/sysfs.h"
 
 #include "npu-dpdk/internal.h"
@@ -16,19 +17,44 @@ static ssize_t dpdk_mac_filter_enable_store(struct device *dev, struct device_at
 		const char *buf, size_t count)
 {
 	u32 val;
+	int ret;
 
-	if (kstrtou32(buf, 10, &val))
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+	if (kstrtou32(buf, 10, &val) || val > 1)
 		return -EINVAL;
 
-	mtk_npu_dpdk_mac_filter_enable(val);
+	ret = mtk_npu_dpdk_access_begin();
+	if (ret)
+		return ret;
+	ret = mtk_npu_dpdk_mac_filter_enable(val);
+	mtk_npu_dpdk_access_end();
+	return ret ? ret : count;
+}
 
-	return count;
+static ssize_t dpdk_mac_filter_drop_pkt_show(struct device *dev,
+                                           struct device_attribute *attr, char *buf)
+{
+	u32 count;
+	int ret;
+
+	ret = mtk_npu_dpdk_access_begin();
+	if (ret)
+		return ret;
+	ret = mtk_npu_dpdk_mac_filter_drop_pkt_count(&count);
+	mtk_npu_dpdk_access_end();
+	if (ret)
+		return ret;
+
+	return scnprintf(buf, PAGE_SIZE, "MAC filter drop packets: %u\n", count);
 }
 
 static NPU_DEV_ATTR_WO(dpdk, mac_filter_enable);
+static NPU_DEV_ATTR_RO(dpdk, mac_filter_drop_pkt);
 
 static struct attribute *dpdk_attributes[] = {
 	&dev_attr_dpdk_mac_filter_enable.attr,
+	&dev_attr_dpdk_mac_filter_drop_pkt.attr,
 	NULL,
 };
 
@@ -48,12 +74,13 @@ int mtk_npu_dpdk_sysfs_init(void)
 		return -ENOENT;
 	}
 
-	kobject_put(kobj);
 	net_kset = to_kset(kobj);
 
 	ret = sysfs_create_group(&net_kset->kobj, &dpdk_attr_group);
 	if (ret) {
 		NPU_NOTICE("create npu/net/dpdk sysfs failed\n");
+		kobject_put(kobj);
+		net_kset = NULL;
 		return ret;
 	}
 
@@ -63,4 +90,6 @@ int mtk_npu_dpdk_sysfs_init(void)
 void mtk_npu_dpdk_sysfs_deinit(void)
 {
 	sysfs_remove_group(&net_kset->kobj, &dpdk_attr_group);
+	kobject_put(&net_kset->kobj);
+	net_kset = NULL;
 }

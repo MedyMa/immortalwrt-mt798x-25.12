@@ -17,5 +17,7 @@ void mtk_npu_tnl_info_flush_one_ppe_tnl(struct npu_tnl_info *tnl_info);
 void mtk_npu_tnl_info_flush_all_ppe_tnl(void);
 
 int mtk_npu_nf_hnat_tnl_offload_init(void);
+int mtk_npu_nf_hnat_tnl_offload_start(void);
+void mtk_npu_nf_hnat_tnl_offload_stop(void);
 void mtk_npu_nf_hnat_tnl_offload_deinit(void);
 #endif /* _NPU_NF_HNAT_TNL_OFFLOAD_H_ */

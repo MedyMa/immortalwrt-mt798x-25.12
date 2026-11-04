@@ -12,12 +12,12 @@
 int mtk_npu_nf_hnat_statistic_init(void);
 void mtk_npu_nf_hnat_statistic_deinit(void);
 #else /* !defined(CONFIG_MTK_NPU_STATISTIC) */
-int mtk_npu_nf_hnat_statistic_init(void)
+static inline int mtk_npu_nf_hnat_statistic_init(void)
 {
 	return 0;
 }
 
-void mtk_npu_nf_hnat_statistic_deinit(void)
+static inline void mtk_npu_nf_hnat_statistic_deinit(void)
 {
 }
 #endif /* defined(CONFIG_MTK_NPU_STATISTIC) */

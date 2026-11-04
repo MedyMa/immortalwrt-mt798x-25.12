@@ -8,7 +8,7 @@ NPU_KERNEL_PKGS+= \
 	npu-mcast \
 	npu-mcast-autoload
 
-ifeq ($(CONFIG_PACKAGE_kmod-npu-mcast),y)
+ifneq ($(filter y m,$(CONFIG_PACKAGE_kmod-npu-mcast)),)
 EXTRA_KCONFIG+= \
 	CONFIG_MTK_NPU_MCAST=$(CONFIG_MTK_NPU_MCAST)
 endif # CONFIG_PACKAGE_kmod-npu-mcast
@@ -17,10 +17,12 @@ define KernelPackage/npu-mcast
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:=MediaTek Network Processor Unit with Multicast Feature
-  FILES+=$(PKG_BUILD_DIR)/npu-mcast/npu-mcast.ko
+  DEFAULT:=y if MTK_NPU_24_10_MCAST_BACKEND
   KCONFIG:=
   DEPENDS:= \
+	@MTK_NPU_24_10_MCAST_BACKEND \
 	kmod-npu \
+	+kmod-mediatek_hnat \
 	+@MTK_NPU_MCAST
 endef
 
@@ -34,7 +36,7 @@ define KernelPackage/npu-mcast-autoload
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:= MediaTek Network Processor Unit with Multicast Feature Auto Load
-  AUTOLOAD:=$(call AutoLoad,72,npu-mcast)
+  DEFAULT:=y if MTK_NPU_24_10_MCAST_BACKEND
   KCONFIG:=
   DEPENDS:= \
 	kmod-npu-mcast \

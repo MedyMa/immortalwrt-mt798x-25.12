@@ -6,6 +6,7 @@
  */
 
 #include <linux/debugfs.h>
+#include <linux/module.h>
 #include <linux/types.h>
 
 #include "npu-nf_hnat/internal.h"
@@ -54,6 +55,7 @@ static ssize_t tnl_hnat_statistic_write(struct file *file, const char __user *bu
 }
 
 static const struct file_operations tnl_hnat_statistic_ops = {
+	.owner = THIS_MODULE,
 	.open = tnl_hnat_statistic_open,
 	.read = seq_read,
 	.write = tnl_hnat_statistic_write,
@@ -61,28 +63,20 @@ static const struct file_operations tnl_hnat_statistic_ops = {
 	.release = single_release,
 };
 
+static struct dentry *hnat_stat_file;
+
 int mtk_npu_nf_hnat_statistic_init(void)
 {
-	/*
-	 *struct dentry *dir;
-
-	 *dir = debugfs_lookup("npu", NULL);
-	 *if (!dir)
-	 *	return -ENOENT;
-
-	 *dir = debugfs_lookup("statistic", dir);
-	 *if (!dir)
-	 *	return -ENOENT;
-
-	 *debugfs_create_file("tnl_hnat", 0444, dir, NULL, &tnl_hnat_statistic_ops);
-
-	 *mtk_npu_nf_hnat_statistic_enable(true);
-	 */
-
+	hnat_stat_file = debugfs_create_file("npu_hnat_events", 0444,
+					   NULL, NULL, &tnl_hnat_statistic_ops);
+	if (IS_ERR(hnat_stat_file))
+		return PTR_ERR(hnat_stat_file);
+	mtk_npu_nf_hnat_statistic_enable(true);
 	return 0;
 }
 
 void mtk_npu_nf_hnat_statistic_deinit(void)
 {
+	debugfs_remove(hnat_stat_file);
 	mtk_npu_nf_hnat_statistic_enable(false);
 }

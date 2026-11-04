@@ -388,7 +388,7 @@ int __init mtk_npu_ocd_init(void)
 	return platform_driver_register(&mtk_npu_ocd_driver);
 }
 
-void __exit mtk_npu_ocd_exit(void)
+void mtk_npu_ocd_exit(void)
 {
 	platform_driver_unregister(&mtk_npu_ocd_driver);
 }

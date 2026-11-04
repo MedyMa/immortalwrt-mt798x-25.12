@@ -8,7 +8,7 @@ NPU_KERNEL_PKGS+= \
 	npu-dpdk \
 	npu-dpdk-autoload
 
-ifeq ($(CONFIG_PACKAGE_kmod-npu-dpdk),y)
+ifneq ($(filter y m,$(CONFIG_PACKAGE_kmod-npu-dpdk)),)
 EXTRA_KCONFIG+= \
 	CONFIG_MTK_NPU_DPDK=$(CONFIG_MTK_NPU_DPDK)
 
@@ -20,9 +20,10 @@ define KernelPackage/npu-dpdk
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:=MediaTek Network Processor Unit with DPDK Feature
-  FILES+=$(PKG_BUILD_DIR)/npu-dpdk/npu-dpdk.ko
+  DEFAULT:=y if MTK_NPU_24_10_DPDK_BACKEND
   KCONFIG:=
   DEPENDS:= \
+	@MTK_NPU_24_10_DPDK_BACKEND \
 	kmod-npu \
 	+@MTK_NPU_DPDK
 endef
@@ -36,7 +37,7 @@ define KernelPackage/npu-dpdk-autoload
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
   TITLE:= MediaTek Network Processor Unit with DPDK Feature Auto Load
-  AUTOLOAD:=$(call AutoLoad,71,npu-dpdk)
+  DEFAULT:=y if MTK_NPU_24_10_DPDK_BACKEND
   KCONFIG:=
   DEPENDS:= \
 	kmod-npu-dpdk \

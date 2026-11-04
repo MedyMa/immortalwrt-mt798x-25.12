@@ -1,132 +1,57 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
- * Copyright (c) 2025 MediaTek Inc. All Rights Reserved.
- *
- * Author: Ren-Ting Wang <ren-ting.wang@mediatek.com>
- */
-
-#include <linux/device.h>
-#include <linux/err.h>
-#include <linux/io.h>
-#include <linux/module.h>
-#include <linux/of.h>
-#include <linux/of_platform.h>
+/* The 24.10 adapter shares NPU's platform, device links and worker lifetime. */
 #include <linux/platform_device.h>
-
+#include "npu/nf-hnat.h"
 #include "npu-nf_hnat/internal.h"
-#include "npu-nf_hnat/netsys.h"
 #include "npu-nf_hnat/net-event.h"
 #include "npu-nf_hnat/statistic.h"
 #include "npu-nf_hnat/tnl-offload.h"
 
 struct npu_nf_hnat_dev npu_nf_hnat;
+static bool started;
 
-static int mtk_npu_nf_hnat_device_init(void)
+int mtk_npu_nf_hnat_start(struct platform_device *pdev)
 {
-	struct platform_device *pdev;
-	struct device_node *node;
-	struct resource *res;
-	int ret = 0;
-
-	node = of_find_compatible_node(NULL, NULL, "mediatek,npu");
-	if (!node) {
-		/* for legacy NPU name, should be removed after openwrt-21.02 deprecated */
-		node = of_find_compatible_node(NULL, NULL, "mediatek,tops");
-		if (!node) {
-			pr_notice("Cannot find NPU device node\n");
-			return -ENODEV;
-		}
-	}
-
-	pdev = of_find_device_by_node(node);
-	if (!pdev) {
-		pr_notice("Cannot find NPU platform device\n");
-		ret = -ENODEV;
-		goto out;
-	}
-
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "npu-base");
-	if (!res)
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "tops-base");
-	if (!res) {
-		ret = -ENXIO;
-		goto out_device;
-	}
-
-	npu_nf_hnat.base = ioremap(res->start, resource_size(res));
-	if (!npu_nf_hnat.base) {
-		ret = -ENOMEM;
-		goto out_device;
-	}
+	int ret;
 
 	npu_nf_hnat.dev = &pdev->dev;
-	/* Retain the platform-device reference for the module lifetime. */
-	of_node_put(node);
-	return 0;
-
-out_device:
-	put_device(&pdev->dev);
-out:
-	of_node_put(node);
-	return ret;
-}
-
-static void mtk_npu_nf_hnat_device_deinit(void)
-{
-	if (npu_nf_hnat.base)
-		iounmap(npu_nf_hnat.base);
-	if (npu_nf_hnat.dev)
-		put_device(npu_nf_hnat.dev);
-	memset(&npu_nf_hnat, 0, sizeof(npu_nf_hnat));
-}
-
-static int __init mtk_npu_nf_hnat_init(void)
-{
-	int ret = 0;
-
-	ret = mtk_npu_nf_hnat_device_init();
+	ret = mtk_npu_nf_hnat_tnl_offload_init();
 	if (ret)
 		return ret;
-
-	ret = mtk_npu_nf_hnat_tnl_offload_init();
-	if (ret) {
-		mtk_npu_nf_hnat_device_deinit();
-		return ret;
-	}
-
 	ret = mtk_npu_nf_hnat_net_event_init();
 	if (ret)
-		goto err_tnl_offload_deinit;
-
+		goto finish;
 	ret = mtk_npu_nf_hnat_statistic_init();
 	if (ret)
-		goto err_net_event_deinit;
-
-	return ret;
-
-err_net_event_deinit:
-	mtk_npu_nf_hnat_net_event_deinit();
-
-err_tnl_offload_deinit:
-	mtk_npu_nf_hnat_tnl_offload_deinit();
-	mtk_npu_nf_hnat_device_deinit();
-
-	return ret;
-}
-
-static void __exit mtk_npu_nf_hnat_exit(void)
-{
+		goto event_stop;
+	/* Publish packet entry points last; no fallible work follows success. */
+	ret = mtk_npu_nf_hnat_tnl_offload_start();
+	if (ret)
+		goto stat_stop;
+	started = true;
+	return 0;
+stat_stop:
 	mtk_npu_nf_hnat_statistic_deinit();
-
+event_stop:
 	mtk_npu_nf_hnat_net_event_deinit();
-
+finish:
 	mtk_npu_nf_hnat_tnl_offload_deinit();
-	mtk_npu_nf_hnat_device_deinit();
+	return ret;
 }
 
-module_init(mtk_npu_nf_hnat_init);
-module_exit(mtk_npu_nf_hnat_exit);
+void mtk_npu_nf_hnat_quiesce(void)
+{
+	if (!started)
+		return;
+	mtk_npu_nf_hnat_tnl_offload_stop();
+	mtk_npu_nf_hnat_net_event_deinit();
+	mtk_npu_nf_hnat_statistic_deinit();
+}
 
-MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("MediaTek NPU Tunnel Offload Module with HNAT");
-MODULE_AUTHOR("Ren-Ting Wang <ren-ting.wang@mediatek.com>");
+void mtk_npu_nf_hnat_finish(void)
+{
+	if (!started)
+		return;
+	mtk_npu_nf_hnat_tnl_offload_deinit();
+	started = false;
+}

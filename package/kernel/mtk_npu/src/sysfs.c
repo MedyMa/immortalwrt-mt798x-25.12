@@ -24,13 +24,15 @@ static const char *npu_role_name[__NPU_ROLE_TYPE_MAX] = {
 	[NPU_ROLE_TYPE_CLUSTER] = "npu-offload",
 };
 
-/* Read host state without mailbox requests or hardware counter drains. */
+/* Software state only: no mailbox request, MIB drain, firmware memory read,
+ * or hardware reconfiguration is performed by this observer.
+ */
 static ssize_t state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf,
 		"{\"schema\":1,\"firmware_ready\":%s,\"mcu_alive\":%s,"
 		"\"registered_tunnel_types\":%u,\"host_counter_unit\":\"events\","
-		"\"traffic_byte_source\":\"native_HNAT_conntrack\","
+		"\"traffic_byte_source\":\"PPE_MIB_to_conntrack\","
 		"\"packet_offload_verified\":false}\n",
 		mtk_npu_is_ready() ? "true" : "false",
 		mtk_npu_mcu_alive() ? "true" : "false",
@@ -192,9 +194,9 @@ static DEVICE_ATTR_WO(trm);
 static DEVICE_ATTR_WO(wdt);
 
 static struct attribute *mcu_attributes[] = {
-	&dev_attr_state.attr,
 	&dev_attr_fw_log_level.attr,
 	&dev_attr_fw_info.attr,
+	&dev_attr_state.attr,
 	&dev_attr_trm.attr,
 	&dev_attr_wdt.attr,
 	NULL,
@@ -235,7 +237,7 @@ err_remove_mcu:
 err_remove_npu:
 	kset_unregister(npu_kset);
 
-	return 0;
+	return ret;
 }
 
 void mtk_npu_sysfs_deinit(struct platform_device *pdev)

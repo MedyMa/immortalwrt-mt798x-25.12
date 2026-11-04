@@ -1,0 +1,2660 @@
+Subject: mediatek: port the working 24.10 R4 stack to Linux 6.12
+
+Baseline: 66136a609244137980ec0858d85d6ea8dd289357
+Preserve the 6.12 core; adapt MTK board, network and tunnel interfaces.
+
+--- a/drivers/net/ethernet/mediatek/Kconfig
++++ b/drivers/net/ethernet/mediatek/Kconfig
+@@ -56,4 +56,14 @@
+ 	  in the MediaTek MT7988/MT7986/MT2701/MT7622/MT7629/MT7621 chipset
+ 	  family.
+ 
++config NET_MEDIATEK_NPU_FLOW
++	bool "MediaTek NPU support for native Linux flowtables"
++	depends on NET_MEDIATEK_SOC && NF_FLOW_TABLE && INET && PPP
++	select MTK_PPP_TUNNEL_INFO
++	depends on MEDIATEK_NETSYS_V3 && NET_MEDIATEK_HNAT=n
++	default n
++	help
++	  Use the native PPE flowtable driver as the owner of NPU tunnel actions.
++	  Vendor HNAT uses the same PPE tables and cannot be enabled together.
++
+ endif #NET_VENDOR_MEDIATEK
+--- a/drivers/net/ppp/Kconfig
++++ b/drivers/net/ppp/Kconfig
+@@ -210,3 +210,13 @@
+ endif # TTY
+ 
+ endif # PPP
++
++config MTK_PPP_TUNNEL_INFO
++	bool "PPP scalar tunnel metadata for MT7988 TOPS"
++	depends on PPP
++	select SKB_EXTENSIONS
++	default n
++	help
++	  Copy tunnel IDs under the existing PPP/channel locks without exporting
++	  borrowed socket pointers. Changes the PPP channel operations ABI; all
++	  PPP channel providers must be rebuilt with this configuration.
+--- a/drivers/net/ppp/ppp_generic.c
++++ b/drivers/net/ppp/ppp_generic.c
+@@ -31,6 +31,7 @@
+ #include <linux/filter.h>
+ #include <linux/ppp-ioctl.h>
+ #include <linux/ppp_channel.h>
++#include <linux/srcu.h>
+ #include <linux/ppp-comp.h>
+ #include <linux/skbuff.h>
+ #include <linux/rculist.h>
+@@ -129,6 +130,7 @@
+ 	int		mru;		/* max receive unit 60 */
+ 	unsigned int	flags;		/* control bits 64 */
+ 	unsigned int	xstate;		/* transmit state bits 68 */
++	bool		tunnel_offload_blocked;
+ 	unsigned int	rstate;		/* receive state bits 6c */
+ 	int		debug;		/* debug flags 70 */
+ 	struct slcompress *vj;		/* state for VJ header compression */
+@@ -167,6 +169,61 @@
+ #define SC_FLAG_BITS	(SC_NO_TCP_CCID|SC_CCP_OPEN|SC_CCP_UP|SC_LOOP_TRAFFIC \
+ 			 |SC_MULTILINK|SC_MP_SHORTSEQ|SC_MP_XSHORTSEQ \
+ 			 |SC_COMP_TCP|SC_REJ_COMP_TCP|SC_MUST_COMP)
++
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++DEFINE_STATIC_SRCU(ppp_tunnel_srcu);
++static DEFINE_MUTEX(ppp_tunnel_admin);
++static const struct ppp_tunnel_offload_ops __rcu *ppp_tunnel_ops;
++
++int ppp_tunnel_offload_register(const struct ppp_tunnel_offload_ops *ops)
++{
++	int ret = 0;
++
++	if (!ops || !ops->quiesce || !ops->invalidate)
++		return -EINVAL;
++	mutex_lock(&ppp_tunnel_admin);
++	if (rcu_access_pointer(ppp_tunnel_ops))
++		ret = -EBUSY;
++	else
++		rcu_assign_pointer(ppp_tunnel_ops, ops);
++	mutex_unlock(&ppp_tunnel_admin);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(ppp_tunnel_offload_register);
++
++int ppp_tunnel_offload_unregister(const struct ppp_tunnel_offload_ops *ops)
++{
++	int ret = 0;
++
++	mutex_lock(&ppp_tunnel_admin);
++	if (!ops || rcu_access_pointer(ppp_tunnel_ops) != ops) {
++		ret = -ENOENT;
++	} else {
++		rcu_assign_pointer(ppp_tunnel_ops, NULL);
++		synchronize_srcu(&ppp_tunnel_srcu);
++	}
++	mutex_unlock(&ppp_tunnel_admin);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(ppp_tunnel_offload_unregister);
++
++static int ppp_tunnel_quiesce(struct ppp *ppp)
++{
++	const struct ppp_tunnel_offload_ops *ops;
++	int idx, ret = 0;
++
++	/* Stop setup first, including transmitters admitted before the ioctl. */
++	WRITE_ONCE(ppp->tunnel_offload_blocked, true);
++	idx = srcu_read_lock(&ppp_tunnel_srcu);
++	ops = srcu_dereference(ppp_tunnel_ops, &ppp_tunnel_srcu);
++	if (ops)
++		ret = ops->quiesce(ppp->dev);
++	srcu_read_unlock(&ppp_tunnel_srcu, idx);
++	return ret;
++}
++#else
++static int ppp_tunnel_quiesce(struct ppp *ppp) { return 0; }
++#endif
+ 
+ /*
+  * Private data structure for each channel.
+@@ -827,6 +884,12 @@
+ 	case PPPIOCSFLAGS:
+ 		if (get_user(val, p))
+ 			break;
++		if (val & (SC_CCP_OPEN | SC_CCP_UP | SC_COMP_TCP | SC_MUST_COMP |
++			   SC_MULTILINK | SC_LOOP_TRAFFIC)) {
++			err = ppp_tunnel_quiesce(ppp);
++			if (err)
++				break;
++		}
+ 		ppp_lock(ppp);
+ 		cflags = ppp->flags & ~val;
+ #ifdef CONFIG_PPP_MULTILINK
+@@ -928,6 +991,12 @@
+ 			if (copy_to_user(argp, &npi, sizeof(npi)))
+ 				break;
+ 		} else {
++			if (i == NP_IP && READ_ONCE(ppp->npmode[i]) == NPMODE_PASS &&
++			    npi.mode != NPMODE_PASS) {
++				err = ppp_tunnel_quiesce(ppp);
++				if (err)
++					break;
++			}
+ 			WRITE_ONCE(ppp->npmode[i], npi.mode);
+ 			/* we may be able to transmit more packets now (??) */
+ 			netif_wake_queue(ppp->dev);
+@@ -944,6 +1013,11 @@
+ 
+ 		if (IS_ERR(filter)) {
+ 			err = PTR_ERR(filter);
++			break;
++		}
++		err = ppp_tunnel_quiesce(ppp);
++		if (err) {
++			bpf_prog_destroy(filter);
+ 			break;
+ 		}
+ 		if (cmd == PPPIOCSPASS)
+@@ -1010,6 +1084,11 @@
+ 
+ 			if (IS_ERR(filter)) {
+ 				err = PTR_ERR(filter);
++				break;
++			}
++			err = ppp_tunnel_quiesce(ppp);
++			if (err) {
++				bpf_prog_destroy(filter);
+ 				break;
+ 			}
+ 			if (cmd == PPPIOCSPASS32)
+@@ -1613,28 +1692,140 @@
+ }
+ 
+ static int ppp_fill_forward_path(struct net_device_path_ctx *ctx,
+-				 struct net_device_path *path)
++                                 struct net_device_path *path)
+ {
+ 	struct ppp *ppp = netdev_priv(ctx->dev);
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	const struct net_device *dev = ctx->dev;
++#endif
+ 	struct ppp_channel *chan;
+ 	struct channel *pch;
+-
+-	if (ppp->flags & SC_MULTILINK)
++	int ret = -EOPNOTSUPP;
++
++	ppp_xmit_lock(ppp);
++	if ((ppp->flags & SC_MULTILINK) || ppp->n_channels != 1 ||
++	    list_empty(&ppp->channels))
++		goto unlock;
++	pch = list_first_entry(&ppp->channels, struct channel, clist);
++	spin_lock(&pch->downl);
++	chan = pch->chan;
++	if (chan && chan->ops->fill_forward_path)
++		ret = chan->ops->fill_forward_path(ctx, path, chan);
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	if (!ret && (path->type == DEV_PATH_L2TP || path->type == DEV_PATH_PPTP) &&
++	    !ppp_netdev_tunnel_offload_allowed(dev))
++		ret = -EOPNOTSUPP;
++#endif
++	spin_unlock(&pch->downl);
++unlock:
++	ppp_xmit_unlock(ppp);
++	return ret;
++}
++
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++bool ppp_netdev_tunnel_offload_allowed(const struct net_device *dev)
++{
++	const struct ppp *ppp;
++
++	if (!dev || dev->netdev_ops != &ppp_netdev_ops)
++		return false;
++	ppp = netdev_priv(dev);
++	if (READ_ONCE(ppp->npmode[NP_IP]) != NPMODE_PASS)
++		return false;
++#ifdef CONFIG_PPP_FILTER
++	if (READ_ONCE(ppp->pass_filter) || READ_ONCE(ppp->active_filter))
++		return false;
++#endif
++	return !READ_ONCE(ppp->tunnel_offload_blocked) &&
++	       !(READ_ONCE(ppp->flags) & (SC_CCP_OPEN | SC_CCP_UP | SC_COMP_TCP |
++					SC_MUST_COMP | SC_MULTILINK | SC_LOOP_TRAFFIC)) &&
++	       !(READ_ONCE(ppp->xstate) & SC_COMP_RUN) &&
++	       !(READ_ONCE(ppp->rstate) & SC_DECOMP_RUN);
++}
++EXPORT_SYMBOL_GPL(ppp_netdev_tunnel_offload_allowed);
++
++int ppp_channel_tunnel_quiesce(struct ppp_channel *chan)
++{
++	struct channel *pch = chan ? chan->ppp : NULL;
++	struct net_device *dev = NULL;
++	int ret = 0;
++
++	if (!pch)
++		return 0;
++	spin_lock_bh(&pch->upl);
++	if (pch->ppp) {
++		dev = pch->ppp->dev;
++		dev_hold(dev);
++	}
++	spin_unlock_bh(&pch->upl);
++	if (dev) {
++		ret = ppp_tunnel_quiesce(netdev_priv(dev));
++		dev_put(dev);
++	}
++	return ret;
++}
++EXPORT_SYMBOL_GPL(ppp_channel_tunnel_quiesce);
++
++void ppp_channel_tunnel_invalidate(struct ppp_channel *chan)
++{
++	struct channel *pch = chan ? chan->ppp : NULL;
++	const struct ppp_tunnel_offload_ops *ops;
++	struct net_device *dev = NULL;
++	int idx;
++
++	if (!pch)
++		return;
++	spin_lock_bh(&pch->upl);
++	if (pch->ppp) {
++		WRITE_ONCE(pch->ppp->tunnel_offload_blocked, true);
++		dev = pch->ppp->dev;
++		dev_hold(dev);
++	}
++	spin_unlock_bh(&pch->upl);
++	if (!dev)
++		return;
++	idx = srcu_read_lock(&ppp_tunnel_srcu);
++	ops = srcu_dereference(ppp_tunnel_ops, &ppp_tunnel_srcu);
++	if (ops)
++		ops->invalidate(dev);
++	srcu_read_unlock(&ppp_tunnel_srcu, idx);
++	dev_put(dev);
++}
++EXPORT_SYMBOL_GPL(ppp_channel_tunnel_invalidate);
++
++int ppp_netdev_get_tunnel_info(struct net_device *dev, struct ppp_tunnel_info *info)
++{
++	struct ppp *ppp;
++	struct channel *pch;
++	struct ppp_channel *chan;
++	int ret = -EOPNOTSUPP;
++
++	if (!dev || !info || dev->netdev_ops != &ppp_netdev_ops)
++		return -EINVAL;
++	if (!ppp_netdev_tunnel_offload_allowed(dev))
+ 		return -EOPNOTSUPP;
+-
+-	pch = list_first_or_null_rcu(&ppp->channels, struct channel, clist);
+-	if (!pch)
+-		return -ENODEV;
+-
+-	chan = READ_ONCE(pch->chan);
+-	if (!chan)
+-		return -ENODEV;
+-
+-	if (!chan->ops->fill_forward_path)
+-		return -EOPNOTSUPP;
+-
+-	return chan->ops->fill_forward_path(ctx, path, chan);
+-}
++	memset(info, 0, sizeof(*info));
++	ppp = netdev_priv(dev);
++	/* ppp_disconnect_channel removes the channel under this unit lock.
++	 * ppp_unregister_channel clears pch->chan under downl before releasing
++	 * the protocol's private data. The callback copies immutable scalar IDs.
++	 */
++	ppp_xmit_lock(ppp);
++	if ((ppp->flags & SC_MULTILINK) || ppp->n_channels != 1 ||
++	    list_empty(&ppp->channels))
++		goto unlock;
++	pch = list_first_entry(&ppp->channels, struct channel, clist);
++	spin_lock(&pch->downl);
++	chan = pch->chan;
++	if (chan && chan->ops->get_tunnel_info)
++		ret = chan->ops->get_tunnel_info(chan, info);
++	spin_unlock(&pch->downl);
++unlock:
++	ppp_xmit_unlock(ppp);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(ppp_netdev_get_tunnel_info);
++#endif
+ 
+ #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+ static int ppp_flow_offload_check(struct flow_offload_hw_path *path)
+@@ -1642,19 +1833,32 @@
+ 	struct ppp *ppp = netdev_priv(path->dev);
+ 	struct ppp_channel *chan;
+ 	struct channel *pch;
+-
+-	if (ppp->flags & SC_MULTILINK)
+-		return -EOPNOTSUPP;
+-
+-	if (list_empty(&ppp->channels))
+-		return -ENODEV;
+-
++	int ret = -EOPNOTSUPP;
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	bool was_tunnel = path->flags & BIT(DEV_PATH_TNL);
++#endif
++
++	ppp_xmit_lock(ppp);
++	if ((ppp->flags & SC_MULTILINK) || ppp->n_channels != 1 ||
++	    list_empty(&ppp->channels))
++		goto unlock;
+ 	pch = list_first_entry(&ppp->channels, struct channel, clist);
++	spin_lock(&pch->downl);
+ 	chan = pch->chan;
+-	if (!chan->ops->flow_offload_check)
+-		return -EOPNOTSUPP;
+-
+-	return chan->ops->flow_offload_check(chan, path);
++	if (chan && chan->ops->flow_offload_check)
++		ret = chan->ops->flow_offload_check(chan, path);
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	/* PPPoE keeps its existing eligibility; only NPU tunnel actions bypass
++	 * the generic PPP receive/transmit processing addressed by this API.
++	 */
++	if (!ret && !was_tunnel && (path->flags & BIT(DEV_PATH_TNL)) &&
++	    !ppp_netdev_tunnel_offload_allowed(path->dev))
++		ret = -EOPNOTSUPP;
++#endif
++	spin_unlock(&pch->downl);
++unlock:
++	ppp_xmit_unlock(ppp);
++	return ret;
+ }
+ #endif /* CONFIG_NF_FLOW_TABLE */
+ 
+@@ -3092,6 +3296,11 @@
+ 	if (!pch)
+ 		return;		/* should never happen */
+ 
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	if (ppp_channel_tunnel_quiesce(chan))
++		pr_warn_ratelimited("PPP: tunnel hardware teardown pending during channel unregister\n");
++#endif
++
+ 	chan->ppp = NULL;
+ 
+ 	/*
+@@ -3153,6 +3362,9 @@
+ 
+ 	err = -EINVAL;
+ 	if (data->length < 2 || ccp_option[1] < 2 || ccp_option[1] > data->length)
++		goto out;
++	err = ppp_tunnel_quiesce(ppp);
++	if (err)
+ 		goto out;
+ 
+ 	cp = try_then_request_module(
+@@ -3624,6 +3836,8 @@
+ 	if (hdrlen > ppp->dev->hard_header_len)
+ 		ppp->dev->hard_header_len = hdrlen;
+ 	list_add_tail_rcu(&pch->clist, &ppp->channels);
++	if (!ppp->n_channels)
++		WRITE_ONCE(ppp->tunnel_offload_blocked, false);
+ 	++ppp->n_channels;
+ 	rcu_assign_pointer(pch->ppp, ppp);
+ 	refcount_inc(&ppp->file.refcnt);
+--- a/drivers/net/ppp/pptp.c
++++ b/drivers/net/ppp/pptp.c
+@@ -26,6 +26,8 @@
+ #include <linux/rcupdate.h>
+ #include <linux/security.h>
+ #include <linux/spinlock.h>
++#include <linux/srcu.h>
++#include <linux/mutex.h>
+ 
+ #include <net/sock.h>
+ #include <net/protocol.h>
+@@ -34,6 +36,7 @@
+ #include <net/route.h>
+ #include <net/gre.h>
+ #include <net/pptp.h>
++#include <net/mtk_npu_flow.h>
+ #include <net/netfilter/nf_flow_table.h>
+ 
+ #include <linux/uaccess.h>
+@@ -53,6 +56,232 @@
+ static struct proto pptp_sk_proto __read_mostly;
+ static const struct ppp_channel_ops pptp_chan_ops;
+ static const struct proto_ops pptp_ops;
++
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++static atomic64_t pptp_cookie = ATOMIC64_INIT(0);
++DEFINE_STATIC_SRCU(pptp_offload_srcu);
++static DEFINE_MUTEX(pptp_offload_admin);
++static const struct pptp_offload_ops __rcu *pptp_offload_ops;
++static u64 *callid_cookie;
++static DECLARE_BITMAP(callid_closing, MAX_CALLID + 1);
++
++void pptp_offload_callid_release(const struct pptp_offload_key *key)
++{
++	unsigned long flags;
++
++	if (!key || !key->cookie)
++		return;
++	spin_lock_irqsave(&chan_lock, flags);
++	if (callid_cookie[key->local_id] == key->cookie &&
++	    test_bit(key->local_id, callid_closing) &&
++	    !rcu_access_pointer(callid_sock[key->local_id])) {
++		callid_cookie[key->local_id] = 0;
++		clear_bit(key->local_id, callid_closing);
++		clear_bit(key->local_id, callid_bitmap);
++	}
++	spin_unlock_irqrestore(&chan_lock, flags);
++}
++EXPORT_SYMBOL_GPL(pptp_offload_callid_release);
++
++bool pptp_offload_session_live(const struct pptp_offload_key *key)
++{
++	struct pppox_sock *po;
++	struct pptp_opt *opt;
++	unsigned long flags;
++	bool live = false;
++
++	if (!key || !key->cookie)
++		return false;
++	spin_lock_irqsave(&chan_lock, flags);
++	po = rcu_access_pointer(callid_sock[key->local_id]);
++	if (po) {
++		opt = &po->proto.pptp;
++		live = (READ_ONCE(sk_pppox(po)->sk_state) & PPPOX_CONNECTED) &&
++		       opt->offload_cookie == key->cookie &&
++		       sock_net(sk_pppox(po))->ns.inum == key->netns &&
++		       opt->src_addr.sin_addr.s_addr == key->local_addr &&
++		       opt->dst_addr.sin_addr.s_addr == key->peer_addr &&
++		       opt->src_addr.call_id == key->local_id &&
++		       opt->dst_addr.call_id == key->peer_id;
++	}
++	spin_unlock_irqrestore(&chan_lock, flags);
++	return live;
++}
++EXPORT_SYMBOL_GPL(pptp_offload_session_live);
++
++static void pptp_offload_key(struct pppox_sock *po, struct pptp_offload_key *key)
++{
++	struct pptp_opt *opt = &po->proto.pptp;
++
++	memset(key, 0, sizeof(*key));
++	key->cookie = opt->offload_cookie;
++	key->netns = sock_net(sk_pppox(po))->ns.inum;
++	key->local_addr = opt->src_addr.sin_addr.s_addr;
++	key->peer_addr = opt->dst_addr.sin_addr.s_addr;
++	key->local_id = opt->src_addr.call_id;
++	key->peer_id = opt->dst_addr.call_id;
++}
++
++int pptp_offload_ops_register(const struct pptp_offload_ops *ops)
++{
++	int ret = 0;
++
++	if (!ops || !ops->next || !ops->snapshot || !ops->close)
++		return -EINVAL;
++	mutex_lock(&pptp_offload_admin);
++	if (rcu_access_pointer(pptp_offload_ops))
++		ret = -EBUSY;
++	else
++		rcu_assign_pointer(pptp_offload_ops, ops);
++	mutex_unlock(&pptp_offload_admin);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(pptp_offload_ops_register);
++
++/* The provider must stop hardware sequence consumers before unregistering.
++ * Keep dispatch published through handover: a software transmitter admitted
++ * after its socket was visited still updates seq_sent from the provider.
++ */
++int pptp_offload_ops_unregister(const struct pptp_offload_ops *ops)
++{
++	struct pptp_offload_key key;
++	struct pppox_sock *po;
++	unsigned long flags;
++	u32 seq;
++	unsigned int id;
++	int ret = 0;
++
++	if (!ops)
++		return -EINVAL;
++	mutex_lock(&pptp_offload_admin);
++	if (rcu_access_pointer(pptp_offload_ops) != ops) {
++		ret = -ENOENT;
++		goto out;
++	}
++	for (id = 0; id <= MAX_CALLID; id++) {
++		rcu_read_lock();
++		po = rcu_dereference(callid_sock[id]);
++		if (po) {
++			spin_lock_irqsave(&po->proto.pptp.offload_lock, flags);
++			pptp_offload_key(po, &key);
++			if (!ops->snapshot(&key, &seq))
++				po->proto.pptp.seq_sent = seq;
++			spin_unlock_irqrestore(&po->proto.pptp.offload_lock, flags);
++		}
++		rcu_read_unlock();
++		if (!(id & 127))
++			cond_resched();
++	}
++	rcu_assign_pointer(pptp_offload_ops, NULL);
++	synchronize_srcu(&pptp_offload_srcu);
++out:
++	mutex_unlock(&pptp_offload_admin);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(pptp_offload_ops_unregister);
++
++static int pptp_next_seq(struct pppox_sock *po, u32 *seq)
++{
++	const struct pptp_offload_ops *ops;
++	struct pptp_offload_key key;
++	struct pptp_opt *opt = &po->proto.pptp;
++	unsigned long flags;
++	int idx, ret = -EOPNOTSUPP;
++
++	spin_lock_irqsave(&opt->offload_lock, flags);
++	pptp_offload_key(po, &key);
++	idx = srcu_read_lock(&pptp_offload_srcu);
++	ops = srcu_dereference(pptp_offload_ops, &pptp_offload_srcu);
++	if (ops)
++		ret = ops->next(&key, opt->seq_sent, seq);
++	srcu_read_unlock(&pptp_offload_srcu, idx);
++	if (ret == -EOPNOTSUPP) {
++		*seq = opt->seq_sent + 1;
++		ret = 0;
++	}
++	/* An active hardware counter error must not reuse stale software state. */
++	if (!ret)
++		opt->seq_sent = *seq;
++	spin_unlock_irqrestore(&opt->offload_lock, flags);
++	return ret;
++}
++
++static int pptp_offload_close(struct pppox_sock *po)
++{
++	const struct pptp_offload_ops *ops;
++	struct pptp_offload_key key;
++	int idx, ret = 0;
++
++	pptp_offload_key(po, &key);
++	spin_lock_bh(&chan_lock);
++	if (callid_cookie[key.local_id] == key.cookie)
++		set_bit(key.local_id, callid_closing);
++	spin_unlock_bh(&chan_lock);
++	/* Channel unbind has drained transmitters. Close is sleepable so the
++	 * provider can invalidate PPE entries before the call ID is reused.
++	 */
++	idx = srcu_read_lock(&pptp_offload_srcu);
++	ops = srcu_dereference(pptp_offload_ops, &pptp_offload_srcu);
++	if (ops)
++		ret = ops->close(&key);
++	srcu_read_unlock(&pptp_offload_srcu, idx);
++	return ret;
++}
++
++static int pptp_get_tunnel_info(struct ppp_channel *chan,
++				struct ppp_tunnel_info *info)
++{
++	struct sock *sk = chan->private;
++	struct pppox_sock *po = pppox_sk(sk);
++	struct pptp_opt *opt = &po->proto.pptp;
++	unsigned long flags;
++
++	if (!(sk->sk_state & PPPOX_CONNECTED))
++		return -ENOTCONN;
++	if (READ_ONCE(opt->ppp_flags) & (SC_COMP_AC | SC_COMP_PROT))
++		return -EOPNOTSUPP;
++	spin_lock_irqsave(&opt->offload_lock, flags);
++	info->kind = PPP_TUNNEL_PPTP;
++	info->version = 1;
++	info->tunnel_id = opt->src_addr.call_id;
++	info->peer_tunnel_id = opt->dst_addr.call_id;
++	info->cookie = opt->offload_cookie;
++	info->local_addr = opt->src_addr.sin_addr.s_addr;
++	info->peer_addr = opt->dst_addr.sin_addr.s_addr;
++	info->sequence = opt->seq_sent;
++	info->ppp_flags = opt->ppp_flags;
++	spin_unlock_irqrestore(&opt->offload_lock, flags);
++	return 0;
++}
++#else
++static int pptp_next_seq(struct pppox_sock *po, u32 *seq)
++{
++	*seq = ++po->proto.pptp.seq_sent;
++	return 0;
++}
++static int pptp_offload_close(struct pppox_sock *po) { return 0; }
++#endif
++
++#if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
++static int pptp_2410_flow_offload_check(struct ppp_channel *chan,
++				   struct flow_offload_hw_path *path)
++{
++	struct sock *sk = chan->private;
++	struct pptp_opt *opt = &pppox_sk(sk)->proto.pptp;
++
++	if (path->flags & BIT(DEV_PATH_TNL))
++		return -EEXIST;
++	if (!(sk->sk_state & PPPOX_CONNECTED))
++		return -ENOTCONN;
++	/* Firmware consumes the full address/control and protocol fields. */
++	if (opt->ppp_flags & (SC_COMP_AC | SC_COMP_PROT))
++		return -EOPNOTSUPP;
++	path->flags |= BIT(DEV_PATH_TNL);
++	path->tnl_type = FLOW_OFFLOAD_TNL_PPTP;
++	return 0;
++}
++#endif
++
+ 
+ static struct pppox_sock *lookup_chan(u16 call_id, __be32 s_addr)
+ {
+@@ -115,6 +344,10 @@
+ 
+ 	sock->proto.pptp.src_addr = *sa;
+ 	set_bit(sa->call_id, callid_bitmap);
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	callid_cookie[sa->call_id] = sock->proto.pptp.offload_cookie;
++	clear_bit(sa->call_id, callid_closing);
++#endif
+ 	rcu_assign_pointer(callid_sock[sa->call_id], sock);
+ 	spin_unlock(&chan_lock);
+ 
+@@ -125,11 +358,30 @@
+ 	return -1;
+ }
+ 
++static void pptp_unpublish_chan(struct pppox_sock *sock)
++{
++	/* Keep the allocation bit reserved through offload/channel rundown. */
++	spin_lock(&chan_lock);
++	RCU_INIT_POINTER(callid_sock[sock->proto.pptp.src_addr.call_id], NULL);
++	spin_unlock(&chan_lock);
++}
++
+ static void del_chan(struct pppox_sock *sock)
+ {
++	unsigned int id = sock->proto.pptp.src_addr.call_id;
++
+ 	spin_lock(&chan_lock);
+-	clear_bit(sock->proto.pptp.src_addr.call_id, callid_bitmap);
+-	RCU_INIT_POINTER(callid_sock[sock->proto.pptp.src_addr.call_id], NULL);
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	if (callid_cookie[id] != sock->proto.pptp.offload_cookie)
++		goto out;
++	callid_cookie[id] = 0;
++	clear_bit(id, callid_closing);
++#endif
++	clear_bit(id, callid_bitmap);
++	RCU_INIT_POINTER(callid_sock[id], NULL);
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++out:
++#endif
+ 	spin_unlock(&chan_lock);
+ }
+ 
+@@ -149,26 +401,6 @@
+ 
+ 	return ip_route_output_flow(net, fl4, sk);
+ }
+-
+-#if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+-static int pptp_flow_offload_check(struct ppp_channel *chan,
+-				   struct flow_offload_hw_path *path)
+-{
+-	struct sock *sk = (struct sock *)chan->private;
+-	struct pppox_sock *po = pppox_sk(sk);
+-
+-	if (path->flags & BIT(DEV_PATH_TNL))
+-		return -EEXIST;
+-
+-	if (sk_pppox(po)->sk_state & PPPOX_DEAD)
+-		return -EINVAL;
+-
+-	path->flags |= BIT(DEV_PATH_TNL);
+-	path->tnl_type = FLOW_OFFLOAD_TNL_PPTP;
+-
+-	return 0;
+-}
+-#endif /* IS_ENABLED(CONFIG_NF_FLOW_TABLE) */
+ 
+ static int pptp_xmit(struct ppp_channel *chan, struct sk_buff *skb)
+ {
+@@ -181,8 +413,8 @@
+ 	struct flowi4 fl4;
+ 	int islcp;
+ 	int len;
++	u32 sequence;
+ 	unsigned char *data;
+-	u32 seq_sent_hw;
+ 	__u32 seq_recv;
+ 	struct rtable *rt;
+ 	struct net_device *tdev;
+@@ -245,13 +477,9 @@
+ 	hdr->gre_hd.protocol = GRE_PROTO_PPP;
+ 	hdr->call_id = htons(opt->dst_addr.call_id);
+ 
+-	if (mtk_pptp_seq_next && !mtk_pptp_seq_next(opt->dst_addr.call_id,
+-						    &seq_sent_hw)) {
+-		opt->seq_sent = seq_sent_hw;
+-		hdr->seq = htonl(opt->seq_sent);
+-	} else {
+-		hdr->seq = htonl(++opt->seq_sent);
+-	}
++	if (pptp_next_seq(po, &sequence))
++		goto tx_error;
++	hdr->seq = htonl(sequence);
+ 
+ 	if (opt->ack_sent != seq_recv)	{
+ 		/* send ack with this message */
+@@ -559,10 +787,15 @@
+ 	}
+ 
+ 	po = pppox_sk(sk);
+-	del_chan(po);
++	pptp_unpublish_chan(po);
+ 	synchronize_rcu();
+ 
+ 	pppox_unbind_sock(sk);
++	/* A failed asynchronous hardware teardown keeps this Call ID reserved.
++	 * The provider releases it when firmware deletion or shutdown completes.
++	 */
++	if (!pptp_offload_close(po))
++		del_chan(po);
+ 	sk->sk_state = PPPOX_DEAD;
+ 
+ 	sock_orphan(sk);
+@@ -610,6 +843,12 @@
+ 	po = pppox_sk(sk);
+ 	opt = &po->proto.pptp;
+ 
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	spin_lock_init(&opt->offload_lock);
++	opt->offload_cookie = atomic64_inc_return(&pptp_cookie);
++	if (!opt->offload_cookie)
++		opt->offload_cookie = atomic64_inc_return(&pptp_cookie);
++#endif
+ 	opt->seq_sent = 0; opt->seq_recv = 0xffffffff;
+ 	opt->ack_recv = 0; opt->ack_sent = 0xffffffff;
+ 
+@@ -639,6 +878,13 @@
+ 	case PPPIOCSFLAGS:
+ 		if (get_user(val, p))
+ 			break;
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++		if (val & (SC_COMP_AC | SC_COMP_PROT)) {
++			err = ppp_channel_tunnel_quiesce(chan);
++			if (err)
++				break;
++		}
++#endif
+ 		opt->ppp_flags = val & ~SC_RCV_BITS;
+ 		err = 0;
+ 		break;
+@@ -649,7 +895,7 @@
+ 	return err;
+ }
+ 
+-static int pptp_fill_forward_path(struct net_device_path_ctx *ctx,
++static int __maybe_unused pptp_fill_forward_path(struct net_device_path_ctx *ctx,
+ 				  struct net_device_path *path,
+ 				  const struct ppp_channel *chan)
+ {
+@@ -703,13 +949,59 @@
+ 	return -EHOSTUNREACH;
+ }
+ 
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++static int pptp_2410_fill_forward_path(struct net_device_path_ctx *ctx,
++				  struct net_device_path *path,
++				  const struct ppp_channel *chan)
++{
++	struct sock *sk = chan->private;
++	struct pppox_sock *po = pppox_sk(sk);
++	struct ppp_tunnel_info info;
++	struct flowi4 fl4;
++	struct rtable *rt;
++	int ret;
++
++	if (!mtk_npu_flow_supported(DEV_PATH_PPTP))
++		return -EOPNOTSUPP;
++	ret = pptp_get_tunnel_info((struct ppp_channel *)chan, &info);
++	if (ret)
++		return ret;
++	rt = pptp_route_output(po, &fl4);
++	if (IS_ERR(rt))
++		return PTR_ERR(rt);
++	ret = mtk_npu_flow_neigh(&rt->dst, info.peer_addr, path);
++	if (!ret) {
++		path->type = DEV_PATH_PPTP;
++		path->dev = ctx->dev;
++		path->tunnel_2410.sip.ip = info.local_addr;
++		path->tunnel_2410.dip.ip = info.peer_addr;
++		path->tunnel_2410.ttl = ip4_dst_hoplimit(&rt->dst);
++		path->tunnel_2410.tos = 0;
++		path->tunnel_2410.pptp.call_id = info.tunnel_id;
++		path->tunnel_2410.pptp.peer_call_id = info.peer_tunnel_id;
++		path->tunnel_2410.pptp.seq_sent = info.sequence;
++		path->tunnel_2410.pptp.cookie = info.cookie;
++		ctx->dev = rt->dst.dev;
++	}
++	ip_rt_put(rt);
++	return ret;
++}
++#endif
++
+ static const struct ppp_channel_ops pptp_chan_ops = {
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	.fill_forward_path = pptp_2410_fill_forward_path,
++#else
++	.fill_forward_path = pptp_fill_forward_path,
++#endif
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	.get_tunnel_info = pptp_get_tunnel_info,
++#endif
+ 	.start_xmit = pptp_xmit,
++#if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
++	.flow_offload_check = pptp_2410_flow_offload_check,
++#endif
+ 	.ioctl      = pptp_ppp_ioctl,
+-	.fill_forward_path = pptp_fill_forward_path,
+-#if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+-	.flow_offload_check = pptp_flow_offload_check,
+-#endif /* IS_ENABLED(CONFIG_NF_FLOW_TABLE) */
+ };
+ 
+ static struct proto pptp_sk_proto __read_mostly = {
+@@ -755,6 +1047,13 @@
+ 	callid_sock = vzalloc(array_size(sizeof(void *), (MAX_CALLID + 1)));
+ 	if (!callid_sock)
+ 		return -ENOMEM;
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	callid_cookie = vzalloc(array_size(sizeof(*callid_cookie), MAX_CALLID + 1));
++	if (!callid_cookie) {
++		vfree(callid_sock);
++		return -ENOMEM;
++	}
++#endif
+ 
+ 	err = gre_add_protocol(&gre_pptp_protocol, GREPROTO_PPTP);
+ 	if (err) {
+@@ -781,6 +1080,9 @@
+ out_gre_del_protocol:
+ 	gre_del_protocol(&gre_pptp_protocol, GREPROTO_PPTP);
+ out_mem_free:
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	vfree(callid_cookie);
++#endif
+ 	vfree(callid_sock);
+ 
+ 	return err;
+@@ -791,6 +1093,9 @@
+ 	unregister_pppox_proto(PX_PROTO_PPTP);
+ 	proto_unregister(&pptp_sk_proto);
+ 	gre_del_protocol(&gre_pptp_protocol, GREPROTO_PPTP);
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	vfree(callid_cookie);
++#endif
+ 	vfree(callid_sock);
+ }
+ 
+--- a/include/linux/if_pppox.h
++++ b/include/linux/if_pppox.h
+@@ -35,6 +35,10 @@
+ 	struct pptp_addr dst_addr;
+ 	u32 ack_sent, ack_recv;
+ 	u32 seq_sent, seq_recv;
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	spinlock_t offload_lock;
++	u64 offload_cookie;
++#endif
+ 	int ppp_flags;
+ };
+ #include <net/sock.h>
+--- /dev/null
++++ b/include/linux/mtk_npu_rx.h
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _LINUX_MTK_NPU_RX_H
++#define _LINUX_MTK_NPU_RX_H
++
++#include <linux/skbuff.h>
++
++/* Scalars only: clones retain identity without borrowing module/device memory. */
++struct mtk_npu_rx_meta {
++	u64 provider, generation, allocation;
++	u32 entry, tunnel_ifindex;
++	/* Bytes in this decoded DMA frame; not a firmware lifetime counter. */
++	u32 rx_frame_len;
++};
++
++static inline const struct mtk_npu_rx_meta *
++mtk_npu_rx_meta_find(const struct sk_buff *skb)
++{
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	return skb_ext_find(skb, SKB_EXT_MTK_NPU);
++#else
++	return NULL;
++#endif
++}
++
++static inline bool mtk_npu_rx_meta_add(struct sk_buff *skb,
++				     const struct mtk_npu_rx_meta *meta)
++{
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	struct mtk_npu_rx_meta *ext = skb_ext_add(skb, SKB_EXT_MTK_NPU);
++
++	if (ext) {
++		*ext = *meta;
++		return true;
++	}
++#endif
++	return false;
++}
++#endif
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -880,6 +880,28 @@
+ 			u8 amsdu;
+ 			u8 tid;
+ 		} mtk_wdma;
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++		/* Native NPU flowtable path: supported outer headers are IPv4.
++		 * Socket/session pointers and borrowed routes never escape here.
++		 */
++		struct {
++			u8 h_source[ETH_ALEN], h_dest[ETH_ALEN];
++			struct { __be32 ip; } sip, dip;
++			__be16 sport, dport;
++			u8 ttl, tos;
++			u32 underlay_ifindex;
++			union {
++				struct {
++					__be16 ul_tid, dl_tid, ul_sid, dl_sid;
++				} l2tp;
++				struct {
++					u16 call_id, peer_call_id;
++					u32 seq_sent;
++					u64 cookie;
++				} pptp;
++			};
++		} tunnel_2410;
++#endif
+ 		struct {
+ 			u8 h_source[ETH_ALEN];
+ 			u8 h_dest[ETH_ALEN];
+--- a/include/linux/ppp_channel.h
++++ b/include/linux/ppp_channel.h
+@@ -23,6 +23,38 @@
+ struct net_device_path;
+ struct net_device_path_ctx;
+ struct ppp_channel;
++struct flow_offload_hw_path;
++
++enum ppp_tunnel_kind {
++	PPP_TUNNEL_UNKNOWN,
++	PPP_TUNNEL_L2TP,
++	PPP_TUNNEL_PPTP,
++};
++
++/* Scalar snapshot only. No channel, session or socket pointer escapes. */
++struct ppp_tunnel_info {
++	u16 kind, version;
++	u16 tunnel_id, peer_tunnel_id;
++	u16 session_id, peer_session_id;
++	u64 cookie;
++	__be32 local_addr, peer_addr;
++	u32 sequence, ppp_flags;
++};
++struct net_device;
++int ppp_netdev_get_tunnel_info(struct net_device *dev, struct ppp_tunnel_info *info);
++struct ppp_tunnel_offload_ops {
++	/* Sleepable: all hardware templates must be gone before PPP enables
++	 * compression/encryption or another software-only packet policy.
++	 */
++	int (*quiesce)(struct net_device *dev);
++	/* Atomic: block new binds and retire PPE before a peer changes framing. */
++	void (*invalidate)(struct net_device *dev);
++};
++int ppp_tunnel_offload_register(const struct ppp_tunnel_offload_ops *ops);
++int ppp_tunnel_offload_unregister(const struct ppp_tunnel_offload_ops *ops);
++bool ppp_netdev_tunnel_offload_allowed(const struct net_device *dev);
++int ppp_channel_tunnel_quiesce(struct ppp_channel *chan);
++void ppp_channel_tunnel_invalidate(struct ppp_channel *chan);
+ 
+ struct ppp_channel_ops {
+ 	/* Send a packet (or multilink fragment) on this channel.
+@@ -35,6 +67,10 @@
+ 				     const struct ppp_channel *);
+ #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+ 	int	(*flow_offload_check)(struct ppp_channel *, struct flow_offload_hw_path *);
++#endif
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	/* Called under the generic PPP unit/channel transmit locks. */
++	int (*get_tunnel_info)(struct ppp_channel *, struct ppp_tunnel_info *);
+ #endif
+ };
+ 
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -945,6 +945,11 @@
+ 	__u8			active_extensions;
+ #endif
+ 
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	/* Ordinary=0, pending=1, published=2, terminal synthetic zero=3. */
++	__u8 hnat_accounting_state;
++#endif
++
+ 	/* Fields enclosed in headers group are copied
+ 	 * using a single memcpy() in __copy_skb_header()
+ 	 */
+@@ -4842,9 +4847,22 @@
+ #endif
+ }
+ 
++/* Revoke before releasing/replacing the skb's CT reference. No CT cookie
++ * is required: a published snapshot cannot survive reference replacement.
++ */
++static inline void skb_hnat_accounting_revoke(struct sk_buff *skb)
++{
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	if (skb->hnat_accounting_state == 2)
++		skb->hnat_accounting_state = 3;
++#endif
++}
++
+ static inline void skb_set_nfct(struct sk_buff *skb, unsigned long nfct)
+ {
+ #if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	if (skb->_nfct != nfct)
++		skb_hnat_accounting_revoke(skb);
+ 	skb->slow_gro |= !!nfct;
+ 	skb->_nfct = nfct;
+ #endif
+@@ -4866,6 +4884,12 @@
+ #endif
+ #if IS_ENABLED(CONFIG_MCTP_FLOWS)
+ 	SKB_EXT_MCTP,
++#endif
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	SKB_EXT_HNAT_ACCOUNTING,
++#endif
++#ifdef CONFIG_MTK_PPP_TUNNEL_INFO
++	SKB_EXT_MTK_NPU,
+ #endif
+ 	SKB_EXT_NUM, /* must be last */
+ };
+@@ -4904,6 +4928,9 @@
+ 				  const struct sk_buff *src)
+ {
+ 	dst->active_extensions = src->active_extensions;
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	dst->hnat_accounting_state = src->hnat_accounting_state ? 3 : 0;
++#endif
+ 
+ 	if (src->active_extensions) {
+ 		struct skb_ext *ext = src->extensions;
+@@ -4948,6 +4975,7 @@
+ 
+ static inline void skb_ext_reset(struct sk_buff *skb)
+ {
++	skb_hnat_accounting_revoke(skb);
+ 	if (unlikely(skb->active_extensions)) {
+ 		__skb_ext_put(skb->extensions);
+ 		skb->active_extensions = 0;
+@@ -4970,6 +4998,7 @@
+ static inline void nf_reset_ct(struct sk_buff *skb)
+ {
+ #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
++	skb_hnat_accounting_revoke(skb);
+ 	nf_conntrack_put(skb_nfct(skb));
+ 	skb->_nfct = 0;
+ #endif
+@@ -4994,6 +5023,7 @@
+ 			     bool copy)
+ {
+ #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
++	skb_hnat_accounting_revoke(dst);
+ 	dst->_nfct = src->_nfct;
+ 	nf_conntrack_get(skb_nfct(src));
+ #endif
+@@ -5006,6 +5036,7 @@
+ static inline void nf_copy(struct sk_buff *dst, const struct sk_buff *src)
+ {
+ #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
++	skb_hnat_accounting_revoke(dst);
+ 	nf_conntrack_put(skb_nfct(dst));
+ #endif
+ 	dst->slow_gro = src->slow_gro;
+--- a/include/net/flow_offload.h
++++ b/include/net/flow_offload.h
+@@ -1,5 +1,7 @@
+ #ifndef _NET_FLOW_OFFLOAD_H
+ #define _NET_FLOW_OFFLOAD_H
++
++#include <net/mtk_npu_flow.h>
+ 
+ #include <linux/kernel.h>
+ #include <linux/list.h>
+@@ -187,6 +189,7 @@
+ 	FLOW_ACTION_CONTINUE,
+ 	FLOW_ACTION_IPSEC_PUSH,
+ 	FLOW_ACTION_NPU_ENCAP,
++	FLOW_ACTION_MTK_NPU_2410,
+ 	NUM_FLOW_ACTIONS,
+ };
+ 
+@@ -330,6 +333,9 @@
+ 		struct {				/* FLOW_ACTION_PPPOE_PUSH */
+ 			u16		sid;
+ 		} pppoe;
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++		struct mtk_npu_flow_token npu_2410;
++#endif
+ 		struct {
+ 			struct xfrm_state xs;
+ 		} ipsec;
+--- /dev/null
++++ b/include/net/mtk_npu_flow.h
+@@ -0,0 +1,81 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _NET_MTK_NPU_FLOW_H
++#define _NET_MTK_NPU_FLOW_H
++
++#include <linux/errno.h>
++#include <linux/netdevice.h>
++
++#define MTK_NPU_FLOW_F_ENCAP BIT(0)
++#define MTK_NPU_FLOW_FIRST 32
++#define MTK_NPU_FLOW_LAST 63
++
++/* Scalar identity only: tokens may outlive a provider registration or slot. */
++struct mtk_npu_flow_token {
++	u64 provider;
++	u64 generation;
++	u64 allocation;
++	u32 entry;
++	u32 tunnel_ifindex;
++	u32 egress_ifindex;
++	u32 flags;
++};
++
++struct mtk_npu_flow_ops {
++	bool (*supported)(enum net_device_path_type type);
++	int (*prepare)(const struct net_device_path *path,
++		       struct mtk_npu_flow_token *token);
++	/* Called under the PPE bind spinlock. Never acquire the PPE or flow
++	 * table locks here. The successful guard pins tunnel state until unlock.
++	 */
++	bool (*bind)(const struct mtk_npu_flow_token *token, void **owner);
++	void (*unbind)(void *owner);
++};
++
++struct mtk_npu_flow_guard {
++	const struct mtk_npu_flow_ops *ops;
++	void *owner;
++};
++struct dst_entry;
++
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++int mtk_npu_flow_register(const struct mtk_npu_flow_ops *ops);
++int mtk_npu_flow_unregister(const struct mtk_npu_flow_ops *ops);
++bool mtk_npu_flow_supported(enum net_device_path_type type);
++int mtk_npu_flow_prepare(const struct net_device_path *path,
++			 struct mtk_npu_flow_token *token);
++bool mtk_npu_flow_lock(const struct mtk_npu_flow_token *token,
++		       struct mtk_npu_flow_guard *guard);
++void mtk_npu_flow_unlock(struct mtk_npu_flow_guard *guard);
++int mtk_npu_flow_neigh(struct dst_entry *dst, __be32 peer,
++		       struct net_device_path *path);
++#else
++static inline int mtk_npu_flow_register(const struct mtk_npu_flow_ops *ops)
++{
++	return -EOPNOTSUPP;
++}
++static inline int mtk_npu_flow_unregister(const struct mtk_npu_flow_ops *ops)
++{
++	return -EOPNOTSUPP;
++}
++static inline bool mtk_npu_flow_supported(enum net_device_path_type type)
++{
++	return false;
++}
++static inline int mtk_npu_flow_prepare(const struct net_device_path *path,
++				      struct mtk_npu_flow_token *token)
++{
++	return -EOPNOTSUPP;
++}
++static inline bool mtk_npu_flow_lock(const struct mtk_npu_flow_token *token,
++				    struct mtk_npu_flow_guard *guard)
++{
++	return false;
++}
++static inline void mtk_npu_flow_unlock(struct mtk_npu_flow_guard *guard) { }
++static inline int mtk_npu_flow_neigh(struct dst_entry *dst, __be32 peer,
++				    struct net_device_path *path)
++{
++	return -EOPNOTSUPP;
++}
++#endif
++#endif
+--- a/include/net/netfilter/nf_conntrack_acct.h
++++ b/include/net/netfilter/nf_conntrack_acct.h
+@@ -5,6 +5,7 @@
+ 
+ #ifndef _NF_CONNTRACK_ACCT_H
+ #define _NF_CONNTRACK_ACCT_H
++#include <linux/seqlock.h>
+ #include <net/net_namespace.h>
+ #include <linux/netfilter/nf_conntrack_common.h>
+ #include <linux/netfilter/nf_conntrack_tuple_common.h>
+@@ -18,9 +19,79 @@
+ 	atomic64_t diff_bytes;
+ };
+ 
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++/* Keep lifetime metadata outside the u8-sized conntrack extension area. */
++struct nf_ct_acct_totals {
++	seqlock_t lock;
++	u64 reset_bytes[IP_CT_DIR_MAX];
++	u64 reset_packets[IP_CT_DIR_MAX];
++	u64 id;
++};
++#endif
++
+ struct nf_conn_acct {
+ 	struct nf_conn_counter counter[IP_CT_DIR_MAX];
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	struct nf_ct_acct_totals *total;
++#endif
+ };
++
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++void nf_ct_acct_init_totals(struct nf_conn_acct *acct, gfp_t gfp);
++void nf_ct_acct_free_totals(struct nf_conn *ct);
++#else
++static inline void nf_ct_acct_free_totals(struct nf_conn *ct) { }
++#endif
++#if defined(CONFIG_NF_HNAT_PACKET_ACCOUNTING) && defined(CONFIG_NF_CONNTRACK_PROCFS)
++void nf_ct_acct_record_destroy(const struct nf_conn *ct);
++void nf_ct_acct_closed_init(struct net *net);
++void nf_ct_acct_closed_fini(struct net *net);
++#else
++static inline void nf_ct_acct_record_destroy(const struct nf_conn *ct) { }
++static inline void nf_ct_acct_closed_init(struct net *net) { }
++static inline void nf_ct_acct_closed_fini(struct net *net) { }
++#endif
++
++static inline void nf_ct_acct_read_reset(struct nf_conn_acct *acct, u32 dir,
++					u64 *packets, u64 *bytes)
++{
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	struct nf_ct_acct_totals *total = acct->total;
++
++	if (total)
++		write_seqlock_bh(&total->lock);
++#endif
++	*packets = atomic64_xchg(&acct->counter[dir].packets, 0);
++	*bytes = atomic64_xchg(&acct->counter[dir].bytes, 0);
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	if (total) {
++		total->reset_bytes[dir] += *bytes;
++		total->reset_packets[dir] += *packets;
++		write_sequnlock_bh(&total->lock);
++	}
++#endif
++}
++
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++static inline bool nf_ct_acct_read_totals(const struct nf_conn_acct *acct, u32 dir,
++					 u64 *packets, u64 *bytes)
++{
++	struct nf_ct_acct_totals *total = acct->total;
++	unsigned int seq;
++
++	if (!total)
++		return false;
++	/* No reader observes the gap between GET_CTRZERO and the carry. */
++	do {
++		seq = read_seqbegin(&total->lock);
++		*bytes = total->reset_bytes[dir] +
++			 atomic64_read(&acct->counter[dir].bytes);
++		*packets = total->reset_packets[dir] +
++			   atomic64_read(&acct->counter[dir].packets);
++	} while (read_seqretry(&total->lock, seq));
++	return true;
++}
++#endif
+ 
+ static inline
+ struct nf_conn_acct *nf_conn_acct_find(const struct nf_conn *ct)
+@@ -41,6 +112,10 @@
+ 	acct = nf_ct_ext_add(ct, NF_CT_EXT_ACCT, gfp);
+ 	if (!acct)
+ 		pr_debug("failed to add accounting extension area");
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	else
++		nf_ct_acct_init_totals(acct, gfp);
++#endif
+ 
+ 
+ 	return acct;
+--- a/include/net/netfilter/nf_flow_table.h
++++ b/include/net/netfilter/nf_flow_table.h
+@@ -11,6 +11,7 @@
+ #include <net/flow_offload.h>
+ #include <net/dst.h>
+ #include <linux/if_pppox.h>
++#include <net/mtk_npu_flow.h>
+ #include <linux/ppp_defs.h>
+ 
+ extern int (*mtk_flow_tnl_offload)(const struct net_device_path *path, u32 *entry);
+@@ -162,6 +163,10 @@
+ 		u32				npu_entry;
+ 		struct dst_entry		*dst;
+ 	} npu;
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	struct mtk_npu_flow_token npu_2410;
++#endif
++
+ };
+ 
+ struct flow_offload_tuple_rhash {
+@@ -253,6 +258,9 @@
+ 			u32			npu_entry;
+ 			struct dst_entry 	*dst;
+ 		} npu;
++	#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++		struct mtk_npu_flow_token npu_2410;
++	#endif
+ 	} tuple[FLOW_OFFLOAD_DIR_MAX];
+ };
+ 
+--- /dev/null
++++ b/include/net/netfilter/nf_hnat_packet_accounting.h
+@@ -0,0 +1,111 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _NF_HNAT_PACKET_ACCOUNTING_H
++#define _NF_HNAT_PACKET_ACCOUNTING_H
++#include <linux/skbuff.h>
++
++struct nf_hnat_packet_accounting {
++	u64 bytes;
++	u64 packets;
++	unsigned long nfct;
++};
++
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++/* Module lifetime references: native ordinary counters while any producer is
++ * enabled. Synthetic skb state remains authoritative after producer shutdown.
++ */
++void nf_hnat_packet_accounting_enable(void);
++void nf_hnat_packet_accounting_disable(void);
++bool nf_hnat_packet_accounting_active(void);
++
++/* First visit only. Copies and terminal zero never become producers again. */
++static inline bool nf_hnat_packet_accounting_mark(struct sk_buff *skb)
++{
++	if (skb->hnat_accounting_state)
++		return false;
++	skb->hnat_accounting_state = 1;
++	return true;
++}
++
++static inline bool nf_hnat_packet_accounting_is_synthetic(const struct sk_buff *skb)
++{
++	return skb->hnat_accounting_state != 0;
++}
++
++static inline void nf_hnat_packet_accounting_finish_zero(struct sk_buff *skb)
++{
++	if (skb->hnat_accounting_state == 1)
++		skb->hnat_accounting_state = 3;
++}
++
++/* Reserve before consuming ledger. Only this helper may obtain writable COW
++ * storage. Failure leaves pending data in the producer's ledger.
++ */
++static inline bool nf_hnat_packet_accounting_prepare(struct sk_buff *skb)
++{
++	struct nf_hnat_packet_accounting *acct;
++
++	if (skb->hnat_accounting_state != 1 || !skb_get_nfct(skb))
++		return false;
++	acct = skb_ext_add(skb, SKB_EXT_HNAT_ACCOUNTING);
++	if (!acct) {
++		nf_hnat_packet_accounting_finish_zero(skb);
++		return false;
++	}
++	acct->bytes = 0;
++	acct->packets = 0;
++	acct->nfct = skb_get_nfct(skb);
++	return true;
++}
++
++/* Caller serializes this skb, calls prepare before taking its ledger and
++ * changes neither extensions nor CT identity between prepare and publish.
++ * Identity holds via skb's existing CT reference; reset/copy/set revoke.
++ */
++static inline bool nf_hnat_packet_accounting_publish(struct sk_buff *skb,
++						   u64 bytes, u64 packets)
++{
++	struct nf_hnat_packet_accounting *acct;
++
++	if (skb->hnat_accounting_state != 1 || !skb_get_nfct(skb))
++		return false;
++	acct = skb_ext_find(skb, SKB_EXT_HNAT_ACCOUNTING);
++	if (!acct || acct->nfct != skb_get_nfct(skb))
++		return false;
++	/* prepare reserved exclusive storage; never publish to a shared ext. */
++	if (refcount_read(&skb->extensions->refcnt) != 1)
++		return false;
++	acct->bytes = bytes;
++	acct->packets = packets;
++	acct->nfct = skb_get_nfct(skb);
++	skb->hnat_accounting_state = 2;
++	return true;
++}
++
++/* false: execute unchanged vendor legacy path. true: replace len/1 with
++ * complete immutable pair, including zero. Reading never consumes totals.
++ */
++static inline bool nf_hnat_packet_accounting_get(const struct sk_buff *skb,
++					       u64 *bytes, u64 *packets)
++{
++	const struct nf_hnat_packet_accounting *acct;
++
++	if (!nf_hnat_packet_accounting_is_synthetic(skb)) {
++		if (!nf_hnat_packet_accounting_active())
++			return false;
++		*bytes = skb->len;
++		*packets = 1;
++		return true;
++	}
++	*bytes = 0;
++	*packets = 0;
++	if (skb->hnat_accounting_state != 2)
++		return true;
++	acct = skb_ext_find(skb, SKB_EXT_HNAT_ACCOUNTING);
++	if (acct && acct->nfct == skb_get_nfct(skb)) {
++		*bytes = acct->bytes;
++		*packets = acct->packets;
++	}
++	return true;
++}
++#endif
++#endif
+--- a/include/net/pptp.h
++++ b/include/net/pptp.h
+@@ -28,4 +28,33 @@
+ /* symbol exported from linux kernel driver/net/ppp/pptp.c */
+ extern int (*mtk_pptp_seq_next)(uint16_t call_id, uint32_t *val);
+ 
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++struct pptp_offload_key {
++	u64 cookie;
++	u32 netns;
++	__be32 local_addr, peer_addr;
++	u16 local_id, peer_id;
++};
++
++struct pptp_offload_ops {
++	/* next/snapshot run with the socket sequence spinlock held. Returning
++	 * -EOPNOTSUPP from next permits ordinary software allocation; any other
++	 * error refuses the packet rather than reusing stale sequence state.
++	 */
++	int (*next)(const struct pptp_offload_key *, u32 software_sequence, u32 *sequence);
++	int (*snapshot)(const struct pptp_offload_key *, u32 *sequence);
++	/* Channel unbind has completed; the sleepable callback must drain
++	 * hardware before the native call ID can be allocated again.
++	 */
++	int (*close)(const struct pptp_offload_key *);
++};
++int pptp_offload_ops_register(const struct pptp_offload_ops *ops);
++int pptp_offload_ops_unregister(const struct pptp_offload_ops *ops);
++/* Release a closed socket's reserved Call ID only after hardware rundown.
++ * The generation check prevents a delayed release from freeing a new socket.
++ */
++void pptp_offload_callid_release(const struct pptp_offload_key *key);
++bool pptp_offload_session_live(const struct pptp_offload_key *key);
+ #endif
++
++#endif
+--- a/net/bridge/br_netfilter_hooks.c
++++ b/net/bridge/br_netfilter_hooks.c
+@@ -642,7 +642,7 @@
+ 	 */
+ 	ct_hook = rcu_dereference(nf_ct_hook);
+ 	if (!ct_hook) {
+-		skb->_nfct = 0ul;
++		skb_set_nfct(skb, 0);
+ 		nf_conntrack_put(nfct);
+ 		return NF_ACCEPT;
+ 	}
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -90,6 +90,10 @@
+ #include <linux/interrupt.h>
+ #include <linux/if_ether.h>
+ #include <linux/netdevice.h>
++#include <net/mtk_npu_flow.h>
++#include <net/ip.h>
++#include <net/xfrm.h>
++#include <net/dsa.h>
+ #include <linux/etherdevice.h>
+ #include <linux/ethtool.h>
+ #include <linux/skbuff.h>
+@@ -167,6 +171,156 @@
+ int (*mtk_flow_tnl_offloadable)(const struct net_device_path *path);
+ EXPORT_SYMBOL(mtk_flow_tnl_offloadable);
+ 
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++static DEFINE_MUTEX(mtk_npu_flow_admin);
++static const struct mtk_npu_flow_ops __rcu *mtk_npu_flow_ops;
++static u64 mtk_npu_flow_generation;
++
++int mtk_npu_flow_register(const struct mtk_npu_flow_ops *ops)
++{
++	int ret = 0;
++
++	if (!ops || !ops->supported || !ops->prepare || !ops->bind || !ops->unbind)
++		return -EINVAL;
++	mutex_lock(&mtk_npu_flow_admin);
++	if (rcu_access_pointer(mtk_npu_flow_ops)) {
++		ret = -EBUSY;
++	} else {
++		if (!++mtk_npu_flow_generation)
++			mtk_npu_flow_generation++;
++		rcu_assign_pointer(mtk_npu_flow_ops, ops);
++	}
++	mutex_unlock(&mtk_npu_flow_admin);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mtk_npu_flow_register);
++
++int mtk_npu_flow_unregister(const struct mtk_npu_flow_ops *ops)
++{
++	int ret = 0;
++
++	mutex_lock(&mtk_npu_flow_admin);
++	if (!ops || rcu_access_pointer(mtk_npu_flow_ops) != ops) {
++		ret = -ENOENT;
++	} else {
++		RCU_INIT_POINTER(mtk_npu_flow_ops, NULL);
++		synchronize_net();
++	}
++	mutex_unlock(&mtk_npu_flow_admin);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mtk_npu_flow_unregister);
++
++bool mtk_npu_flow_supported(enum net_device_path_type type)
++{
++	const struct mtk_npu_flow_ops *ops;
++	bool ret = false;
++
++	rcu_read_lock_bh();
++	ops = rcu_dereference_bh(mtk_npu_flow_ops);
++	if (ops)
++		ret = ops->supported(type);
++	rcu_read_unlock_bh();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mtk_npu_flow_supported);
++
++int mtk_npu_flow_prepare(const struct net_device_path *path,
++			 struct mtk_npu_flow_token *token)
++{
++	const struct mtk_npu_flow_ops *ops;
++	struct mtk_npu_flow_token result = {};
++	int ret = -EOPNOTSUPP;
++
++	if (!path || !token)
++		return -EINVAL;
++	memset(token, 0, sizeof(*token));
++	rcu_read_lock_bh();
++	ops = rcu_dereference_bh(mtk_npu_flow_ops);
++	if (ops && ops->supported(path->type)) {
++		ret = ops->prepare(path, &result);
++		if (!ret) {
++			if (result.entry < MTK_NPU_FLOW_FIRST ||
++			    result.entry > MTK_NPU_FLOW_LAST || !result.generation ||
++			    !result.allocation || !result.tunnel_ifindex || !result.egress_ifindex) {
++				ret = -ERANGE;
++			} else {
++				result.provider = READ_ONCE(mtk_npu_flow_generation);
++				result.flags = MTK_NPU_FLOW_F_ENCAP;
++				*token = result;
++			}
++		}
++	}
++	rcu_read_unlock_bh();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mtk_npu_flow_prepare);
++
++bool mtk_npu_flow_lock(const struct mtk_npu_flow_token *token,
++		       struct mtk_npu_flow_guard *guard)
++{
++	const struct mtk_npu_flow_ops *ops;
++
++	if (!token || !guard || token->entry < MTK_NPU_FLOW_FIRST ||
++	    token->entry > MTK_NPU_FLOW_LAST || !token->generation ||
++	    !token->allocation || !token->tunnel_ifindex || !token->egress_ifindex ||
++	    (token->flags & ~MTK_NPU_FLOW_F_ENCAP))
++		return false;
++	guard->ops = NULL;
++	guard->owner = NULL;
++	rcu_read_lock_bh();
++	ops = rcu_dereference_bh(mtk_npu_flow_ops);
++	if (ops && token->provider == READ_ONCE(mtk_npu_flow_generation) &&
++	    ops->bind(token, &guard->owner)) {
++		guard->ops = ops;
++		return true;
++	}
++	rcu_read_unlock_bh();
++	return false;
++}
++EXPORT_SYMBOL_GPL(mtk_npu_flow_lock);
++
++void mtk_npu_flow_unlock(struct mtk_npu_flow_guard *guard)
++{
++	if (WARN_ON_ONCE(!guard || !guard->ops))
++		return;
++	guard->ops->unbind(guard->owner);
++	guard->ops = NULL;
++	guard->owner = NULL;
++	rcu_read_unlock_bh();
++}
++EXPORT_SYMBOL_GPL(mtk_npu_flow_unlock);
++
++int mtk_npu_flow_neigh(struct dst_entry *dst, __be32 peer,
++                       struct net_device_path *path)
++{
++	struct neighbour *neigh;
++
++	/* The native backend initially accepts a plain Ethernet underlay. The
++	 * HNAT backend owns the separate VLAN/PPPoE/bridge adaptation path.
++	 */
++	if (!dst || !path || !dst_check(dst, 0) || dst_xfrm(dst) ||
++	    dst->dev->type != ARPHRD_ETHER || !netif_running(dst->dev) ||
++	    is_vlan_dev(dst->dev) || netif_is_bridge_master(dst->dev) ||
++	    netdev_uses_dsa(dst->dev))
++		return -EOPNOTSUPP;
++	neigh = dst_neigh_lookup(dst, &peer);
++	if (!neigh)
++		return -EHOSTUNREACH;
++	if (!(READ_ONCE(neigh->nud_state) & NUD_VALID)) {
++		neigh_release(neigh);
++		return -EHOSTUNREACH;
++	}
++	neigh_ha_snapshot(path->tunnel_2410.h_dest, neigh, dst->dev);
++	ether_addr_copy(path->tunnel_2410.h_source, dst->dev->dev_addr);
++	path->tunnel_2410.underlay_ifindex = dst->dev->ifindex;
++	neigh_release(neigh);
++	return is_valid_ether_addr(path->tunnel_2410.h_dest) &&
++	       is_valid_ether_addr(path->tunnel_2410.h_source) ? 0 : -EHOSTUNREACH;
++}
++EXPORT_SYMBOL_GPL(mtk_npu_flow_neigh);
++#endif
++
+ static DEFINE_SPINLOCK(ptype_lock);
+ struct list_head ptype_base[PTYPE_HASH_SIZE] __read_mostly;
+ 
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -51,6 +51,7 @@
+ #endif
+ #include <linux/string.h>
+ #include <linux/skbuff.h>
++#include <linux/mtk_npu_rx.h>
+ #include <linux/skbuff_ref.h>
+ #include <linux/splice.h>
+ #include <linux/cache.h>
+@@ -81,6 +82,9 @@
+ #include <net/page_pool/helpers.h>
+ #include <net/dropreason.h>
+ #include <net/ra_nat.h>
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++#include <net/netfilter/nf_hnat_packet_accounting.h>
++#endif
+ 
+ #include <linux/uaccess.h>
+ #include <trace/events/skb.h>
+@@ -5095,6 +5099,12 @@
+ #define SKB_EXT_CHUNKSIZEOF(x)	(ALIGN((sizeof(x)), SKB_EXT_ALIGN_VALUE) / SKB_EXT_ALIGN_VALUE)
+ 
+ static const u8 skb_ext_type_len[] = {
++#ifdef CONFIG_MTK_PPP_TUNNEL_INFO
++	[SKB_EXT_MTK_NPU] = SKB_EXT_CHUNKSIZEOF(struct mtk_npu_rx_meta),
++#endif
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	[SKB_EXT_HNAT_ACCOUNTING] = SKB_EXT_CHUNKSIZEOF(struct nf_hnat_packet_accounting),
++#endif
+ #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
+ 	[SKB_EXT_BRIDGE_NF] = SKB_EXT_CHUNKSIZEOF(struct nf_bridge_info),
+ #endif
+@@ -7097,6 +7107,7 @@
+ {
+ 	unsigned int newlen, newoff = SKB_EXT_CHUNKSIZEOF(*ext);
+ 
++	skb_hnat_accounting_revoke(skb);
+ 	skb_ext_put(skb);
+ 	newlen = newoff + skb_ext_type_len[id];
+ 	ext->chunks = newlen;
+@@ -7178,6 +7189,10 @@
+ 	struct skb_ext *ext = skb->extensions;
+ 
+ 	skb->active_extensions &= ~(1 << id);
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	if (id == SKB_EXT_HNAT_ACCOUNTING)
++		skb_hnat_accounting_revoke(skb);
++#endif
+ 	if (skb->active_extensions == 0) {
+ 		skb->extensions = NULL;
+ 		__skb_ext_put(ext);
+--- a/net/ipv4/netfilter/ip_tables.c
++++ b/net/ipv4/netfilter/ip_tables.c
+@@ -28,6 +28,9 @@
+ #include "../../netfilter/xt_repldata.h"
+ #include <net/netfilter/nf_conntrack.h>
+ #include <net/netfilter/nf_conntrack_acct.h>
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++#include <net/netfilter/nf_hnat_packet_accounting.h>
++#endif
+ 
+ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+@@ -328,6 +331,13 @@
+ 	if (ipt_handle_default_rule(e, &verdict)) {
+ 		struct xt_counters *counter;
+ 		counter = xt_get_this_cpu_counter(&e->counters);
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++		{
++			u64 delta_bytes, delta_packets;
++			if (nf_hnat_packet_accounting_get(skb, &delta_bytes, &delta_packets))
++				ADD_COUNTER(*counter, delta_bytes, delta_packets);
++			else {
++#endif
+ 		ADD_COUNTER(*counter, skb->len, 1);
+ 		
+ 		if (unlikely(skb_hnat_reason(skb) == HIT_BIND_KEEPALIVE_DUP_OLD_HDR)){
+@@ -341,6 +351,10 @@
+ 				  }
+ 			}
+ 		}
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++			}
++		}
++#endif
+ 
+ 			
+ 		local_bh_enable();
+@@ -397,6 +411,13 @@
+ 		}
+ 
+ 		counter = xt_get_this_cpu_counter(&e->counters);
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++		{
++			u64 delta_bytes, delta_packets;
++			if (nf_hnat_packet_accounting_get(skb, &delta_bytes, &delta_packets))
++				ADD_COUNTER(*counter, delta_bytes, delta_packets);
++			else {
++#endif
+ 		ADD_COUNTER(*counter, skb->len, 1);
+ 		if (unlikely(skb_hnat_reason(skb) == HIT_BIND_KEEPALIVE_DUP_OLD_HDR)){
+ 		ct = nf_ct_get(skb, &ctinfo);
+@@ -409,6 +430,10 @@
+ 				  }
+ 			}
+ 		}
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++			}
++		}
++#endif
+ 
+ 		t = ipt_get_target_c(e);
+ 		WARN_ON(!t->u.kernel.target);
+--- a/net/ipv6/netfilter/ip6_tables.c
++++ b/net/ipv6/netfilter/ip6_tables.c
+@@ -32,6 +32,9 @@
+ #include "../../netfilter/xt_repldata.h"
+ #include <net/netfilter/nf_conntrack.h>
+ #include <net/netfilter/nf_conntrack_acct.h>
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++#include <net/netfilter/nf_hnat_packet_accounting.h>
++#endif
+ 
+ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+@@ -345,6 +348,13 @@
+ 		}
+ 
+ 		counter = xt_get_this_cpu_counter(&e->counters);
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++		{
++			u64 delta_bytes, delta_packets;
++			if (nf_hnat_packet_accounting_get(skb, &delta_bytes, &delta_packets))
++				ADD_COUNTER(*counter, delta_bytes, delta_packets);
++			else {
++#endif
+ 		ADD_COUNTER(*counter, skb->len, 1);
+ 		
+ 		if (unlikely(skb_hnat_reason(skb) == HIT_BIND_KEEPALIVE_DUP_OLD_HDR)){
+@@ -358,6 +368,10 @@
+ 				  }
+ 			}
+ 		}
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++			}
++		}
++#endif
+ 
+ 			
+ 		t = ip6t_get_target_c(e);
+--- a/net/l2tp/l2tp_core.c
++++ b/net/l2tp/l2tp_core.c
+@@ -917,6 +917,10 @@
+ 		 */
+ 		if (!session->lns_mode && !session->send_seq) {
+ 			trace_session_seqnum_lns_enable(session);
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++			if (session->offload_invalidate)
++				session->offload_invalidate(session);
++#endif
+ 			session->send_seq = 1;
+ 			l2tp_session_set_header_len(session, tunnel->version,
+ 						    tunnel->encap);
+--- a/net/l2tp/l2tp_core.h
++++ b/net/l2tp/l2tp_core.h
+@@ -111,6 +111,9 @@
+ 	 * reordering, if data sequence numbers are enabled for the session.
+ 	 */
+ 	void (*recv_skb)(struct l2tp_session *session, struct sk_buff *skb, int data_len);
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	void (*offload_invalidate)(struct l2tp_session *session);
++#endif
+ 
+ 	/* Session close handler.
+ 	 * Each pseudowire implementation may implement this callback in order to carry
+--- a/net/l2tp/l2tp_ppp.c
++++ b/net/l2tp/l2tp_ppp.c
+@@ -91,6 +91,9 @@
+ #include <net/netns/generic.h>
+ #include <net/netfilter/nf_flow_table.h>
+ #include <net/ip.h>
++#include <net/route.h>
++#include <net/mtk_npu_flow.h>
++#include <linux/security.h>
+ #include <net/udp.h>
+ #include <net/inet_common.h>
+ #include <net/neighbour.h>
+@@ -125,15 +128,107 @@
+ };
+ 
+ static int pppol2tp_xmit(struct ppp_channel *chan, struct sk_buff *skb);
+-static int pppol2tp_fill_forward_path(struct net_device_path_ctx *ctx,
++static int __maybe_unused pppol2tp_fill_forward_path(struct net_device_path_ctx *ctx,
+ 				      struct net_device_path *path,
+ 				      const struct ppp_channel *chan);
+ static int l2tp_ppp_flow_offload_check(struct ppp_channel *chan,
+ 				       struct flow_offload_hw_path *path);
+ 
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++static int pppol2tp_get_tunnel_info(struct ppp_channel *chan,
++				  struct ppp_tunnel_info *info)
++{
++	struct sock *sk = chan->private;
++	struct l2tp_session *session;
++	struct l2tp_tunnel *tunnel;
++
++	/* pppol2tp_release unregisters this channel before clearing sk_user_data
++	 * or releasing the socket/session. downl serializes that unregister.
++	 */
++	if (!sk || !(READ_ONCE(sk->sk_state) & PPPOX_CONNECTED))
++		return -ENOTCONN;
++	session = READ_ONCE(sk->sk_user_data);
++	if (!session || session->magic != L2TP_SESSION_MAGIC)
++		return -ENOTCONN;
++	tunnel = session->tunnel;
++	if (tunnel->version != 2 || tunnel->encap != L2TP_ENCAPTYPE_UDP ||
++	    session->send_seq || session->recv_seq)
++		return -EOPNOTSUPP;
++	info->kind = PPP_TUNNEL_L2TP;
++	info->version = 2;
++	info->tunnel_id = tunnel->tunnel_id;
++	info->peer_tunnel_id = tunnel->peer_tunnel_id;
++	info->session_id = session->session_id;
++	info->peer_session_id = session->peer_session_id;
++	return 0;
++}
++#endif
++
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++static int pppol2tp_2410_fill_forward_path(struct net_device_path_ctx *ctx,
++				     struct net_device_path *path,
++				     const struct ppp_channel *chan)
++{
++	struct sock *sk = chan->private;
++	struct ppp_tunnel_info info;
++	struct l2tp_session *session;
++	struct inet_sock *inet;
++	struct sock *transport;
++	struct flowi4 fl4;
++	struct rtable *rt;
++	int ret;
++
++	if (!mtk_npu_flow_supported(DEV_PATH_L2TP))
++		return -EOPNOTSUPP;
++	ret = pppol2tp_get_tunnel_info((struct ppp_channel *)chan, &info);
++	if (ret)
++		return ret;
++	/* Generic PPP holds its unit/downl locks over this callback. */
++	session = READ_ONCE(sk->sk_user_data);
++	transport = session->tunnel->sock;
++	if (!transport || transport->sk_family != AF_INET)
++		return -EOPNOTSUPP;
++	inet = inet_sk(transport);
++	flowi4_init_output(&fl4, transport->sk_bound_dev_if, transport->sk_mark,
++			   RT_TOS(inet->tos), RT_SCOPE_UNIVERSE, IPPROTO_UDP, 0,
++			   inet->inet_daddr, inet->inet_saddr, inet->inet_dport,
++			   inet->inet_sport, sock_net_uid(sock_net(transport), transport));
++	security_sk_classify_flow(transport, flowi4_to_flowi_common(&fl4));
++	rt = ip_route_output_flow(sock_net(transport), &fl4, transport);
++	if (IS_ERR(rt))
++		return PTR_ERR(rt);
++	ret = mtk_npu_flow_neigh(&rt->dst, fl4.daddr, path);
++	if (!ret) {
++		path->type = DEV_PATH_L2TP;
++		path->dev = ctx->dev;
++		path->tunnel_2410.sip.ip = fl4.saddr;
++		path->tunnel_2410.dip.ip = fl4.daddr;
++		path->tunnel_2410.sport = inet->inet_sport;
++		path->tunnel_2410.dport = inet->inet_dport;
++		path->tunnel_2410.ttl = inet->uc_ttl < 0 ?
++			ip4_dst_hoplimit(&rt->dst) : inet->uc_ttl;
++		path->tunnel_2410.tos = inet->tos;
++		path->tunnel_2410.l2tp.dl_tid = htons(info.tunnel_id);
++		path->tunnel_2410.l2tp.ul_tid = htons(info.peer_tunnel_id);
++		path->tunnel_2410.l2tp.dl_sid = htons(info.session_id);
++		path->tunnel_2410.l2tp.ul_sid = htons(info.peer_session_id);
++		ctx->dev = rt->dst.dev;
++	}
++	ip_rt_put(rt);
++	return ret;
++}
++#endif
++
+ static const struct ppp_channel_ops pppol2tp_chan_ops = {
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	.fill_forward_path = pppol2tp_2410_fill_forward_path,
++#else
++	.fill_forward_path = pppol2tp_fill_forward_path,
++#endif
+ 	.start_xmit =  pppol2tp_xmit,
+-	.fill_forward_path = pppol2tp_fill_forward_path,
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	.get_tunnel_info = pppol2tp_get_tunnel_info,
++#endif
+ #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+ 	.flow_offload_check = l2tp_ppp_flow_offload_check,
+ #endif /* IS_ENABLED(CONFIG_NF_FLOW_TABLE) */
+@@ -205,6 +300,19 @@
+ end:
+ 	return err;
+ }
++
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++static void pppol2tp_offload_invalidate(struct l2tp_session *session)
++{
++	struct sock *sk;
++
++	rcu_read_lock();
++	sk = pppol2tp_session_get_sock(session);
++	if (sk)
++		ppp_channel_tunnel_invalidate(&pppox_sk(sk)->chan);
++	rcu_read_unlock();
++}
++#endif
+ 
+ static void pppol2tp_recv(struct l2tp_session *session, struct sk_buff *skb, int data_len)
+ {
+@@ -326,24 +434,25 @@
+ 
+ #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+ static int l2tp_ppp_flow_offload_check(struct ppp_channel *chan,
+-				       struct flow_offload_hw_path *path)
+-{
+-	struct sock *sk = (struct sock *)chan->private;
++                                       struct flow_offload_hw_path *path)
++{
++	struct sock *sk = chan->private;
+ 	struct l2tp_session *session;
++	int ret = -EOPNOTSUPP;
+ 
+ 	if (path->flags & BIT(DEV_PATH_TNL))
+ 		return -EEXIST;
+-
+ 	session = pppol2tp_sock_to_session(sk);
+ 	if (!session)
+-		return -EINVAL;
+-
+-	path->flags |= BIT(DEV_PATH_TNL);
+-	path->tnl_type = FLOW_OFFLOAD_TNL_L2TP_V2;
+-
+-	l2tp_session_put(session);
+-
+-	return 0;
++		return -ENOTCONN;
++	if (session->tunnel->version == 2 &&
++	    session->tunnel->encap == L2TP_ENCAPTYPE_UDP) {
++		path->flags |= BIT(DEV_PATH_TNL);
++		path->tnl_type = FLOW_OFFLOAD_TNL_L2TP_V2;
++		ret = 0;
++	}
++	sock_put(sk);
++	return ret;
+ }
+ #endif /* IS_ENABLED(CONFIG_NF_FLOW_TABLE) */
+ 
+@@ -387,6 +496,17 @@
+ 	if (skb_cow_head(skb, headroom))
+ 		goto abort_put_sess;
+ 
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	/* Keep an explicit inner-header marker for final TOPS/CT confirmation.
++	 * pskb_expand_head already preserves this tree's 16-byte FOE metadata.
++	 */
++	if (!skb->encapsulation && skb->protocol == htons(ETH_P_IP)) {
++		skb_reset_inner_headers(skb);
++		skb->encapsulation = 1;
++		skb_set_inner_protocol(skb, htons(ETH_P_IP));
++	}
++#endif
++
+ 	/* Setup PPP header */
+ 	__skb_push(skb, 2);
+ 	skb->data[0] = PPP_ALLSTATIONS;
+@@ -408,7 +528,7 @@
+ 	return 1;
+ }
+ 
+-static int pppol2tp_fill_forward_path(struct net_device_path_ctx *ctx,
++static int __maybe_unused pppol2tp_fill_forward_path(struct net_device_path_ctx *ctx,
+ 				      struct net_device_path *path,
+ 				      const struct ppp_channel *chan)
+ {
+@@ -629,6 +749,9 @@
+ 	struct pppol2tp_session *ps;
+ 
+ 	session->recv_skb = pppol2tp_recv;
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++	session->offload_invalidate = pppol2tp_offload_invalidate;
++#endif
+ 	session->session_close = pppol2tp_session_close;
+ 	if (IS_ENABLED(CONFIG_L2TP_DEBUGFS))
+ 		session->show = pppol2tp_show;
+@@ -1300,6 +1423,13 @@
+ 			err = -EINVAL;
+ 			break;
+ 		}
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++		if (val) {
++			err = ppp_channel_tunnel_quiesce(&pppox_sk(sk)->chan);
++			if (err)
++				break;
++		}
++#endif
+ 		session->recv_seq = !!val;
+ 		break;
+ 
+@@ -1308,6 +1438,13 @@
+ 			err = -EINVAL;
+ 			break;
+ 		}
++#if IS_ENABLED(CONFIG_MTK_PPP_TUNNEL_INFO)
++		if (val) {
++			err = ppp_channel_tunnel_quiesce(&pppox_sk(sk)->chan);
++			if (err)
++				break;
++		}
++#endif
+ 		session->send_seq = !!val;
+ 		{
+ 			struct pppox_sock *po = pppox_sk(sk);
+--- a/net/netfilter/Kconfig
++++ b/net/netfilter/Kconfig
+@@ -1,6 +1,16 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ menu "Core Netfilter Configuration"
+ 	depends on INET && NETFILTER
++
++config NF_HNAT_PACKET_ACCOUNTING
++	bool "MediaTek HNAT packet delta accounting (experimental)"
++	depends on NF_CONNTRACK=y
++	select SKB_EXTENSIONS
++	default n
++	help
++	  Matching HNAT producer marks synthetic keepalives before software
++	  accounting and publishes immutable per-packet hardware deltas.
++	  Unmarked packets retain the vendor legacy accounting path.
+ 
+ config NETFILTER_INGRESS
+ 	bool "Netfilter ingress support"
+--- a/net/netfilter/Makefile
++++ b/net/netfilter/Makefile
+@@ -9,6 +9,7 @@
+ nf_conntrack-$(subst m,y,$(CONFIG_IPV6)) += nf_conntrack_proto_icmpv6.o
+ nf_conntrack-$(CONFIG_NF_CONNTRACK_TIMEOUT) += nf_conntrack_timeout.o
+ nf_conntrack-$(CONFIG_NF_CONNTRACK_TIMESTAMP) += nf_conntrack_timestamp.o
++nf_conntrack-$(CONFIG_NF_HNAT_PACKET_ACCOUNTING) += nf_conntrack_traffic.o
+ nf_conntrack-$(CONFIG_NF_CONNTRACK_EVENTS) += nf_conntrack_ecache.o
+ nf_conntrack-$(CONFIG_NF_CONNTRACK_LABELS) += nf_conntrack_labels.o
+ nf_conntrack-$(CONFIG_NF_CONNTRACK_OVS) += nf_conntrack_ovs.o
+--- a/net/netfilter/nf_conntrack_acct.c
++++ b/net/netfilter/nf_conntrack_acct.c
+@@ -26,3 +26,28 @@
+ {
+ 	net->ct.sysctl_acct = nf_ct_acct;
+ }
++
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++static atomic64_t nf_ct_acct_sequence = ATOMIC64_INIT(0);
++
++void nf_ct_acct_init_totals(struct nf_conn_acct *acct, gfp_t gfp)
++{
++	struct nf_ct_acct_totals *total;
++
++	total = kzalloc(sizeof(*total), gfp);
++	if (!total)
++		return; /* Ordinary/resettable accounting remains usable. */
++	seqlock_init(&total->lock);
++	total->id = atomic64_inc_return(&nf_ct_acct_sequence);
++	acct->total = total;
++}
++EXPORT_SYMBOL_GPL(nf_ct_acct_init_totals);
++
++void nf_ct_acct_free_totals(struct nf_conn *ct)
++{
++	struct nf_conn_acct *acct = nf_conn_acct_find(ct);
++
++	if (acct)
++		kfree(acct->total);
++}
++#endif
+--- a/net/netfilter/nf_conntrack_core.c
++++ b/net/netfilter/nf_conntrack_core.c
+@@ -41,6 +41,9 @@
+ #include <net/netfilter/nf_conntrack_core.h>
+ #include <net/netfilter/nf_conntrack_extend.h>
+ #include <net/netfilter/nf_conntrack_acct.h>
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++#include <net/netfilter/nf_hnat_packet_accounting.h>
++#endif
+ #include <net/netfilter/nf_conntrack_qos.h>
+ #include <net/netfilter/nf_conntrack_ttl.h>
+ #include <net/netfilter/nf_conntrack_ecache.h>
+@@ -557,6 +560,7 @@
+ 
+ void nf_ct_tmpl_free(struct nf_conn *tmpl)
+ {
++	nf_ct_acct_free_totals(tmpl);
+ 	kfree(tmpl->ext);
+ 
+ 	if (ARCH_KMALLOC_MINALIGN <= NFCT_INFOMASK)
+@@ -614,6 +618,7 @@
+ 	if (ct->master)
+ 		nf_ct_put(ct->master);
+ 
++	nf_ct_acct_record_destroy(ct);
+ 	nf_conntrack_free(ct);
+ }
+ EXPORT_SYMBOL(nf_ct_destroy);
+@@ -1709,6 +1714,7 @@
+ 	nf_ct_timeout_put(ct);
+ 	rcu_read_unlock();
+ 
++	nf_ct_acct_free_totals(ct);
+ 	kfree(ct->ext);
+ 	kmem_cache_free(nf_conntrack_cachep, ct);
+ 	cnet = nf_ct_pernet(net);
+@@ -1997,7 +2003,7 @@
+ 		if ((tmpl && !nf_ct_is_template(tmpl)) ||
+ 		     ctinfo == IP_CT_UNTRACKED)
+ 			return NF_ACCEPT;
+-		skb->_nfct = 0;
++		skb_set_nfct(skb, 0);
+ 	}
+ 
+ 	/* rcu_read_lock()ed by nf_hook_thresh */
+@@ -2041,8 +2047,8 @@
+ 	if (ret <= 0) {
+ 		/* Invalid: inverse of the return code tells
+ 		 * the netfilter core what to do */
++		skb_set_nfct(skb, 0);
+ 		nf_ct_put(ct);
+-		skb->_nfct = 0;
+ 		/* Special case: TCP tracker reports an attempt to reopen a
+ 		 * closed/aborted connection. We have to go back and create a
+ 		 * fresh conntrack.
+@@ -2070,6 +2076,28 @@
+ EXPORT_SYMBOL_GPL(nf_conntrack_in);
+ 
+ /* Refresh conntrack for this many jiffies and do accounting if do_acct is 1 */
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++static atomic_t hnat_packet_accounting_users = ATOMIC_INIT(0);
++
++void nf_hnat_packet_accounting_enable(void)
++{
++	atomic_inc(&hnat_packet_accounting_users);
++}
++EXPORT_SYMBOL_GPL(nf_hnat_packet_accounting_enable);
++
++void nf_hnat_packet_accounting_disable(void)
++{
++	WARN_ON_ONCE(atomic_dec_if_positive(&hnat_packet_accounting_users) < 0);
++}
++EXPORT_SYMBOL_GPL(nf_hnat_packet_accounting_disable);
++
++bool nf_hnat_packet_accounting_active(void)
++{
++	return atomic_read(&hnat_packet_accounting_users) > 0;
++}
++EXPORT_SYMBOL_GPL(nf_hnat_packet_accounting_active);
++#endif
++
+ void __nf_ct_refresh_acct(struct nf_conn *ct,
+ 			  enum ip_conntrack_info ctinfo,
+ 			  const struct sk_buff *skb,
+@@ -2087,6 +2115,10 @@
+ 	if (READ_ONCE(ct->timeout) != extra_jiffies)
+ 		WRITE_ONCE(ct->timeout, extra_jiffies);
+ acct:
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	if (nf_hnat_packet_accounting_is_synthetic(skb))
++		do_acct = false;
++#endif
+ 	if (do_acct)
+ 		nf_ct_acct_update(ct, CTINFO2DIR(ctinfo), skb->len);
+ }
+@@ -2096,7 +2128,10 @@
+ 		     enum ip_conntrack_info ctinfo,
+ 		     const struct sk_buff *skb)
+ {
+-	nf_ct_acct_update(ct, CTINFO2DIR(ctinfo), skb->len);
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	if (!nf_hnat_packet_accounting_is_synthetic(skb))
++#endif
++		nf_ct_acct_update(ct, CTINFO2DIR(ctinfo), skb->len);
+ 
+ 	return nf_ct_delete(ct, 0, 0);
+ }
+--- a/net/netfilter/nf_conntrack_netlink.c
++++ b/net/netfilter/nf_conntrack_netlink.c
+@@ -266,8 +266,7 @@
+ 	u64 pkts, bytes;
+ 
+ 	if (type == IPCTNL_MSG_CT_GET_CTRZERO) {
+-		pkts = atomic64_xchg(&counter[dir].packets, 0);
+-		bytes = atomic64_xchg(&counter[dir].bytes, 0);
++		nf_ct_acct_read_reset(acct, dir, &pkts, &bytes);
+ 	} else {
+ 		pkts = atomic64_read(&counter[dir].packets);
+ 		bytes = atomic64_read(&counter[dir].bytes);
+--- a/net/netfilter/nf_conntrack_standalone.c
++++ b/net/netfilter/nf_conntrack_standalone.c
+@@ -293,6 +293,23 @@
+ 		   (unsigned long long)atomic64_read(&counter[dir].bytes));
+ }
+ 
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++static void seq_print_acct_totals(struct seq_file *s, const struct nf_conn *ct)
++{
++	const struct nf_conn_acct *acct = nf_conn_acct_find(ct);
++	u64 packets[IP_CT_DIR_MAX], bytes[IP_CT_DIR_MAX];
++	unsigned int dir;
++
++	if (!acct || !acct->total)
++		return;
++	for (dir = 0; dir < IP_CT_DIR_MAX; dir++)
++		nf_ct_acct_read_totals(acct, dir, &packets[dir], &bytes[dir]);
++	seq_printf(s, "traffic_id=%llu packets_total=%llu bytes_total=%llu "
++		   "packets_total=%llu bytes_total=%llu ",
++		   acct->total->id, packets[0], bytes[0], packets[1], bytes[1]);
++}
++#endif
++
+ static void
+ seq_print_qos(struct seq_file *s, const struct nf_conn *ct, int dir)
+ {
+@@ -387,6 +404,9 @@
+ 	ct_show_zone(s, ct, NF_CT_DEFAULT_ZONE_DIR);
+ 	ct_show_delta_time(s, ct);
+ 
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	seq_print_acct_totals(s, ct);
++#endif
+ 	seq_printf(s, "use=%u\n", refcount_read(&ct->ct_general.use));
+ 
+ 	if (seq_has_overflowed(s))
+@@ -559,6 +579,7 @@
+ 			&ct_cpu_seq_ops, sizeof(struct seq_net_private));
+ 	if (!pde)
+ 		goto out_stat_nf_conntrack;
++	nf_ct_acct_closed_init(net);
+ 	return 0;
+ 
+ out_stat_nf_conntrack:
+@@ -569,6 +590,7 @@
+ 
+ static void nf_conntrack_standalone_fini_proc(struct net *net)
+ {
++	nf_ct_acct_closed_fini(net);
+ 	remove_proc_entry("nf_conntrack", net->proc_net_stat);
+ 	remove_proc_entry("nf_conntrack", net->proc_net);
+ }
+--- a/net/netfilter/nf_flow_table_core.c
++++ b/net/netfilter/nf_flow_table_core.c
+@@ -155,6 +155,9 @@
+ 		break;
+ 	}
+ 	flow_tuple->xmit_type = route->tuple[dir].xmit_type;
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	flow_tuple->npu_2410 = route->tuple[dir].npu_2410;
++#endif
+ 	flow_tuple->npu.npu_entry = route->tuple[dir].npu.npu_entry;
+ 	flow_tuple->npu.dst = route->tuple[dir].npu.dst;
+ 	route->tuple[dir].npu.dst = NULL;
+@@ -173,6 +176,19 @@
+ void flow_offload_route_init(struct flow_offload *flow,
+ 			     struct nf_flow_route *route)
+ {
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	/* Both hardware directions depend on the tunnel, although only one
++	 * encapsulates. Preserve that owner so close/reset fences decap flows.
++	 */
++	if (route->tuple[0].npu_2410.entry && !route->tuple[1].npu_2410.entry) {
++		route->tuple[1].npu_2410 = route->tuple[0].npu_2410;
++		route->tuple[1].npu_2410.flags &= ~MTK_NPU_FLOW_F_ENCAP;
++	} else if (route->tuple[1].npu_2410.entry && !route->tuple[0].npu_2410.entry) {
++		route->tuple[0].npu_2410 = route->tuple[1].npu_2410;
++		route->tuple[0].npu_2410.flags &= ~MTK_NPU_FLOW_F_ENCAP;
++	}
++#endif
++
+ 	flow_offload_fill_route(flow, route, FLOW_OFFLOAD_DIR_ORIGINAL);
+ 	flow_offload_fill_route(flow, route, FLOW_OFFLOAD_DIR_REPLY);
+ 	flow->type = NF_FLOW_OFFLOAD_ROUTE;
+--- a/net/netfilter/nf_flow_table_ip.c
++++ b/net/netfilter/nf_flow_table_ip.c
+@@ -14,6 +14,7 @@
+ #include <net/ip6_route.h>
+ #include <net/neighbour.h>
+ #include <net/netfilter/nf_flow_table.h>
++#include <net/mtk_npu_flow.h>
+ #include <net/netfilter/nf_conntrack_acct.h>
+ /* For layer 4 checksum field offset. */
+ #include <linux/tcp.h>
+@@ -377,6 +378,8 @@
+ 	dir = tuplehash->tuple.dir;
+ 	flow = container_of(tuplehash, struct flow_offload, tuplehash[dir]);
+ 
++
++
+ 	mtu = flow->tuplehash[dir].tuple.mtu + ctx->offset;
+ 	if (unlikely(nf_flow_exceeds_mtu(skb, mtu)))
+ 		return 0;
+@@ -385,6 +388,23 @@
+ 	thoff = (iph->ihl * 4) + ctx->offset;
+ 	if (nf_flow_state_check(flow, iph->protocol, skb, thoff))
+ 		return 0;
++
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	if (flow->tuplehash[0].tuple.npu_2410.entry || flow->tuplehash[1].tuple.npu_2410.entry) {
++		struct mtk_npu_flow_guard guard;
++		const struct mtk_npu_flow_token *token = flow->tuplehash[0].tuple.npu_2410.entry ?
++			&flow->tuplehash[0].tuple.npu_2410 : &flow->tuplehash[1].tuple.npu_2410;
++
++		if (!mtk_npu_flow_lock(token, &guard)) {
++			flow_offload_teardown(flow);
++		} else {
++			mtk_npu_flow_unlock(&guard);
++			flow_offload_refresh(flow_table, flow, false);
++		}
++		/* The caller returns NF_ACCEPT, preserving the original tunnel path. */
++		return 0;
++	}
++#endif
+ 
+ 	if (!nf_flow_dst_check(&tuplehash->tuple)) {
+ 		flow_offload_teardown(flow);
+@@ -661,6 +681,8 @@
+ 	dir = tuplehash->tuple.dir;
+ 	flow = container_of(tuplehash, struct flow_offload, tuplehash[dir]);
+ 
++
++
+ 	mtu = flow->tuplehash[dir].tuple.mtu + ctx->offset;
+ 	if (unlikely(nf_flow_exceeds_mtu(skb, mtu)))
+ 		return 0;
+@@ -669,6 +691,23 @@
+ 	thoff = sizeof(*ip6h) + ctx->offset;
+ 	if (nf_flow_state_check(flow, ip6h->nexthdr, skb, thoff))
+ 		return 0;
++
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	if (flow->tuplehash[0].tuple.npu_2410.entry || flow->tuplehash[1].tuple.npu_2410.entry) {
++		struct mtk_npu_flow_guard guard;
++		const struct mtk_npu_flow_token *token = flow->tuplehash[0].tuple.npu_2410.entry ?
++			&flow->tuplehash[0].tuple.npu_2410 : &flow->tuplehash[1].tuple.npu_2410;
++
++		if (!mtk_npu_flow_lock(token, &guard)) {
++			flow_offload_teardown(flow);
++		} else {
++			mtk_npu_flow_unlock(&guard);
++			flow_offload_refresh(flow_table, flow, false);
++		}
++		/* The caller returns NF_ACCEPT, preserving the original tunnel path. */
++		return 0;
++	}
++#endif
+ 
+ 	if (!nf_flow_dst_check(&tuplehash->tuple)) {
+ 		flow_offload_teardown(flow);
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -711,6 +711,17 @@
+ 		return -1;
+ 
+ 	tuple = &flow->tuplehash[dir].tuple;
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	if (tuple->npu_2410.entry) {
++		struct flow_action_entry *entry = flow_action_entry_next(flow_rule);
++
++		if (!entry)
++			return -E2BIG;
++		entry->id = FLOW_ACTION_MTK_NPU_2410;
++		entry->npu_2410 = tuple->npu_2410;
++	}
++#endif
++
+ 	if (tuple->npu.npu_entry) {
+ 		struct flow_action_entry *entry;
+ 
+@@ -953,7 +964,7 @@
+ 	}
+ 	up_read(&flowtable->flow_block_lock);
+ 
+-	if (cmd == FLOW_CLS_STATS)
++	if (stats)
+ 		memcpy(stats, &cls_flow.stats, sizeof(*stats));
+ 
+ 	return i;
+@@ -973,10 +984,17 @@
+ static void flow_offload_tuple_del(struct flow_offload_work *offload,
+ 				   enum flow_offload_tuple_dir dir)
+ {
++	struct flow_stats stats = {};
++
+ 	nf_flow_offload_tuple(offload->flowtable, offload->flow, NULL, dir,
+ 			      offload->flowtable->priority,
+-			      FLOW_CLS_DESTROY, NULL,
++			      FLOW_CLS_DESTROY, &stats,
+ 			      &offload->flowtable->flow_block.cb_list);
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	/* NPU destroy stops this hardware owner and returns its final delta. */
++	if (offload->flow->tuplehash[dir].tuple.npu_2410.entry && stats.pkts)
++		nf_ct_acct_add(offload->flow->ct, dir, stats.pkts, stats.bytes);
++#endif
+ }
+ 
+ static int flow_offload_rule_add(struct flow_offload_work *offload,
+@@ -1046,7 +1064,12 @@
+ 	offload->flow->timeout = max_t(u64, offload->flow->timeout,
+ 				       lastused + flow_offload_get_timeout(offload->flow));
+ 
+-	if (offload->flowtable->flags & NF_FLOWTABLE_COUNTER) {
++	if ((offload->flowtable->flags & NF_FLOWTABLE_COUNTER)
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	    || offload->flow->tuplehash[0].tuple.npu_2410.entry
++	    || offload->flow->tuplehash[1].tuple.npu_2410.entry
++#endif
++	   ) {
+ 		if (stats[0].pkts)
+ 			nf_ct_acct_add(offload->flow->ct,
+ 				       FLOW_OFFLOAD_DIR_ORIGINAL,
+--- a/net/netfilter/nft_counter.c
++++ b/net/netfilter/nft_counter.c
+@@ -17,6 +17,9 @@
+ #include <net/netfilter/nf_tables_offload.h>
+ #include <net/netfilter/nf_conntrack.h>
+ #include <net/netfilter/nf_conntrack_acct.h>
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++#include <net/netfilter/nf_hnat_packet_accounting.h>
++#endif
+ static struct hnat_desc {
+        u32 entry : 18;
+        #if defined(CONFIG_MEDIATEK_NETSYS_RX_V2)
+@@ -70,6 +73,10 @@
+ 	s64 bytes = 0;
+ 	s64 packets = 0;
+ 
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	bool packet_delta = nf_hnat_packet_accounting_get(pkt->skb, (u64 *)&bytes, (u64 *)&packets);
++	if (!packet_delta)
++#endif
+ 	if (unlikely(skb_hnat_reason(pkt->skb) == HIT_BIND_KEEPALIVE_DUP_OLD_HDR)){
+ 		ct = nf_ct_get(pkt->skb, &ctinfo);
+ 		if (ct) {
+@@ -87,8 +94,14 @@
+ 	nft_sync = this_cpu_ptr(&nft_counter_sync);
+ 
+ 	u64_stats_update_begin(nft_sync);
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	if (!packet_delta) {
++#endif
+ 	u64_stats_add(&this_cpu->bytes, pkt->skb->len);
+ 	u64_stats_inc(&this_cpu->packets);
++#ifdef CONFIG_NF_HNAT_PACKET_ACCOUNTING
++	}
++#endif
+ 	u64_stats_add(&this_cpu->bytes, bytes);
+ 	u64_stats_add(&this_cpu->packets, packets);
+ 	u64_stats_update_end(nft_sync);
+--- a/net/netfilter/nft_flow_offload.c
++++ b/net/netfilter/nft_flow_offload.c
+@@ -187,6 +187,9 @@
+ 	u32 npu_entry;
+ 	struct dst_entry *dst;
+ 	enum flow_offload_xmit_type xmit_type;
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	struct mtk_npu_flow_token npu_2410;
++#endif
+ };
+ 
+ static void nft_fill_vlan_passthrough_info(const struct nft_pktinfo *pkt,
+@@ -215,7 +218,7 @@
+ 
+ static void nft_dev_path_info(const struct net_device_path_stack *stack,
+ 			      struct nft_forward_info *info,
+-			      unsigned char *ha, struct nf_flowtable *flowtable)
++			      unsigned char *ha, struct nf_flowtable *flowtable, u8 family)
+ {
+ 	const struct net_device_path *path;
+ 	int i;
+@@ -226,7 +229,27 @@
+ 	for (i = 0; i < stack->num_paths; i++) {
+ 		path = &stack->path[i];
+ 		info->indev = path->dev;
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++		if (info->npu_2410.entry && path->type != DEV_PATH_ETHERNET) {
++			info->indev = NULL;
++			return;
++		}
++#endif
++
+ 		switch (path->type) {
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++		case DEV_PATH_L2TP:
++		case DEV_PATH_PPTP:
++			if (family != NFPROTO_IPV4 || !nf_flowtable_hw_offload(flowtable) ||
++			    mtk_npu_flow_prepare(path, &info->npu_2410)) {
++				info->indev = NULL;
++				return;
++			}
++			ether_addr_copy(info->h_source, path->tunnel_2410.h_source);
++			ether_addr_copy(info->h_dest, path->tunnel_2410.h_dest);
++			break;
++#endif
++
+ 		case DEV_PATH_ETHERNET:
+ 		case DEV_PATH_DSA:
+ 		case DEV_PATH_VLAN:
+@@ -369,11 +392,15 @@
+ 		nft_br_vlan_dev_fill_forward_path(pkt, &ctx);
+ 	}
+ 
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	route->tuple[dir].npu_2410 = info.npu_2410;
++#endif
++
+ 	if (nft_dev_fill_forward_path(&ctx, route, dst, ct, dir, ha, &stack) >= 0) {
+ 		/* Add VLAN pass through info if needed */
+ 		nft_fill_vlan_passthrough_info(pkt, &info);
+ 
+-		nft_dev_path_info(&stack, &info, ha, &ft->data);
++		nft_dev_path_info(&stack, &info, ha, &ft->data, nft_pf(pkt));
+ 	}
+ 
+ 	if (!info.indev || !nft_flowtable_find_dev(info.indev, ft))
+@@ -670,6 +697,12 @@
+ 			goto err_flow_route;
+ 	}
+ 
++	#if IS_ENABLED(CONFIG_NET_MEDIATEK_NPU_FLOW)
++	/* Nested/tunnel-to-tunnel forwarding needs two independent owners. */
++	if (route.tuple[0].npu_2410.entry && route.tuple[1].npu_2410.entry)
++		goto err_flow_alloc;
++#endif
++
+ 	flow = flow_offload_alloc(ct);
+ 	if (!flow)
+ 		goto err_flow_alloc;
+--- a/net/wireless/Kconfig
++++ b/net/wireless/Kconfig
+@@ -1,3 +1,12 @@
++config MTK_VENDOR_WEXT
++	bool "MediaTek vendor Wireless Extensions"
++	depends on NET
++	select WIRELESS_EXT
++	select WEXT_PRIV
++	select WEXT_SPY
++	help
++	  Kernel Wireless Extensions used by the MTK R4 vendor radio stack.
++
+ # SPDX-License-Identifier: GPL-2.0-only
+ config WIRELESS_EXT
+ 	bool

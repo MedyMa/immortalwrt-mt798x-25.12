@@ -8,7 +8,7 @@ NPU_KERNEL_PKGS+= \
 	npu \
 	npu-autoload
 
-ifeq ($(CONFIG_PACKAGE_kmod-npu),y)
+ifneq ($(filter y m,$(CONFIG_PACKAGE_kmod-npu)),)
 EXTRA_KCONFIG+= \
 	CONFIG_MTK_NPU_SUPPORT=$(CONFIG_MTK_NPU_SUPPORT) \
 	CONFIG_MTK_NPU_SECURE_FW=$(CONFIG_MTK_NPU_SECURE_FW) \
@@ -54,17 +54,18 @@ define KernelPackage/npu
   KCONFIG:=
   DEFAULT:=n
   DEPENDS:= \
+	@TARGET_mediatek \
 	@(TARGET_mediatek_filogic||TARGET_mediatek_filogic_a73||TARGET_mediatek_mt7988) \
 	+kmod-pce \
-	+mtk-tops-accounting \
+	+kmod-ppp \
 	+@KERNEL_RELAY \
-	+@MTK_NPU
-ifeq ($(CONFIG_MTK_NPU_PPP),y)
-  DEPENDS+= +kmod-ppp
-endif
-ifeq ($(CONFIG_MTK_NPU_PPTP),y)
-  DEPENDS+= +kmod-pptp
-endif
+	+@MTK_NPU \
+	+MTK_NPU_REBB_SUPPORT:npu-rebb-fw \
+	+MTK_NPU_GRETAP:kmod-gre \
+	+MTK_NPU_VXLAN:kmod-vxlan \
+	+MTK_NPU_L2TP_V2:kmod-pppol2tp \
+	+mtk-tops-accounting \
+	+MTK_NPU_PPTP:kmod-pptp
 endef
 
 define KernelPackage/npu/description
@@ -78,8 +79,7 @@ define KernelPackage/npu/config
 endef
 
 define KernelPackage/npu/install
-	$(INSTALL_DIR) $(1)/npu
-	-$(INSTALL_BIN) ./src/scripts/* $(1)/npu/
+	$(if $(wildcard ./src/scripts/*),$(INSTALL_DIR) $(1)/npu; $(INSTALL_BIN) ./src/scripts/* $(1)/npu/)
 
 	$(INSTALL_DIR) $(1)/sbin/
 	$(INSTALL_BIN) ./files/* $(1)/sbin/

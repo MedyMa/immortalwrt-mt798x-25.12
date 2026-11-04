@@ -14,12 +14,12 @@
 int mtk_npu_statistic_init(struct platform_device *pdev);
 void mtk_npu_statistic_deinit(struct platform_device *pdev);
 #else /* !defined(CONFIG_MTK_NPU_STATISTIC) */
-int mtk_npu_statistic_init(struct platform_device *pdev)
+static inline int mtk_npu_statistic_init(struct platform_device *pdev)
 {
 	return 0;
 }
 
-void mtk_npu_statistic_deinit(struct platform_device *pdev)
+static inline void mtk_npu_statistic_deinit(struct platform_device *pdev)
 {
 }
 #endif /* defined(CONFIG_MTK_NPU_STATISTIC) */

@@ -1,0 +1,212 @@
+Subject: [PATCH] net: mediatek: retain virtual interface statistics in owner accounting
+
+The 24.10 baseline replaced the old 25.12 VIF counter path. Restore PPP/VLAN
+backfill from the owner-validated, serialized read-clear transaction, without
+another MIB reader or consumption of the conntrack/rule pending ledgers.
+
+Pin the binding skb's ingress device and original routed output with the owner.
+Keep those references across WHNAT/tunnel confirmation, then release them through
+RCU after retirement. Never look up a recycled ifindex while publishing a delta.
+Physical interface counters are not backfilled.
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_account.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_account.c
+@@ -56,6 +56,7 @@
+ struct hnat_owner {
+ 	struct nf_conn *ct;
+ 	struct net *net; /* borrowed from ct; ct reference pins its lifetime */
++	struct net_device *rx_dev, *tx_dev;
+ 	struct nf_conntrack_zone zone;
+ 	struct rcu_head rcu;
+ 	u64 generation;
+@@ -137,8 +138,64 @@
+ static void owner_free(struct rcu_head *rcu)
+ {
+ 	struct hnat_owner *owner = container_of(rcu, struct hnat_owner, rcu);
++	if (owner->rx_dev)
++		dev_put(owner->rx_dev);
++	if (owner->tx_dev)
++		dev_put(owner->tx_dev);
+ 	nf_ct_put(owner->ct);
+ 	kfree(owner);
++}
++
++/* Pin the virtual interfaces while the binding skb still identifies them.
++ * A later ifindex lookup could resolve a replacement PPP/VLAN device. Physical
++ * interfaces have no stats-add callback and already count their own traffic.
++ */
++static void owner_get_vifs(struct hnat_owner *owner, struct sk_buff *skb,
++			   const struct net_device *out)
++{
++	struct net_device *dev;
++
++	if (!skb)
++		return;
++	rcu_read_lock();
++	dev = dev_get_by_index_rcu(owner->net, skb->skb_iif);
++	if (dev && dev->reg_state == NETREG_REGISTERED &&
++	    dev->netdev_ops->ndo_flow_offload_stats64_add) {
++		dev_hold(dev);
++		owner->rx_dev = dev;
++	}
++	if (out && dev_net(out) == owner->net &&
++	    out->reg_state == NETREG_REGISTERED &&
++	    out->netdev_ops->ndo_flow_offload_stats64_add) {
++		dev = (struct net_device *)out;
++		dev_hold(dev);
++		owner->tx_dev = dev;
++	}
++	rcu_read_unlock();
++}
++
++/* Called with BH disabled under the PPE lock. PPP/VLAN callbacks only update
++ * per-CPU counters. Fan out the validated PPE delta here, never read MIB again
++ * or consume the independent conntrack/rule ledgers for interface statistics.
++ */
++static void owner_update_vifs(struct hnat_owner *owner,
++			      const struct hnat_accounting *delta)
++{
++	struct rtnl_link_stats64 rx = {
++		.rx_bytes = delta->bytes, .rx_packets = delta->packets,
++	};
++	struct rtnl_link_stats64 tx = {
++		.tx_bytes = delta->bytes, .tx_packets = delta->packets,
++	};
++
++	if (!delta->bytes && !delta->packets)
++		return;
++	if (owner->rx_dev &&
++	    READ_ONCE(owner->rx_dev->reg_state) == NETREG_REGISTERED)
++		owner->rx_dev->netdev_ops->ndo_flow_offload_stats64_add(owner->rx_dev, &rx);
++	if (owner->tx_dev &&
++	    READ_ONCE(owner->tx_dev->reg_state) == NETREG_REGISTERED)
++		owner->tx_dev->netdev_ops->ndo_flow_offload_stats64_add(owner->tx_dev, &tx);
+ }
+ 
+ /* CT and rule ledgers are separate: polling can update CT without consuming
+@@ -292,6 +349,7 @@
+ 	hnat_ledger_add(&h->acct[ppe][slot], &s->pending, delta,
+ 			s->owner && !s->owner->prefill);
+ 	if (s->owner && !s->owner->prefill) {
++		owner_update_vifs(s->owner, delta);
+ 		s->owner->diag_bytes += delta->bytes;
+ 		s->owner->diag_packets += delta->packets;
+ 		s->owner->diag_sampled_ms = ktime_to_ms(ktime_get());
+@@ -433,7 +491,8 @@
+ 			 struct sk_buff *skb, const struct foe_entry *entry,
+ 			 bool prefill, bool confirm, u64 expected_generation,
+ 			 bool *accepted, struct nf_conn *saved_ct,
+-			 enum ip_conntrack_info saved_info, bool require_owner)
++			 enum ip_conntrack_info saved_info, bool require_owner,
++			 const struct net_device *out)
+ {
+ 	struct hnat_account_ppe *p;
+ 	struct hnat_slot *s;
+@@ -465,6 +524,7 @@
+ 			o->dir = CTINFO2DIR(info);
+ 			o->prefill = prefill;
+ 			o->seen = jiffies;
++			owner_get_vifs(o, skb, out);
+ 		}
+ 	}
+ 	spin_lock_bh(&p->lock);
+@@ -601,7 +661,16 @@
+ 			 bool prefill, bool confirm, u64 generation, bool *accepted)
+ {
+ 	return account_commit(h, ppe, slot, skb, entry, prefill, confirm,
+-			      generation, accepted, NULL, 0, false);
++			      generation, accepted, NULL, 0, false, NULL);
++}
++
++bool hnat_account_commit_vif(struct mtk_hnat *h, u32 ppe, u32 slot,
++			     struct sk_buff *skb, const struct foe_entry *entry,
++			     bool prefill, bool *accepted,
++			     const struct net_device *out)
++{
++	return account_commit(h, ppe, slot, skb, entry, prefill, false,
++			      0, accepted, NULL, 0, false, out);
+ }
+ 
+ bool hnat_account_tunnel_commit(struct mtk_hnat *h, u32 ppe, u32 slot,
+@@ -613,7 +682,7 @@
+ 	 * skb's conntrack association or account its bytes a second time.
+ 	 */
+ 	return account_commit(h, ppe, slot, NULL, entry, false, true,
+-			      generation, accepted, ct, ctinfo, true);
++			      generation, accepted, ct, ctinfo, true, NULL);
+ }
+ 
+ bool hnat_account_publish_delta(struct mtk_hnat *h, u32 ppe, u32 slot,
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_account.h
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_account.h
+@@ -22,6 +22,11 @@
+ 			 struct sk_buff *skb, const struct foe_entry *entry,
+ 			 bool prefill, bool confirm, u64 expected_generation,
+ 			 bool *accepted);
++/* Initial publication/prefill preserves the routed virtual output device. */
++bool hnat_account_commit_vif(struct mtk_hnat *h, u32 ppe, u32 slot,
++			     struct sk_buff *skb, const struct foe_entry *entry,
++			     bool prefill, bool *accepted,
++			     const struct net_device *out);
+ bool hnat_account_tunnel_commit(struct mtk_hnat *h, u32 ppe, u32 slot,
+ 			       struct nf_conn *ct, u8 ctinfo,
+ 			       const struct foe_entry *entry, u64 generation,
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -2358,7 +2358,8 @@
+ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
+ 				     const struct net_device *dev,
+ 				     struct foe_entry *foe,
+-				     struct flow_offload_hw_path *hw_path)
++				     struct flow_offload_hw_path *hw_path,
++				     const struct net_device *vif)
+ {
+ 	struct net_device *master_dev = (struct net_device *)dev;
+ 	struct foe_entry entry = { 0 };
+@@ -3051,9 +3052,9 @@
+ 					    skb_hnat_entry(skb))) {
+ 			entry.bfib1.ttl = 1;
+ 			entry.bfib1.state = BIND;
+-			hnat_account_commit(hnat_priv, skb_hnat_ppe(skb),
++			hnat_account_commit_vif(hnat_priv, skb_hnat_ppe(skb),
+ 					    skb_hnat_entry(skb), skb, &entry,
+-					    false, false, 0, &accepted);
++					    false, &accepted, vif);
+ 		}
+ 		return 0;
+ 	}
+@@ -3062,10 +3063,9 @@
+ 		if (!hnat_flow_entry_unbind_match(&entry, foe) ||
+ 		    !hnat_flow_ipv4_ct_match(skb, &entry, ct, ctinfo))
+ 			return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
+-		account_handled = hnat_account_commit(hnat_priv, skb_hnat_ppe(skb),
++		account_handled = hnat_account_commit_vif(hnat_priv, skb_hnat_ppe(skb),
+ 						      skb_hnat_entry(skb), skb,
+-						      &entry, true, false, 0,
+-						      &accepted);
++						      &entry, true, &accepted, vif);
+ 		if ((account_handled && !accepted) ||
+ 		    (!account_handled && hnat_priv->data->per_flow_accounting))
+ 			return hnat_diag_skip(skb, account_handled ? HNAT_DIAG_ACCOUNT_OWNER : HNAT_DIAG_ACCOUNT_UNAVAILABLE);
+@@ -3093,10 +3093,9 @@
+ 
+ 	entry.bfib1.ttl = 1;
+ 	entry.bfib1.state = BIND;
+-	account_handled = hnat_account_commit(hnat_priv, skb_hnat_ppe(skb),
++	account_handled = hnat_account_commit_vif(hnat_priv, skb_hnat_ppe(skb),
+ 						      skb_hnat_entry(skb), skb,
+-						      &entry, false, false, 0,
+-						      &accepted);
++						      &entry, false, &accepted, vif);
+ 	if (!account_handled) {
+ 		hnat_diag_note(skb, HNAT_DIAG_ACCOUNT_UNAVAILABLE, 0, 0, -1, 0, -1);
+ 		if (!hnat_priv->data->per_flow_accounting &&
+@@ -4602,7 +4601,7 @@
+ 			if (rx)
+ 				hnat_diag_note(skb, HNAT_DIAG_PARAMETERS, 0, 2, rx_token.index, rx_token.generation, -1);
+ 			spin_lock_bh(&hnat_priv->entry_lock);
+-			skb_to_hnat_info(skb, out, entry, &hw_path);
++			skb_to_hnat_info(skb, out, entry, &hw_path, route_out);
+ 			spin_unlock_bh(&hnat_priv->entry_lock);
+ 			if (rx)
+ 				hnat_tunnel_bind_unlock(&rx_token);

@@ -5,6 +5,8 @@
  * Author: Ren-Ting Wang <ren-ting.wang@mediatek.com>
  */
 
+#include <net/ip.h>
+
 #include "npu/internal.h"
 #include "npu/tunnel.h"
 
@@ -15,7 +17,7 @@ static inline void inc_ip_statistic_encap_success(enum npu_tunnel_type type)
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -29,7 +31,7 @@ static inline void inc_ip_statistic_encap_invalid_ver(enum npu_tunnel_type type)
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -43,7 +45,7 @@ static inline void inc_ip_statistic_encap_null_hdr_ptr(enum npu_tunnel_type type
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -57,7 +59,7 @@ static inline void inc_ip_statistic_decap_success(enum npu_tunnel_type type)
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -71,7 +73,7 @@ static inline void inc_ip_statistic_decap_invalid_ver(enum npu_tunnel_type type)
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -85,7 +87,7 @@ static inline void inc_ip_statistic_decap_null_hdr_ptr(enum npu_tunnel_type type
 {
 	struct npu_tnl_type *tnl_type;
 
-	if (mtk_npu_tnl_statistic_is_enabled())
+	if (!mtk_npu_tnl_statistic_is_enabled())
 		return;
 
 	tnl_type = mtk_npu_tnl_type_get_by_idx(type);
@@ -112,7 +114,7 @@ int mtk_npu_ip_encap_param_setup(
 		return -EINVAL;
 	}
 
-	if (unlikely(ip->version != IPVERSION)) {
+	if (unlikely(ip->version != IPVERSION || ip->ihl != 5 || ip_is_fragment(ip))) {
 		NPU_NOTICE("ip ver: 0x%x invalid\n", ip->version);
 		inc_ip_statistic_encap_invalid_ver(params->tunnel.type);
 		return -EINVAL;
@@ -165,7 +167,7 @@ int mtk_npu_ip_decap_param_setup(struct sk_buff *skb, struct npu_params *params)
 		goto out;
 	}
 
-	if (unlikely(ip->version != IPVERSION)) {
+	if (unlikely(ip->version != IPVERSION || ip->ihl != 5 || ip_is_fragment(ip))) {
 		ret = -EINVAL;
 		inc_ip_statistic_decap_invalid_ver(params->tunnel.type);
 		goto out;
