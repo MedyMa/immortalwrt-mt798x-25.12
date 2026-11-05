@@ -1,0 +1,27 @@
+#!/bin/sh
+
+. /lib/functions.sh
+
+case "$(board_name)" in
+	bananapi,bpi-r4|bananapi,bpi-r4-2g5|bananapi,bpi-r4-poe) ;;
+	*) exit 0 ;;
+esac
+
+# Preserve retained LED settings while following the 6.12 MT7530 MDIO bus name.
+migrate_r4_phy_led() {
+	local sysfs
+	config_get sysfs "$1" sysfs
+	case "$sysfs" in
+		mt7530-0:0[0-3]:green:lan|mt7530-0:00:green:wan)
+			sysfs="mt7530_dsa-0:${sysfs#mt7530-0:}"
+			case "$sysfs" in *:wan) sysfs="${sysfs%:wan}:lan" ;; esac
+			uci -q set "system.$1.sysfs=$sysfs"
+			;;
+	esac
+}
+
+config_load system
+config_foreach migrate_r4_phy_led led
+uci -q commit system
+
+exit 0

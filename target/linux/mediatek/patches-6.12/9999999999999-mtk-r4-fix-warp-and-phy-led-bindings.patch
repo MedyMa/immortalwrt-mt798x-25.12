@@ -1,0 +1,141 @@
+Subject: arm64: dts: mediatek: use one WARP resource set on BPI-R4
+
+Reuse the Logan WARP nodes already included by the SoC. Board duplicates
+produce colliding platform names and ambiguous resource lookups. Preserve
+the dynamic RX buffer setting and reset-controller parent bus, and bind
+the 2.5G PHY LED pin state under the name requested by its driver.
+
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dtsi
+@@ -8,7 +8,6 @@
+ #include "mt7988a.dtsi"
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/input.h>
+-#include <dt-bindings/reset/ti-syscon.h>
+ #include <dt-bindings/leds/common.h>
+ #include <dt-bindings/regulator/richtek,rt5190a-regulator.h>
+ 
+@@ -53,96 +52,6 @@
+ 		regulator-max-microvolt = <3300000>;
+ 		regulator-boot-on;
+ 		regulator-always-on;
+-	};
+-
+-	r4_warp_wed: wed@15010000 {
+-		compatible = "mediatek,wed";
+-		wed_num = <3>;
+-		/* add this property for wed get the pci slot number. */
+-		pci_slot_map = <0>, <1>, <2>;
+-		dy_rxbm_enable = "true";
+-		reg = <0 0x15010000 0 0x2000>,
+-		      <0 0x15012000 0 0x2000>,
+-		      <0 0x15014000 0 0x2000>;
+-		interrupt-parent = <&gic>;
+-		interrupts = <GIC_SPI 205 IRQ_TYPE_LEVEL_HIGH>,
+-			     <GIC_SPI 206 IRQ_TYPE_LEVEL_HIGH>,
+-			     <GIC_SPI 270 IRQ_TYPE_LEVEL_HIGH>;
+-	};
+-
+-	r4_warp_wed2: wed2@15012000 {
+-		compatible = "mediatek,wed2";
+-		wed_num = <3>;
+-		/* add this property for wed get the pci slot number. */
+-		reg = <0 0x15010000 0 0x2000>,
+-		      <0 0x15012000 0 0x2000>,
+-		      <0 0x15014000 0 0x2000>;
+-		interrupt-parent = <&gic>;
+-		interrupts = <GIC_SPI 205 IRQ_TYPE_LEVEL_HIGH>,
+-			     <GIC_SPI 206 IRQ_TYPE_LEVEL_HIGH>,
+-			     <GIC_SPI 270 IRQ_TYPE_LEVEL_HIGH>;
+-	};
+-
+-	r4_warp_wed3: wed3@15014000 {
+-		compatible = "mediatek,wed3";
+-		wed_num = <3>;
+-		/* add this property for wed get the pci slot number. */
+-		reg = <0 0x15010000 0 0x2000>,
+-		      <0 0x15012000 0 0x2000>,
+-		      <0 0x15014000 0 0x2000>;
+-		interrupt-parent = <&gic>;
+-		interrupts = <GIC_SPI 205 IRQ_TYPE_LEVEL_HIGH>,
+-			     <GIC_SPI 206 IRQ_TYPE_LEVEL_HIGH>,
+-			     <GIC_SPI 270 IRQ_TYPE_LEVEL_HIGH>;
+-	};
+-
+-	r4_warp_wdma: wdma@15104800 {
+-		compatible = "mediatek,wed-wdma";
+-		reg = <0 0x15104800 0 0x400>,
+-		      <0 0x15104c00 0 0x400>,
+-		      <0 0x15105000 0 0x400>;
+-	};
+-
+-	r4_warp_ap2woccif: ap2woccif@151A5000 {
+-		compatible = "mediatek,ap2woccif";
+-		reg = <0 0x151A5000 0 0x1000>,
+-		      <0 0x152A5000 0 0x1000>,
+-		      <0 0x153A5000 0 0x1000>;
+-		interrupt-parent = <&gic>;
+-		interrupts = <GIC_SPI 211 IRQ_TYPE_LEVEL_HIGH>,
+-			     <GIC_SPI 212 IRQ_TYPE_LEVEL_HIGH>,
+-			     <GIC_SPI 272 IRQ_TYPE_LEVEL_HIGH>;
+-	};
+-
+-	r4_warp_wocpu0_ilm: wocpu0_ilm@151E0000 {
+-		compatible = "mediatek,wocpu0_ilm";
+-		reg = <0 0x151E0000 0 0x8000>;
+-	};
+-
+-	r4_warp_wocpu1_ilm: wocpu1_ilm@152E0000 {
+-		compatible = "mediatek,wocpu1_ilm";
+-		reg = <0 0x152E0000 0 0x8000>;
+-	};
+-
+-	r4_warp_wocpu2_ilm: wocpu2_ilm@153E0000 {
+-		compatible = "mediatek,wocpu2_ilm";
+-		reg = <0 0x153E0000 0 0x8000>;
+-	};
+-
+-	r4_warp_wocpu_dlm: wocpu_dlm@151E8000 {
+-		compatible = "mediatek,wocpu_dlm";
+-		reg = <0 0x151E8000 0 0x2000>,
+-		      <0 0x152E8000 0 0x2000>,
+-		      <0 0x153E8000 0 0x2000>;
+-		resets = <&r4_warp_reset 0>;
+-		reset-names = "wocpu_rst";
+-	};
+-
+-	r4_warp_cpu_boot: wocpu_boot@15194000 {
+-		compatible = "mediatek,wocpu_boot";
+-		reg = <0 0x15194000 0 0x1000>,
+-		      <0 0x15294000 0 0x1000>,
+-		      <0 0x15394000 0 0x1000>;
+ 	};
+ 
+ 	/* Share this node path with the WiFi EEPROM overlay. */
+@@ -632,13 +541,6 @@
+ 
+ &ethsys {
+ 	compatible = "mediatek,mt7988-ethsys", "syscon", "simple-mfd";
+-		r4_warp_reset: reset-controller {
+-			compatible = "ti,syscon-reset";
+-			#reset-cells = <1>;
+-			ti,reset-bits =
+-				<0x34 4 0x34 4 0x34 4
+-				 (ASSERT_SET | DEASSERT_CLEAR | STATUS_SET)>;
+-			};
+ };
+ 
+ &hnat {
+@@ -674,3 +576,12 @@
+ 	compatible = "mediatek,wocpu_data";
+ 	shared = <1>;
+ };
++
++&wed {
++	dy_rxbm_enable = "true";
++};
++
++&int_2p5g_phy {
++	pinctrl-names = "i2p5gbe-led";
++	pinctrl-0 = <&i2p5gbe_led0_pins>;
++};
