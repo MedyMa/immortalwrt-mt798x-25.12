@@ -82,11 +82,21 @@ static int mtk_npu_link_supplier(struct platform_device *pdev, const char *name)
 	of_node_put(node);
 	if (!supplier)
 		return -EPROBE_DEFER;
-	if (!platform_get_drvdata(supplier))
+	if (supplier == pdev) {
+		put_device(&supplier->dev);
+		return -EINVAL;
+	}
+
+	/* Serialize the readiness check and link creation with supplier unbind. */
+	device_lock(&supplier->dev);
+	/* Successful providers such as PCE need not store driver-private data. */
+	if (!device_is_bound(&supplier->dev) ||
+	    supplier->dev.links.status != DL_DEV_DRIVER_BOUND)
 		ret = -EPROBE_DEFER;
 	else if (!device_link_add(&pdev->dev, &supplier->dev,
 				 DL_FLAG_AUTOREMOVE_CONSUMER))
 		ret = -ENOMEM;
+	device_unlock(&supplier->dev);
 	put_device(&supplier->dev);
 	return ret;
 }
