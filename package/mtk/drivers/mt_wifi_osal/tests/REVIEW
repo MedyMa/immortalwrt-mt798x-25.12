@@ -1,0 +1,156 @@
+OSAL / CMN / BE14 datapath review (2026-11-05)
+
+Baseline: ImmortalWrt 25.12 d7b29bda, Linux 6.12.112, GCC 14.3.0.
+The BPI-R4 profile is resolved from BananaPi-BPI-R4 0ee0faf: OSAL enabled,
+WiFi7/OSAL cfg80211 disabled, MTK vendor WEXT enabled, MT7990 + MT7991.
+The changes keep this configuration.
+
+Actual selected BE14 path
+
+The selected mt_wifi module uses its own Linux netdevice and SKB adapter.
+Its netdevice registration is RtmpOSNetDevAttach in mt_wifi/os/linux/rt_linux.c.
+Its transmit entry is rt28xx_send_packets -> RTMPSendPackets, followed by the
+WiFi transmit processing and hwifi_tx_data/hwifi_tx_mgmt -> HWIFI tx_queue.
+HWIFI obtains tokens, writes descriptors and hands packets to PCI/WED.
+
+On receive, pci_dma_rx_process builds SKBs and carries mtk_bus_rx_info in cb;
+mtk_bus_rx_process -> the HWIFI MAC receive implementation -> connac_if_rx ->
+mtk_mac_rx_napi enter the selected WiFi adapter. Its Linux receive entry is
+RtmpOsPktRcvHandle (napi_gro_receive during a poll, netif_rx otherwise).
+The existing software-RX HNAT metadata invalidation patches remain in this chain.
+
+ELF imports, not just Makefile selections, establish the OSAL boundary. The
+selected mt_wifi module imports 15 OSAL symbols. Across mt_wifi and the built
+HWIFI/MT7990/MT7991/PCI/WED/Connac modules, the union is 22 symbols:
+
+mt_call_rcu, mt_create_workqueue, mt_debugfs_create_devm_seqfile,
+mt_debugfs_create_dir, mt_debugfs_create_file, mt_debugfs_lookup,
+mt_debugfs_remove_recursive, mt_destroy_workqueue, mt_idr_alloc, mt_idr_find,
+mt_idr_remove, mt_init_delayed_work, mt_init_dummy_netdev, mt_ktime_get,
+mt_ktime_get_real_ts64, mt_msecs_to_jiffies, mt_queue_delayed_work,
+mt_rcu_barrier, mt_rcu_read_lock, mt_rcu_read_unlock, mt_skb_pull_rcsum,
+mt_synchronize_rcu.
+
+The newly added mt_skb_pull_rcsum bridge is called by the real BE14 VLAN
+receive helper RtmpOsSkbPullRcsum. OSAL and the alternative mt_wifi_cmn provider
+both implement the same ABI. The proprietary module no longer imports the
+GPL-only skb_pull_rcsum directly. Its WEXT build has no cfg80211 imports.
+
+Actual-driver fixes
+
+RtmpOsSkbPullRcsum previously pulled first and calculated a checksum over the
+wrong bytes. ClonePacket overwrote len/tail without preserving nonlinear SKB
+invariants. The fixes use the kernel checksum operation and trim a consistent
+cloned view, retaining the original fragment ownership. Checksum metadata that
+covers the parent view is invalidated on these receive-side slices.
+
+Normal WEXT netdevice teardown now retains the allocated netdev_ops through
+NETREG_UNREGISTERING, with an idempotent destructor and explicit final free.
+The MAT source-MAC lookup returns NULL on a miss and uses the RCU device list;
+the caller keeps its transmit-path RCU protection while using a borrowed result.
+
+hwifi_tx_data previously reached an RCU unlock before acquiring the read lock
+when wdev/entry was missing. Management TX also lacked a missing-wdev/fallback-
+STA check and a linear-length check for its hardware header. These paths now
+balance their locks and reject invalid resources before dereference.
+
+The physical-device queue publishes shutdown under the producer lock before
+cancel/destroy. Its timer and atomic producers use that same lock; allocation
+failure still leaves the lock/list initialized. MAC deletion is marked queued
+only after enqueue succeeds. Task stop treats a nonzero kthread exit code as
+completed shutdown, clears the handle, terminates names and checks -EINTR.
+
+HWIFI preserves the negative sign of idr_replace failures and checks a missing
+MLD index entry before dereferencing it.
+
+Actual BE14 CMN + cfg80211 alternative
+
+This variant disables the OSAL provider and enables MTK_WIFI7_CFG80211_SUPPORT,
+mt_wifi_cmn, HOSTAPD_MBSS_SUPPORT, APCLI_SUPPLICANT_SUPPORT and CFG80211_FULL_OPS.
+It uses the SDK's own cfg80211 adapter with mac80211 backports 6.18.39, not the
+independent native OSAL adapter below. Its 118 WiFi package Kconfig arguments
+are dependency-resolved from the BPI-R4 profile; WNM stays enabled and MAP stays
+disabled. The production profile and workflow are unchanged.
+
+Radio allocation, band initialization and netdevice registration failures now
+propagate and unwind the resources created by that attempt. AP/STA virtual
+interfaces reject exhausted slots and roll back failed wdev initialization,
+registration or VIF bookkeeping. Removal explicitly frees child netdevices;
+the bootstrap allocation remains owned by HWIFI until final teardown.
+
+Module teardown acquires the wiphy lock after RTNL; cfg80211 callbacks retain
+their already-held locks. Device state is checked before unregistering again,
+and teardown removes VIF bookkeeping before retiring the device. The unpaired
+netdevice-notifier unregister call is removed. Virtual STA creation honors the
+request's 4-address setting instead of enabling it merely because it is supported.
+
+Each wiphy now owns its mutable HE/EHT capability data instead of sharing the
+physical chip's storage. Initial station capabilities, fixed channel offsets
+for single-band radios, 1..4 stream-rate indexing and band-init error handling
+are corrected. DFS classification is limited to the 5 GHz band; the SDK's DFS
+policy is otherwise retained. The SDK adapter's BE14 MLO support is retained.
+
+Independent native OSAL interfaces
+
+The selected BE14 driver does not call mt_os_net_dev_create/register,
+mt_os_pkt_send, or the native mt_cfg80211_register adapter. They remain separate
+interfaces and cannot be counted as proof of a complete BE14 native-OSAL port.
+
+Native netdevice fixes cover private-allocation size, name validation, callback
+pairing, module references on failed open, stats configuration initialization,
+queue bounds, borrowed lookup results and delayed ops release. Native cfg80211
+registration errors now propagate to the netdevice caller and unwind only the
+wiphy created by that attempt. Radio creation is rejected while the caller
+already owns RTNL; virtual interfaces use their existing wiphy. RF-kill/core
+callbacks are stopped before backend retirement; channel/rate arrays survive
+wiphy_unregister and are freed afterwards.
+
+The channel table now has stable full-band offsets, including a single-band
+5/6 GHz radio. Initialization failures and incompatible reinitialization sizes
+return failure. Initial station HE/EHT data, 1..4 stream rates and supported
+capability declarations are checked. Native add-station and MLO link callbacks
+with no backend implementation return -EOPNOTSUPP. Native OSAL does not advertise
+MLO or remain-on-channel support without an implementation. This does not change
+the selected BE14 WEXT MLO code.
+
+WEXT ESSID replies are checked against both the SSID limit and user capacity.
+Native packet fixes cover checked allocation sizes, fragmented slices, unaligned
+VLAN writes, RXCSUM feature selection, RCU-safe RPS snapshots/atomic selection,
+and backlog dispatch outside softirq. Private WEXT command storage is terminated
+and freed using its owned allocation, even if the callback changes its data
+pointer. Native vendor replies check the returned length against owned capacity;
+event entry points validate their context and include NLA headers/alignment in
+their allocation sizes. MLO event flexible-array lengths are checked before use.
+
+The raw void-returning 802.11 conversion/view helpers retain their caller contract:
+a linear, writable SKB and sufficient Ethernet/VLAN headroom. Expansion consumes
+the old SKB when a replacement is needed, including allocation failure. Receive
+handoff consumes the SKB once; a supplied NAPI object belongs to the current poll.
+Borrowed device/wiphy pointers require caller-held lifetime/RCU/RTNL protection.
+Task initialization/attach/kill and device init/exit are owner-serialized.
+
+Verification and remaining limits
+
+All 25 OSAL, 29 WiFi7, 10 HWIFI and 2 common-provider patches replay with zero
+fuzz. The resulting sources are byte-identical to the module build sources.
+Both WiFi packages' binary archives contain 107 files and no source overlap.
+The prepared AArch64 toolchain/kernel are reused; no full firmware is generated.
+
+Module compile/MODPOST/link checks cover the resolved OSAL+WEXT profile, MT7990,
+MT7991, HWIFI, PCI, WED, Connac, the native OSAL optional logging/FIPS combination,
+the OSAL cfg80211/backports variant, and the alternative common provider.
+The actual BE14 CMN+cfg80211 module and its HWIFI/MT7990/MT7991/PCI/WED/Connac
+peers also compile and link with OSAL absent from their symbol inputs. The
+prepared kernel retains vendor WEXT support; the alternate WiFi module uses
+NO_MTK_WEXT_PRIV and cfg80211 backport headers. This is not a separate build of
+a kernel with all WEXT support disabled.
+Existing vendor missing-prototype warnings remain; this is not a warning-free
+or runtime result.
+
+The optional regression module has nine WEXT cases and a tenth cfg80211 case.
+The latter exercises four band masks and two registration-failure stages per
+mask using a synthetic backend. These modules compile; no test board has run
+them. They do not demonstrate firmware/RF correctness, throughput, upload speed,
+station reconnect, hardware offload hits, or FE/SER recovery. The independent
+native cfg80211 adapter still needs a matching driver backend and runtime tests;
+it is not a drop-in replacement for the selected BE14 WEXT adapter.

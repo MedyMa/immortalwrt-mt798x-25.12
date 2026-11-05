@@ -18,3 +18,12 @@ running-timer synchronization (SMP), and completion of queued RCU callbacks.
 
 Compilation does not execute these checks. This module does not validate WiFi RF,
 throughput, NETDEV unregister under cfg80211, or FIPS daemon protocol behavior.
+
+Additional cases exercise nonlinear SKB slicing (including fragment references and
+unchanged source data) and native netdevice open/stats/close/free while RTNL defers
+unregistration. The optional CFG80211_SUPPORT test uses a synthetic control backend
+to register single-band and multiband wiphys, inject both band-query and backend
+registration failures, and check cleanup. Compile this variant with the same
+backport include flags, CFG_CFG80211_VERSION and Module.symvers as the OSAL module.
+It still requires execution on a matching test kernel; compilation is not a pass
+for the runtime cases. No radio or real station is used by these lifecycle cases.

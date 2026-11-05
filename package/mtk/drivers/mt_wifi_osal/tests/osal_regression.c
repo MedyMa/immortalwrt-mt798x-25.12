@@ -6,6 +6,8 @@
 #include <linux/delay.h>
 #include <linux/etherdevice.h>
 #include <linux/if_vlan.h>
+#include <linux/if_arp.h>
+#include <linux/wireless.h>
 #include <linux/kthread.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
@@ -241,6 +243,263 @@ static int test_rcu_callback_barrier(void)
 	return atomic_read(&done) == 1 ? 0 : -EINVAL;
 }
 
+
+static int test_fragmented_slice(void)
+{
+	struct sk_buff *source, *slice;
+	struct page *page;
+	u8 data[40] = {};
+	int i, ret = 0;
+
+	source = alloc_skb(64, GFP_KERNEL);
+	if (!source)
+		return -ENOMEM;
+	skb_reserve(source, 8);
+	for (i = 0; i < 32; i++)
+		*(u8 *)skb_put(source, 1) = i;
+	page = alloc_page(GFP_KERNEL);
+	if (!page) {
+		kfree_skb(source);
+		return -ENOMEM;
+	}
+	for (i = 0; i < 32; i++)
+		((u8 *)page_address(page))[i] = i + 32;
+	skb_add_rx_frag(source, 0, page, 0, 32, PAGE_SIZE);
+	source->ip_summed = CHECKSUM_COMPLETE;
+	source->csum = skb_checksum(source, 0, source->len, 0);
+	slice = mt_os_clone_pkt_by_data(0, source, source->data + 8, sizeof(data));
+	if (!slice) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	if (slice->len != 40 || skb_headlen(slice) != 24 || slice->data_len != 16 ||
+	    source->len != 64 || source->data_len != 32 ||
+	    source->ip_summed != CHECKSUM_COMPLETE || slice->ip_summed != CHECKSUM_NONE ||
+	    skb_copy_bits(slice, 0, data, sizeof(data)))
+		ret = -EINVAL;
+	for (i = 0; i < sizeof(data); i++)
+		if (data[i] != i + 8)
+			ret = -EINVAL;
+	kfree_skb(slice);
+	slice = mt_os_clone_pkt_by_data(0, source, source->data + 8, 12);
+	if (!slice || slice->len != 12 || slice->data_len ||
+	    skb_tail_pointer(slice) != slice->data + 12)
+		ret = -EINVAL;
+	kfree_skb(slice);
+	slice = mt_os_clone_pkt_by_data(0, source, skb_tail_pointer(source) + 1, 1);
+	if (slice)
+		ret = -EINVAL;
+	kfree_skb(slice);
+out:
+	kfree_skb(source);
+	return ret;
+}
+
+struct netdev_case {
+	int opened;
+	int stopped;
+	bool bad_ioctl;
+#ifdef CFG80211_SUPPORT
+	u32 bands;
+	int fail_stage;
+	int cfg_registered;
+	int cfg_unregistered;
+#endif
+};
+
+static int regression_open(void *netdev)
+{
+	struct netdev_case *ctx = mt_os_net_dev_get_priv(netdev);
+
+	ctx->opened++;
+	return 0;
+}
+
+static int regression_stop(void *netdev)
+{
+	struct netdev_case *ctx = mt_os_net_dev_get_priv(netdev);
+
+	ctx->stopped++;
+	return 0;
+}
+
+static int regression_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+	dev_kfree_skb_any(skb);
+	return NETDEV_TX_OK;
+}
+
+static int regression_ioctl(void *netdev, void *config)
+{
+	struct netdev_case *ctx = mt_os_net_dev_get_priv(netdev);
+	struct mt_os_wifi_ioctl_cmd_cfg *cmd = config;
+
+	if (cmd->net_dev != netdev)
+		ctx->bad_ioctl = true;
+	if (cmd->cmd == MT_IO_GET_ESSID) {
+		cmd->data = NULL;
+		cmd->data_len = IW_ESSID_MAX_SIZE + 1;
+		return 0;
+	}
+	if (cmd->cmd == MT_IO_GET_ETHER_STATS) {
+		struct mt_os_net_dev_stats *stats = cmd->data;
+
+		if (!stats || cmd->data_len != sizeof(*stats) || cmd->subcmd ||
+		    cmd->subid || cmd->status || cmd->name)
+			ctx->bad_ioctl = true;
+		if (!stats)
+			return -EINVAL;
+		stats->rx_packets = 7;
+		stats->rx_bytes = 701;
+		stats->rx_crc_errors = 3;
+		return 0;
+	}
+#ifdef CFG80211_SUPPORT
+	if (cmd->cmd == MT_IO_CFG80211_INIT) {
+		if (cmd->subcmd == MT_80211_GET_BAND_INFO) {
+			struct mt_cfg80211_band *band = cmd->data;
+
+			if (ctx->fail_stage == 1)
+				return -EIO;
+			memset(band, 0, sizeof(*band));
+			band->phy_caps = ctx->bands | MTK_PHY_CAP_HT | MTK_PHY_CAP_VHT |
+					 MTK_PHY_CAP_HE | MTK_PHY_CAP_EHT;
+			band->TxStream = band->RxStream = band->max_nss = 2;
+			return 0;
+		}
+		if (cmd->subcmd == MT_80211_DRIVER_REGISTER) {
+			if (ctx->fail_stage == 2)
+				return -EIO;
+			ctx->cfg_registered++;
+		}
+		if (cmd->subcmd == MT_80211_DRIVER_UNREGISTER)
+			ctx->cfg_unregistered++;
+		return 0;
+	}
+#endif
+	return -EOPNOTSUPP;
+}
+
+static void regression_hook(struct mt_os_net_dev_op_hook *hook)
+{
+	memset(hook, 0, sizeof(*hook));
+	hook->xmit = regression_xmit;
+	hook->init = regression_open;
+	hook->uninit = regression_stop;
+	hook->ioctl = regression_ioctl;
+	eth_random_addr(hook->devAddr);
+}
+
+static int test_native_netdev_lifecycle(void)
+{
+	struct mt_os_net_dev_op_hook hook;
+	struct netdev_case ctx = {};
+	struct rtnl_link_stats64 stats;
+	struct sockaddr address = { .sa_family = ARPHRD_ETHER };
+	struct iwreq request = {};
+	struct net_device *dev;
+	u8 header[ETH_HLEN] = {};
+	int ret;
+
+	dev = mt_os_net_dev_create(0, NULL, 0, 0, 0, "osal-reg%d", 0, 0);
+	if (!dev)
+		return -ENOMEM;
+	mt_os_net_dev_set_priv(dev, &ctx);
+	regression_hook(&hook);
+	hook.needProtcted = 1;
+	rtnl_lock();
+	ret = mt_os_net_dev_register(dev, &hook, 0);
+	if (ret)
+		goto free;
+	ret = dev_open(dev, NULL);
+	if (!ret)
+		dev_close(dev);
+	dev_get_stats(dev, &stats);
+	request.u.essid.length = IW_ESSID_MAX_SIZE;
+	if (mt_os_wifi_ioctl(dev, (struct ifreq *)&request, SIOCGIWESSID) != -EOVERFLOW)
+		ret = -EINVAL;
+	if (ctx.bad_ioctl || ctx.opened != 1 || ctx.stopped != 1 ||
+	    stats.rx_packets != 7 || stats.rx_bytes != 701 || stats.rx_crc_errors != 3 ||
+	    mt_os_net_dev_get_qstate(dev, dev->num_tx_queues) != ~0UL)
+		ret = -EINVAL;
+	eth_random_addr((u8 *)address.sa_data);
+	if (mt_os_net_dev_prepare_mac_change(dev, &address, NULL))
+		ret = -EINVAL;
+	memcpy(header + ETH_ALEN, dev->dev_addr, ETH_ALEN);
+	if (mt_os_net_dev_eth_convert_search(dev, header) != dev)
+		ret = -EINVAL;
+	memset(header + ETH_ALEN, 0, ETH_ALEN);
+	if (mt_os_net_dev_eth_convert_search(dev, header))
+		ret = -EINVAL;
+	mt_os_net_dev_detach(dev, NET_DEV_MODE_NORMAL);
+free:
+	/* Exercise the free while unregister is still deferred by RTNL. */
+	mt_os_net_dev_free(dev);
+	rtnl_unlock();
+	return ret;
+}
+
+#ifdef CFG80211_SUPPORT
+static int test_native_cfg80211_registration(void)
+{
+	static const u32 bands[] = {
+		MTK_PHY_CAP_RFIC_24GHZ, MTK_PHY_CAP_RFIC_5GHZ,
+		MTK_PHY_CAP_RFIC_6GHZ,
+		MTK_PHY_CAP_RFIC_24GHZ | MTK_PHY_CAP_RFIC_5GHZ | MTK_PHY_CAP_RFIC_6GHZ,
+	};
+	struct mt_os_net_dev_op_hook hook;
+	struct netdev_case ctx;
+	struct net_device *dev;
+	struct wiphy *wiphy;
+	int i, stage, ret, result = 0;
+
+	for (i = 0; i < ARRAY_SIZE(bands); i++) {
+		for (stage = 0; stage < 3; stage++) {
+			memset(&ctx, 0, sizeof(ctx));
+			ctx.bands = bands[i];
+			ctx.fail_stage = stage;
+			dev = mt_os_net_dev_create(0, NULL, 0, 0, 0, "osal-cfg%d", 0, 0);
+			if (!dev)
+				return -ENOMEM;
+			mt_os_net_dev_set_priv(dev, &ctx);
+			regression_hook(&hook);
+			hook.reg_cfg80211 = 1;
+			hook.mtk_dev_features = MT_FEATURE_MLO;
+			ret = mt_os_net_dev_register(dev, &hook, 1);
+			if (ret) {
+				if (!stage || dev->ieee80211_ptr)
+					result = -EINVAL;
+				goto free;
+			}
+			if (stage)
+				result = -EINVAL;
+			wiphy = dev->ieee80211_ptr->wiphy;
+			if (wiphy->flags & WIPHY_FLAG_SUPPORTS_MLO)
+				result = -EINVAL;
+			if (wiphy->bands[NL80211_BAND_5GHZ] &&
+			    wiphy->bands[NL80211_BAND_5GHZ]->channels[0].center_freq != 5180)
+				result = -EINVAL;
+			if (wiphy->bands[NL80211_BAND_6GHZ] &&
+			    wiphy->bands[NL80211_BAND_6GHZ]->channels[0].center_freq != 5955)
+				result = -EINVAL;
+			rtnl_lock();
+			wiphy_lock(wiphy);
+			mt_os_net_dev_detach(dev, NET_DEV_MODE_CFG80211);
+			wiphy_unlock(wiphy);
+			rtnl_unlock();
+			mt_cfg80211_unregister(dev);
+			if (ctx.bad_ioctl || ctx.cfg_registered != 1 || ctx.cfg_unregistered != 1)
+				result = -EINVAL;
+free:
+			mt_os_net_dev_free(dev);
+			if (result)
+				return result;
+		}
+	}
+	return 0;
+}
+#endif
+
 static int __init osal_regression_init(void)
 {
 	static int (* const tests[])(void) = {
@@ -251,6 +510,11 @@ static int __init osal_regression_init(void)
 		test_delayed_work_teardown,
 		test_running_timer_cancel,
 		test_rcu_callback_barrier,
+		test_fragmented_slice,
+		test_native_netdev_lifecycle,
+#ifdef CFG80211_SUPPORT
+		test_native_cfg80211_registration,
+#endif
 	};
 	int i, ret;
 

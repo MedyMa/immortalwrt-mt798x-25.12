@@ -1,0 +1,697 @@
+Subject: wifi7: unwind cfg80211 registration and retire caller-owned network devices
+
+--- a/mt_wifi/ap/ap_mbss.c
++++ b/mt_wifi/ap/ap_mbss.c
+@@ -285,12 +285,11 @@
+ 
+ 		if (wdev->if_dev) {
+ 			RtmpOSNetDevProtect(1);
+-			RtmpOSNetDevDetach(wdev->if_dev);
++			RtmpOSNetDevDetachRTNL(wdev->if_dev);
+ 			RtmpOSNetDevProtect(0);
+ 			wdev_deinit(pAd, wdev);
+-#ifndef RT_CFG80211_SUPPORT
+-			RtmpOSNetDevFree(wdev->if_dev);
+-#endif /* !RT_CFG80211_SUPPORT */
++			if (wdev->if_dev != pAd->net_dev)
++				RtmpOSNetDevFree(wdev->if_dev);
+ 			wdev->if_dev = NULL;
+ 		}
+ 	}
+@@ -341,7 +340,7 @@
+ 	wdev = &pAd->act_mon_wdev;
+ 	if (wdev->if_dev) {
+ 		RtmpOSNetDevProtect(1);
+-		RtmpOSNetDevDetach(wdev->if_dev);
++		RtmpOSNetDevDetachRTNL(wdev->if_dev);
+ 		RtmpOSNetDevProtect(0);
+ 		wdev_idx_unreg(pAd, wdev);
+ 		RtmpOSNetDevFree(wdev->if_dev);
+--- a/mt_wifi/ap/ap_wds.c
++++ b/mt_wifi/ap/ap_wds.c
+@@ -1488,12 +1488,11 @@
+ 
+ 		if (wdev->if_dev) {
+ 			RtmpOSNetDevProtect(1);
+-			RtmpOSNetDevDetach(wdev->if_dev);
++			RtmpOSNetDevDetachRTNL(wdev->if_dev);
+ 			RtmpOSNetDevProtect(0);
+ 			wdev_deinit(pAd, wdev);
+-#ifndef RT_CFG80211_SUPPORT
+-			RtmpOSNetDevFree(wdev->if_dev);
+-#endif /* !RT_CFG80211_SUPPORT */
++			if (wdev->if_dev != pAd->net_dev)
++				RtmpOSNetDevFree(wdev->if_dev);
+ 			/* Clear it as NULL to prevent latter access error. */
+ 			WDS_ENTRY_CLEAR_FLAG(pAd->WdsTab.WdsEntry[index].flag);
+ 			wdev->if_dev = NULL;
+--- a/mt_wifi/common/sniffer_radiotap.c
++++ b/mt_wifi/common/sniffer_radiotap.c
+@@ -1191,7 +1191,7 @@
+ 
+ 	if (wdev->if_dev) {
+ 		RtmpOSNetDevProtect(1);
+-		RtmpOSNetDevDetach(wdev->if_dev);
++		RtmpOSNetDevDetachRTNL(wdev->if_dev);
+ 		RtmpOSNetDevProtect(0);
+ 		wdev_idx_unreg(pAd, wdev);
+ 		RtmpOSNetDevFree(wdev->if_dev);
+--- a/mt_wifi/hw_ctrl/hwifi_main.c
++++ b/mt_wifi/hw_ctrl/hwifi_main.c
+@@ -2726,9 +2726,7 @@
+ #endif /* CFG_MTK_SUPPORT_ANDROID_WMT */
+ 
+ 	RtmpPhyNetDevExit(ad, net_dev);
+-#ifndef RT_CFG80211_SUPPORT
+ 	RtmpOSNetDevFree(net_dev);
+-#endif
+ }
+ EXPORT_SYMBOL(mtk_mac_hw_unregister);
+ 
+--- a/mt_wifi/include/os/cfg80211/cfg80211.h
++++ b/mt_wifi/include/os/cfg80211/cfg80211.h
+@@ -84,6 +84,7 @@
+ 
+ 	/* we can change channel/rate information on the fly so we backup them */
+ 	struct ieee80211_supported_band Cfg80211_bands[IEEE80211_NUM_BANDS];
++	struct ieee80211_sband_iftype_data sband_data[NUM_NL80211_BANDS];
+ 	struct ieee80211_channel *pCfg80211_Channels;
+ 	struct ieee80211_rate *pCfg80211_Rates;
+ 
+--- a/mt_wifi/include/rt_os_net.h
++++ b/mt_wifi/include/rt_os_net.h
+@@ -246,7 +246,7 @@
+ 	IN      VOID     *pAdSrc,
+ 	IN      UINT32    devType);
+ 
+-VOID RTMP_CFG80211_AddVifEntry(
++BOOLEAN RTMP_CFG80211_AddVifEntry(
+ 	IN      VOID     *pAdSrc,
+ 	IN      PNET_DEV pNewNetDev,
+ 	IN      UINT32   DevType);
+--- a/mt_wifi/include/rt_os_util.h
++++ b/mt_wifi/include/rt_os_util.h
+@@ -289,6 +289,7 @@
+ 
+ INT RtmpOSNetDevDestory(VOID *pReserved, PNET_DEV pNetDev);
+ void RtmpOSNetDevDetach(PNET_DEV pNetDev);
++void RtmpOSNetDevDetachRTNL(PNET_DEV pNetDev);
+ int RtmpOSNetDevAttach(
+ 	IN	UCHAR					OpMode,
+ 	IN	PNET_DEV				pNetDev,
+--- a/mt_wifi/os/linux/cfg80211/cfg80211.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211.c
+@@ -3952,7 +3952,7 @@
+ 	struct vif_params *pParams)
+ {
+ 	VOID *pAd;
+-	CMD_RTPRIV_IOCTL_80211_VIF_SET vifInfo;
++	CMD_RTPRIV_IOCTL_80211_VIF_SET vifInfo = {};
+ 	PWIRELESS_DEV pDev = NULL;
+ 
+ 	MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_NOTICE, "80211> ==>\n");
+@@ -3983,6 +3983,8 @@
+ 			"Support WIPHY_FLAG_4ADDR_STATION\n");
+ 
+ 	vifInfo.flags = pWiphy->flags;
++	if (!pParams || pParams->use_4addr <= 0)
++		vifInfo.flags &= ~WIPHY_FLAG_4ADDR_STATION;
+ 
+ 	if (RTMP_DRIVER_80211_VIF_ADD(pAd, &vifInfo) != NDIS_STATUS_SUCCESS) {
+ 		MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_ERROR,
+@@ -3990,7 +3992,7 @@
+ 		return ERR_PTR(-EINVAL);
+ 	}
+ 
+-	return vifInfo.pWdev;
++	return vifInfo.pWdev ? vifInfo.pWdev : ERR_PTR(-EIO);
+ }
+ 
+ static int CFG80211_OpsVirtualInfDel(
+@@ -4002,12 +4004,16 @@
+ 		struct net_device *dev = NULL;
+ 
+ 		dev = pwdev->netdev;
+-		if (!dev)
+-			return 0;
++		if (!dev || dev->reg_state != NETREG_REGISTERED)
++			return -EINVAL;
+ 		MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_NOTICE,
+ 			"80211> %s [%d]==>\n", dev->name, dev->ieee80211_ptr->iftype);
+ 		MAC80211_PAD_GET(pAd, pWiphy);
+-		RTMP_DRIVER_80211_VIF_DEL(pAd, dev, dev->ieee80211_ptr->iftype);
++		if (!pAd)
++			return -ENODEV;
++		if (RTMP_DRIVER_80211_VIF_DEL(pAd, dev, dev->ieee80211_ptr->iftype) != NDIS_STATUS_SUCCESS ||
++		    dev->reg_state == NETREG_REGISTERED)
++			return -EIO;
+ 
+ 		return 0;
+ }
+@@ -16522,7 +16528,7 @@
+ 	ULONG *pPriv;
+ 	RTMP_ADAPTER *ad = (RTMP_ADAPTER *)pAd;
+ #ifdef SEL_DUAL_BAND
+-	char phy_name[10];
++	char phy_name[32];
+ 	int ret = 0;
+ #endif
+ 
+@@ -16544,7 +16550,7 @@
+ 	os_zero_mem((uint8_t *)pWdev, sizeof(*pWdev));
+ 
+ #ifdef SEL_DUAL_BAND
+-	ret = sprintf(phy_name, "phy%d", ad->dev_idx);
++	ret = snprintf(phy_name, sizeof(phy_name), "phy%d", ad->dev_idx);
+ 	if (ret < 0) {
+ 		MTWF_DBG(pAd, DBG_CAT_INIT, CATINIT_INTF, DBG_LVL_ERROR,
+ 		"80211> Sprintf error!\n");
+@@ -16594,7 +16600,8 @@
+ #endif /* CONFIG_STA_SUPPORT */
+ 	 pWdev->wiphy->reg_notifier = CFG80211_RegNotifier;
+ 	/* init channel information */
+-	CFG80211_SupBandInit(pAd, pCfg80211_CB, pBandInfo, prWiphy, NULL, NULL, FALSE);
++	if (!CFG80211_SupBandInit(pAd, pCfg80211_CB, pBandInfo, prWiphy, NULL, NULL, FALSE))
++		goto LabelErrReg;
+ 
+ 	/* CFG80211_SIGNAL_TYPE_MBM: signal strength in mBm (100*dBm) */
+ 	prWiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
+@@ -16656,6 +16663,10 @@
+ 
+ 	return pWdev;
+ LabelErrReg:
++	os_free_mem(pCfg80211_CB->pCfg80211_Channels);
++	os_free_mem(pCfg80211_CB->pCfg80211_Rates);
++	pCfg80211_CB->pCfg80211_Channels = NULL;
++	pCfg80211_CB->pCfg80211_Rates = NULL;
+ 	wiphy_free(prWiphy);
+ 	pWdev->wiphy = NULL;
+ LabelErrWiphyNew:
+@@ -16690,7 +16701,7 @@
+ 	IN struct net_device *pNetDev)
+ {
+ 	CFG80211_CB *pCfg80211_CB = NULL;
+-	CFG80211_BAND BandInfo;
++	CFG80211_BAND BandInfo = {};
+ 	INT err = 0;
+ 	UINT32 OpMode;
+ 	/* allocate Main Device Info structure */
+@@ -16704,7 +16715,10 @@
+ 
+ 	os_zero_mem(pCfg80211_CB, sizeof(CFG80211_CB));
+ 	/* allocate wireless device */
+-	RTMP_DRIVER_80211_BANDINFO_GET(pAd, &BandInfo);
++	if (RTMP_DRIVER_80211_BANDINFO_GET(pAd, &BandInfo) != NDIS_STATUS_SUCCESS) {
++		os_free_mem(pCfg80211_CB);
++		return FALSE;
++	}
+ 	pCfg80211_CB->pCfg80211_Wdev = CFG80211_WdevAlloc(pCfg80211_CB, &BandInfo, pAd, pDev);
+ 
+ 	if (pCfg80211_CB->pCfg80211_Wdev == NULL) {
+@@ -16730,12 +16744,12 @@
+ 	pNetDev->ieee80211_ptr = pCfg80211_CB->pCfg80211_Wdev;
+ 	SET_NETDEV_DEV(pNetDev, wiphy_dev(pCfg80211_CB->pCfg80211_Wdev->wiphy));
+ 	pCfg80211_CB->pCfg80211_Wdev->netdev = pNetDev;
++	pAd->pCfg80211_CB = pCfg80211_CB;
++	RTMP_DRIVER_80211_RESET(pAd);
++	RTMP_DRIVER_80211_SCAN_STATUS_LOCK_INIT(pAd, TRUE);
+ #ifdef RFKILL_HW_SUPPORT
+ 	wiphy_rfkill_start_polling(pCfg80211_CB->pCfg80211_Wdev->wiphy);
+ #endif /* RFKILL_HW_SUPPORT */
+-	pAd->pCfg80211_CB = pCfg80211_CB;
+-	RTMP_DRIVER_80211_RESET(pAd);
+-	RTMP_DRIVER_80211_SCAN_STATUS_LOCK_INIT(pAd, TRUE);
+ 
+ 	wiphy_ext_feature_set(pCfg80211_CB->pCfg80211_Wdev->wiphy, NL80211_EXT_FEATURE_DFS_OFFLOAD);
+ 	wiphy_ext_feature_set(pCfg80211_CB->pCfg80211_Wdev->wiphy, NL80211_EXT_FEATURE_BEACON_RATE_LEGACY);
+@@ -16746,7 +16760,7 @@
+ 		MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_CMM, DBG_LVL_ERROR,
+ 			"80211> Failed to register notifierl %d\n", err);
+ 
+-	MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_CMM, DBG_LVL_ERROR, "80211> end\n");
++	MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_CMM, DBG_LVL_INFO, "80211> end\n");
+ 	return TRUE;
+ } /* End of CFG80211_Register */
+ 
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_inf.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_inf.c
+@@ -33,7 +33,7 @@
+ #if defined(IWCOMMAND_CFG80211_SUPPORT) || defined(HOSTAPD_MBSS_SUPPORT)
+ extern struct wifi_dev_ops ap_wdev_ops;
+ 
+-VOID RTMP_CFG80211_AddVifEntry(VOID *pAdSrc, PNET_DEV pNewNetDev, UINT32 DevType)
++BOOLEAN RTMP_CFG80211_AddVifEntry(VOID *pAdSrc, PNET_DEV pNewNetDev, UINT32 DevType)
+ {
+ 	PRTMP_ADAPTER pAd = (PRTMP_ADAPTER)pAdSrc;
+ 	PCFG80211_VIF_DEV pNewVifDev = NULL;
+@@ -52,9 +52,11 @@
+ 		insertTailList(&pAd->cfg80211_ctrl.Cfg80211VifDevSet.vifDevList, (RT_LIST_ENTRY *)pNewVifDev);
+ 		MTWF_DBG(pAd, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_INFO,
+ 				"Add CFG80211 VIF Device, Type: %d.\n", pNewVifDev->devType);
++		return TRUE;
+ 	} else
+ 		MTWF_DBG(pAd, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_ERROR,
+ 				"Error in alloc mem in New CFG80211 VIF Function.\n");
++	return FALSE;
+ }
+ 
+ static
+@@ -91,9 +93,7 @@
+ 		delEntryList(&pAd->cfg80211_ctrl.Cfg80211VifDevSet.vifDevList, pListEntry);
+ 		os_free_mem(pListEntry);
+ 		pListEntry = NULL;
+-	} else
+-		MTWF_DBG(pAd, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_ERROR,
+-			"Error\n");
++	}
+ }
+ #endif /* IWCOMMAND_CFG80211_SUPPORT */
+ 
+@@ -254,6 +254,8 @@
+ 					break;
+ 				}
+ 			}
++			if (IdBss >= MaxNumBss)
++				break;
+ 			pAd->ApCfg.MBSSID[preIfIndex].wdev.if_dev = NULL;
+ 			pAd->ApCfg.MBSSID[preIfIndex].wdev.bcn_buf.BeaconPkt = NULL;
+ 			new_dev_p = RtmpOSNetDevCreate(MC_RowID, &IoctlIF, INT_MBSSID, preIfIndex,
+@@ -283,6 +285,7 @@
+ 				MTWF_DBG(pAd, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_ERROR,
+ 						 "Assign wdev idx for %s failed, free net device!\n",
+ 						 RTMP_OS_NETDEV_GET_DEVNAME(new_dev_p));
++				wdev->if_dev = NULL;
+ 				RtmpOSNetDevFree(new_dev_p);
+ 				break;
+ 			}
+@@ -294,6 +297,8 @@
+ 				MTWF_DBG(pAd, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_ERROR,
+ 						 "register wdev_ops %s failed, free net device!\n",
+ 						  RTMP_OS_NETDEV_GET_DEVNAME(new_dev_p));
++				wdev_deinit(pAd, wdev);
++				wdev->if_dev = NULL;
+ 				RtmpOSNetDevFree(new_dev_p);
+ 				break;
+ 			}
+@@ -342,11 +347,19 @@
+ 				MTWF_DBG(pAd, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_ERROR,
+ 					"create IF %d (%s) failed!!\n",
+ 					apidx, RTMP_OS_NETDEV_GET_DEVNAME(new_dev_p));
++				wdev_deinit(pAd, wdev);
++				wdev->if_dev = NULL;
+ 				RtmpOSNetDevFree(new_dev_p);
+ 				break;
+ 			}
++			if (!RTMP_CFG80211_AddVifEntry(pAd, new_dev_p, DevType)) {
++				RtmpOSNetDevDetach(new_dev_p);
++				wdev_deinit(pAd, wdev);
++				wdev->if_dev = NULL;
++				RtmpOSNetDevFree(new_dev_p);
++				break;
++			}
+ 			(*ppWdev) = &wdev->cfg80211_wdev;
+-			RTMP_CFG80211_AddVifEntry(pAd, new_dev_p, DevType);
+ 			retval = TRUE;
+ 		break;
+ #ifdef CONFIG_VLAN_GTK_SUPPORT
+@@ -504,6 +517,7 @@
+ 			MTWF_DBG(pAd, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_ERROR,
+ 					"Assign wdev idx for %s failed, free net device!\n",
+ 					 RTMP_OS_NETDEV_GET_DEVNAME(new_dev_p));
++			wdev->if_dev = NULL;
+ 			RtmpOSNetDevFree(new_dev_p);
+ 			break;
+ 		}
+@@ -515,6 +529,8 @@
+ 			MTWF_DBG(pAd, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_ERROR,
+ 					 "register wdev_ops %s failed, free net device!\n"
+ 						, RTMP_OS_NETDEV_GET_DEVNAME(new_dev_p));
++			wdev_deinit(pAd, wdev);
++			wdev->if_dev = NULL;
+ 			RtmpOSNetDevFree(new_dev_p);
+ 			break;
+ 		}
+@@ -567,9 +583,19 @@
+ 			MTWF_DBG(pAd, DBG_CAT_CFG80211, CATCFG80211_INTF, DBG_LVL_ERROR,
+ 					"create IF %d (%s) failed!!\n",
+ 					apidx, RTMP_OS_NETDEV_GET_DEVNAME(new_dev_p));
+-		}
+-
+-		RTMP_CFG80211_AddVifEntry(pAd, new_dev_p, DevType);
++			wdev_deinit(pAd, wdev);
++			wdev->if_dev = NULL;
++			RtmpOSNetDevFree(new_dev_p);
++			break;
++		}
++
++		if (!RTMP_CFG80211_AddVifEntry(pAd, new_dev_p, DevType)) {
++			RtmpOSNetDevDetach(new_dev_p);
++			wdev_deinit(pAd, wdev);
++			wdev->if_dev = NULL;
++			RtmpOSNetDevFree(new_dev_p);
++			break;
++		}
+ 		(*ppWdev) = &wdev->cfg80211_wdev;
+ 		pAd->StaCfg->ApcliInfStat.ApCliInit = TRUE;
+ 		retval = TRUE;
+@@ -617,6 +643,8 @@
+ #endif
+ 			wdev_deinit(pAd, wdev);
+ 			wdev->if_dev = NULL;
++			if (dev_p != pAd->net_dev)
++				RtmpOSNetDevFree(dev_p);
+ 
+ 		}
+ 		OS_SPIN_LOCK_IRQSAVE(&pAd->CfgIfUseCntLock, &flags);
+@@ -638,6 +666,8 @@
+ 			RtmpOSNetDevDetach(dev_p);
+ 			wdev_deinit(pAd, wdev);
+ 			wdev->if_dev = NULL;
++			if (dev_p != pAd->net_dev)
++				RtmpOSNetDevFree(dev_p);
+ 
+ 		}
+ 		OS_SPIN_LOCK_IRQSAVE(&pAd->CfgIfUseCntLock, &flags);
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_util.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_util.c
+@@ -538,13 +538,13 @@
+ 
+ static void CFG80211_sband_data_init(
+ 	struct _RTMP_ADAPTER *pAd,
++	CFG80211_CB *cb,
+ 	struct _RTMP_ADAPTER *mac_ad,
+ 	struct __CFG80211_BAND *pDriverBandInfo,
+ 	enum nl80211_band band_idx,
+ 	struct ieee80211_supported_band *band_info,
+ 	UINT8 re_init)
+ {
+-	struct _RTMP_CHIP_CAP *chip_cap;
+ 	struct ieee80211_sband_iftype_data *data;
+ 	enum PHY_CAP phy_caps = 0;
+ 	struct mcs_nss_caps *nss_cap;
+@@ -565,16 +565,15 @@
+ 			__func__, band_idx, NUM_NL80211_BANDS);
+ 		return;
+ 	}
+-	chip_cap = PD_GET_CHIP_CAP_PTR(mac_ad->physical_dev);
+ 	phy_caps = pDriverBandInfo->phy_caps;
+ 	nss_cap = MCS_NSS_CAP(mac_ad);
+-	data = &chip_cap->sband_data[band_idx];
++	data = &cb->sband_data[band_idx];
+ 	os_zero_mem(data, sizeof(struct ieee80211_sband_iftype_data));
+-	data->types_mask = BIT(NL80211_IFTYPE_AP);
++	data->types_mask = BIT(NL80211_IFTYPE_AP) | BIT(NL80211_IFTYPE_STATION);
+ 	CFG80211_sband_data_he_cap_init(phy_caps, band_idx, data, pDriverBandInfo);
+ 	CFG80211_sband_data_eht_cap_init(pAd, phy_caps, nss_cap, band_idx, data);
+ 	band_info->n_iftype_data = 1;
+-	band_info->iftype_data = &chip_cap->sband_data[band_idx];
++	band_info->iftype_data = &cb->sband_data[band_idx];
+ 
+ 	/*
+ 	 * ATE would call CFG80211OS_SupBandReInit directly
+@@ -724,13 +723,9 @@
+ 		pDriverBandInfo->RFICType = RFIC_24GHZ | RFIC_5GHZ | RFIC_6GHZ;
+ 
+ 	/* 1. Calcute the Channel Number */
+-	NumOfChan = CFG80211_NUM_OF_CHAN_2GHZ;
+-
+-	if (pDriverBandInfo->RFICType & RFIC_5GHZ)
+-		NumOfChan += CFG80211_NUM_OF_CHAN_5GHZ;
+-
+-	if (pDriverBandInfo->RFICType & RFIC_6GHZ)
+-		NumOfChan += CFG80211_NUM_OF_CHAN_6GHZ;
++	/* All band pointers use these fixed offsets, including a 6-GHz-only radio. */
++	NumOfChan = CFG80211_NUM_OF_CHAN_2GHZ + CFG80211_NUM_OF_CHAN_5GHZ +
++		    CFG80211_NUM_OF_CHAN_6GHZ;
+ 
+ 	/*need to check why FlgIsBMode set to TRUE*/
+ 	NumOfRate = 4 + 8;
+@@ -757,7 +752,8 @@
+ 		pRates = kcalloc(NumOfRate, sizeof(*pRates), GFP_KERNEL);
+ 
+ 		if (!pRates) {
+-			os_free_mem(pChannels);
++			if (!pChannelsOrg)
++				os_free_mem(pChannels);
+ 			MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_CMM, DBG_LVL_ERROR,
+ 				"80211> ieee80211_rate allocation fail!\n");
+ 			return FALSE;
+@@ -793,7 +789,8 @@
+ 		pChannels[IdLoop].flags = 0;
+ 
+ 		/* if (RadarChannelCheck(pAd, Cfg80211_Chan[IdLoop])) */
+-		if (IsRadarChannel(Cfg80211_Chan[IdLoop])) {
++		if (pChannels[IdLoop].band == IEEE80211_BAND_5GHZ &&
++		    IsRadarChannel(Cfg80211_Chan[IdLoop])) {
+ 			MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_DFS, DBG_LVL_INFO,
+ 				"====> Radar Channel %d\n", Cfg80211_Chan[IdLoop]);
+ #ifdef CFG80211_FULL_OPS_SUPPORT
+@@ -901,7 +898,7 @@
+ 		}
+ #endif /* DOT11_N_SUPPORT */
+ 		CFG80211_sband_data_init(
+-			pAd, mac_ad, pDriverBandInfo, IEEE80211_BAND_2GHZ, pBand, ReInit);
++			pAd, pCfg80211_CB, mac_ad, pDriverBandInfo, IEEE80211_BAND_2GHZ, pBand, ReInit);
+ 		pWiphy->bands[IEEE80211_BAND_2GHZ] = pBand;
+ 	} else {
+ 		pWiphy->bands[IEEE80211_BAND_2GHZ] = NULL;
+@@ -997,17 +994,17 @@
+ 					"80211 rx_vht_mcs=%04x\n", vht_mcs);
+ 
+ 		pBand->vht_cap.vht_mcs.rx_mcs_map = vht_mcs;
+-		pBand->vht_cap.vht_mcs.rx_highest = cpu_to_le16(VHT_HIGH_RATE_BW80[2][pDriverBandInfo->RxStream & 0x03]);
++		pBand->vht_cap.vht_mcs.rx_highest = cpu_to_le16(VHT_HIGH_RATE_BW80[2][clamp_t(UINT32, pDriverBandInfo->RxStream, 1, 4) - 1]);
+ 
+ 		vht_mcs = get_vht_mcs_map(pDriverBandInfo->TxStream, IEEE80211_VHT_MCS_SUPPORT_0_9);
+ 		MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_CMM, DBG_LVL_DEBUG,
+ 					"80211 tx_vht_mcs=%04x\n", vht_mcs);
+ 
+ 		pBand->vht_cap.vht_mcs.tx_mcs_map = vht_mcs;
+-		pBand->vht_cap.vht_mcs.tx_highest = cpu_to_le16(VHT_HIGH_RATE_BW80[2][pDriverBandInfo->TxStream & 0x03]);
++		pBand->vht_cap.vht_mcs.tx_highest = cpu_to_le16(VHT_HIGH_RATE_BW80[2][clamp_t(UINT32, pDriverBandInfo->TxStream, 1, 4) - 1]);
+ #endif /* DOT11_VHT_AC */
+ 		CFG80211_sband_data_init(
+-			pAd, mac_ad, pDriverBandInfo, IEEE80211_BAND_5GHZ, pBand, ReInit);
++			pAd, pCfg80211_CB, mac_ad, pDriverBandInfo, IEEE80211_BAND_5GHZ, pBand, ReInit);
+ 		pWiphy->bands[IEEE80211_BAND_5GHZ] = pBand;
+ 	} else {
+ 		pWiphy->bands[IEEE80211_BAND_5GHZ] = NULL;
+@@ -1026,7 +1023,7 @@
+ 			&pChannels[CFG80211_NUM_OF_CHAN_2GHZ + CFG80211_NUM_OF_CHAN_5GHZ];
+ 		pBand->bitrates = &pRates[4];
+ 		CFG80211_sband_data_init(
+-			pAd, mac_ad, pDriverBandInfo, IEEE80211_BAND_6GHZ, pBand, ReInit);
++			pAd, pCfg80211_CB, mac_ad, pDriverBandInfo, IEEE80211_BAND_6GHZ, pBand, ReInit);
+ 		pWiphy->bands[IEEE80211_BAND_6GHZ] = pBand;
+ 	} else {
+ 		pWiphy->bands[IEEE80211_BAND_6GHZ] = NULL;
+@@ -1087,10 +1084,10 @@
+ 		/* re-init bands */
+ 		cap = hc_get_chip_cap(mac_ad->hdev_ctrl);
+ 		pBandInfo->phy_caps = cap->phy_caps;
+-		CFG80211_SupBandInit(pAd, pCfg80211_CB, pBandInfo, pWiphy,
++		if (!CFG80211_SupBandInit(pAd, pCfg80211_CB, pBandInfo, pWiphy,
+ 				pCfg80211_CB->pCfg80211_Channels,
+-				pCfg80211_CB->pCfg80211_Rates,
+-				TRUE);
++				pCfg80211_CB->pCfg80211_Rates, TRUE))
++			return FALSE;
+ 		/* re-init PHY */
+ 		pWiphy->rts_threshold = pBandInfo->RtsThreshold;
+ 		pWiphy->frag_threshold = pBandInfo->FragmentThreshold;
+--- a/mt_wifi/os/linux/cfg80211/cfg80211drv.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211drv.c
+@@ -3031,7 +3031,7 @@
+ 
+ 	CFG80211OS_UnRegister(pAd->pCfg80211_CB, pNetDev);
+ 	RTMP_DRIVER_80211_SCAN_STATUS_LOCK_INIT(pAd, FALSE);
+-	unregister_netdevice_notifier(&cfg80211_netdev_notifier);
++	/* CFG80211_Register does not register cfg80211_netdev_notifier. */
+ 	/* Reset CFG80211 Global Setting Here */
+ 	MTWF_DBG(NULL, DBG_CAT_CFG, CATCFG_CMD, DBG_LVL_INFO,
+ 		"==========> TYPE Reset CFG80211 Global Setting Here <==========\n");
+--- a/mt_wifi/os/linux/pci_main_dev.c
++++ b/mt_wifi/os/linux/pci_main_dev.c
+@@ -509,7 +509,9 @@
+ 		pci_release_regions(pci_dev);
+ 	} else {
+ 		/* Unregister network device */
+-		RtmpOSNetDevDetach(net_dev);
++		RtmpOSNetDevProtect(1);
++		RtmpOSNetDevDetachRTNL(net_dev);
++		RtmpOSNetDevProtect(0);
+ 		/* Unmap CSR base address */
+ 		iounmap((char *)(net_dev->base_addr));
+ 		/* release memory region */
+--- a/mt_wifi/os/linux/rt_linux.c
++++ b/mt_wifi/os/linux/rt_linux.c
+@@ -1791,17 +1791,47 @@
+ }
+ 
+ 
++/* Caller holds RTNL and, for a cfg80211 device, its wiphy lock. */
+ void RtmpOSNetDevDetach(PNET_DEV pNetDev)
+ {
+-#if defined(CCN34_SPLIT_MAC_SUPPORT) && defined(ACTION_MONITOR_SUPPORT)
+-	/* ccn34 action monitor is not support cfg80211 interface for now */
+-	unregister_netdevice(pNetDev);
+-	return;
+-#endif
++	if (!pNetDev || pNetDev->reg_state != NETREG_REGISTERED)
++		return;
+ #if defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
+-	cfg80211_unregister_netdevice(pNetDev);
+-#else
+-	unregister_netdevice(pNetDev);
++	if (pNetDev->ieee80211_ptr)
++		cfg80211_unregister_netdevice(pNetDev);
++	else
++#endif
++		unregister_netdevice(pNetDev);
++}
++
++/* Module teardown holds RTNL but has not acquired a wiphy lock. */
++void RtmpOSNetDevDetachRTNL(PNET_DEV pNetDev)
++{
++#if defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
++	struct wireless_dev *wdev;
++#endif
++
++	ASSERT_RTNL();
++	if (!pNetDev || pNetDev->reg_state != NETREG_REGISTERED)
++		return;
++#if defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
++	wdev = pNetDev->ieee80211_ptr;
++	if (wdev)
++		wiphy_lock(wdev->wiphy);
++#endif
++#if defined(RT_CFG80211_SUPPORT) && (defined(IWCOMMAND_CFG80211_SUPPORT) || defined(HOSTAPD_MBSS_SUPPORT))
++	{
++		PRTMP_ADAPTER ad = NULL;
++
++		GET_PAD_FROM_NET_DEV(ad, pNetDev);
++		if (ad)
++			RTMP_CFG80211_RemoveVifEntry(ad, pNetDev);
++	}
++#endif
++	RtmpOSNetDevDetach(pNetDev);
++#if defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
++	if (wdev)
++		wiphy_unlock(wdev->wiphy);
+ #endif
+ }
+ 
+@@ -1842,9 +1872,19 @@
+ {
+ 	int ret, rtnl_locked = FALSE;
+ #if (KERNEL_VERSION(2, 6, 31) <= LINUX_VERSION_CODE)
+-	struct net_device_ops *pNetDevOps = (struct net_device_ops *)pNetDev->netdev_ops;
++	struct net_device_ops *pNetDevOps;
+ #endif
+ 	PRTMP_ADAPTER pAd = NULL;
++#ifdef RT_CFG80211_SUPPORT
++	BOOLEAN cfg_created = FALSE;
++#endif
++
++	if (!pNetDev || !pDevOpHook || !pNetDev->netdev_ops ||
++	    pNetDev->reg_state != NETREG_UNINITIALIZED)
++		return NDIS_STATUS_FAILURE;
++#if (KERNEL_VERSION(2, 6, 31) <= LINUX_VERSION_CODE)
++	pNetDevOps = (struct net_device_ops *)pNetDev->netdev_ops;
++#endif
+ 
+ 	MTWF_DBG(NULL, DBG_CAT_INTF, CATINTF_UP, DBG_LVL_INFO, "--->\n");
+ 
+@@ -1890,7 +1930,13 @@
+ 		}
+ 
+ #ifdef RT_CFG80211_SUPPORT
+-		RTMP_DRIVER_CFG80211_REGISTER(pNetDev);
++		/* Only the bootstrap netdevice creates a radio. VIFs borrow its wiphy. */
++		if (pAd->net_dev == pNetDev && !pNetDev->ieee80211_ptr) {
++			if (pDevOpHook->needProtcted ||
++			    !CFG80211_Register(pAd, rtmp_get_dev(pAd), pNetDev))
++				return NDIS_STATUS_FAILURE;
++			cfg_created = TRUE;
++		}
+ #endif /* RT_CFG80211_SUPPORT */
+ #if (KERNEL_VERSION(2, 6, 31) <= LINUX_VERSION_CODE)
+ 		pNetDevOps->ndo_open = pDevOpHook->open;
+@@ -1989,8 +2035,11 @@
+ 	if (rtnl_locked) {
+ 		ret = cfg80211_register_netdevice(pNetDev);
+ 	} else {
+-		if (rtnl_lock_killable())
++		if (rtnl_lock_killable()) {
++			if (cfg_created)
++				CFG80211_UnRegister(pAd, pNetDev);
+ 			return -EINTR;
++		}
+ 		wiphy_lock(pNetDev->ieee80211_ptr->wiphy);
+ 		ret = cfg80211_register_netdevice(pNetDev);
+ 		wiphy_unlock(pNetDev->ieee80211_ptr->wiphy);
+@@ -2007,6 +2056,10 @@
+ 	MTWF_DBG(NULL, DBG_CAT_INTF, CATINTF_UP, DBG_LVL_INFO,
+ 		"<---ret=%d\n", ret);
+ 
++#ifdef RT_CFG80211_SUPPORT
++	if (ret && cfg_created)
++		CFG80211_UnRegister(pAd, pNetDev);
++#endif
+ 	if (ret == 0)
+ 		return NDIS_STATUS_SUCCESS;
+ 	else
+--- a/mt_wifi/os/linux/rt_main_dev.c
++++ b/mt_wifi/os/linux/rt_main_dev.c
+@@ -921,9 +921,9 @@
+ 	/* Unregister network device */
+ 	if (net_dev != NULL) {
+ 		MTWF_DBG(pAd, DBG_CAT_INTF, CATINTF_DOWN, DBG_LVL_ERROR,
+-				 "RtmpOSNetDevDetach(): RtmpOSNetDeviceDetach(), dev->name=%s!\n", net_dev->name);
++				 "RtmpOSNetDevDetachRTNL(): RtmpOSNetDeviceDetach(), dev->name=%s!\n", net_dev->name);
+ 		RtmpOSNetDevProtect(1);
+-		RtmpOSNetDevDetach(net_dev);
++		RtmpOSNetDevDetachRTNL(net_dev);
+ 		RtmpOSNetDevProtect(0);
+ #ifdef RT_CFG80211_SUPPORT
+ 		RTMP_DRIVER_80211_UNREGISTER(pAd, net_dev);
+--- a/mt_wifi/sta/sta.c
++++ b/mt_wifi/sta/sta.c
+@@ -429,12 +429,11 @@
+ 
+ 			if (wdev->if_dev) {
+ 				RtmpOSNetDevProtect(1);
+-				RtmpOSNetDevDetach(wdev->if_dev);
++				RtmpOSNetDevDetachRTNL(wdev->if_dev);
+ 				RtmpOSNetDevProtect(0);
+ 				wdev_deinit(pAd, wdev);
+-#ifndef RT_CFG80211_SUPPORT
+-				RtmpOSNetDevFree(wdev->if_dev);
+-#endif
++				if (wdev->if_dev != pAd->net_dev)
++					RtmpOSNetDevFree(wdev->if_dev);
+ 				/* Clear it as NULL to prevent latter access error. */
+ 				pAd->StaCfg[IdSta].ApcliInfStat.ApCliInit = FALSE;
+ 				wdev->if_dev = NULL;
+@@ -447,17 +446,16 @@
+ 			wdev = &pAd->StaCfg[IdSta].wdev;
+ 			pStaCfg = &pAd->StaCfg[IdSta];
+ 
+-			if (pStaCfg)
++			if (!pStaCfg)
+ 				return;
+ 
+ 			if (wdev->if_dev) {
+ 				RtmpOSNetDevProtect(1);
+-				RtmpOSNetDevDetach(wdev->if_dev);
++				RtmpOSNetDevDetachRTNL(wdev->if_dev);
+ 				RtmpOSNetDevProtect(0);
+ 				wdev_deinit(pAd, wdev);
+-#ifndef RT_CFG80211_SUPPORT
+-				RtmpOSNetDevFree(wdev->if_dev);
+-#endif
++				if (wdev->if_dev != pAd->net_dev)
++					RtmpOSNetDevFree(wdev->if_dev);
+ 				wdev->if_dev = NULL;
+ 			}
+ 		}

@@ -88,6 +88,12 @@ void mt_synchronize_rcu(void)
 }
 EXPORT_SYMBOL(mt_synchronize_rcu);
 
+void *mt_skb_pull_rcsum(struct sk_buff *skb, unsigned int len)
+{
+	return skb_pull_rcsum(skb, len);
+}
+EXPORT_SYMBOL(mt_skb_pull_rcsum);
+
 void mt_rcu_barrier(void)
 {
 	rcu_barrier();

@@ -1,0 +1,102 @@
+Subject: wifi7: balance TX RCU paths and return a valid borrowed device or NULL
+
+--- a/mt_wifi/hw_ctrl/hwifi_main.c
++++ b/mt_wifi/hw_ctrl/hwifi_main.c
+@@ -1879,11 +1879,14 @@
+ 	struct mtk_mac_txq *txq;
+ 	int ret;
+ 
+-	if (!entry || !entry->mac_sta)
++	mt_rcu_read_lock();
++	if (!wdev)
++		goto err;
++	if (!entry || !READ_ONCE(entry->mac_sta))
+ 		entry = tr_entry_get(ad, wdev->tr_tb_idx);
+-
+-	mt_rcu_read_lock();
+-	sta = entry->mac_sta;
++	if (!entry)
++		goto err;
++	sta = READ_ONCE(entry->mac_sta);
+ 	if (!sta)
+ 		goto err;
+ 
+@@ -1891,6 +1894,8 @@
+ 	if (!txq)
+ 		goto err;
+ 
++	if (!pskb_may_pull(skb, cap->tx_hw_hdr_len))
++		goto err;
+ 	skb_pull(skb, cap->tx_hw_hdr_len);
+ 
+ 	/*should apply rcu lock*/
+@@ -1961,12 +1966,11 @@
+ 	struct mtk_mac_txq *txq;
+ 	int ret;
+ 
++	mt_rcu_read_lock();
+ 	if (!wdev || !entry)
+ 		goto err;
+-
+-	mt_rcu_read_lock();
+-	bss = wdev->pHObj;
+-	sta = entry->mac_sta;
++	bss = READ_ONCE(wdev->pHObj);
++	sta = READ_ONCE(entry->mac_sta);
+ 
+ 	if (!sta || !bss)
+ 		goto err;
+--- a/mt_wifi/os/linux/rt_main_dev.c
++++ b/mt_wifi/os/linux/rt_main_dev.c
+@@ -612,40 +612,19 @@
+ }
+ 
+ 
++/* Called from the transmit path while RTNL or an RCU read lock protects devices. */
+ VOID *RtmpNetEthConvertDevSearch(VOID *net_dev_, UCHAR *pData)
+ {
+-	struct net_device *pNetDev;
+-#if (KERNEL_VERSION(2, 6, 24) <= LINUX_VERSION_CODE)
+-#if (KERNEL_VERSION(2, 6, 26) <= LINUX_VERSION_CODE)
+-	struct net_device *net_dev = (struct net_device *)net_dev_;
+-	struct net *net;
+-
+-	net = dev_net(net_dev);
+-	BUG_ON(!net);
+-	for_each_netdev(net, pNetDev)
+-#else
+-	struct net *net;
+-	struct net_device *net_dev = (struct net_device *)net_dev_;
+-
+-	BUG_ON(!net_dev->nd_net);
+-	net = net_dev->nd_net;
+-	for_each_netdev(net, pNetDev)
+-#endif
+-#else
+-#if (KERNEL_VERSION(2, 6, 22) <= LINUX_VERSION_CODE)
+-	for_each_netdev(pNetDev)
+-#else
+-
+-	for (pNetDev = dev_base; pNetDev; pNetDev = pNetDev->next)
+-#endif
+-#endif
+-	{
+-		if ((pNetDev->type == ARPHRD_ETHER)
+-			&& ether_addr_equal(pNetDev->dev_addr, &pData[6]))
+-			break;
+-	}
+-
+-	return (VOID *)pNetDev;
++	struct net_device *dev = net_dev_, *candidate;
++
++	if (!dev || !pData)
++		return NULL;
++	for_each_netdev_rcu(dev_net(dev), candidate) {
++		if (candidate->type == ARPHRD_ETHER && candidate->addr_len == ETH_ALEN &&
++		    ether_addr_equal_unaligned(candidate->dev_addr, pData + ETH_ALEN))
++			return candidate;
++	}
++	return NULL;
+ }
+ 
+ 
