@@ -7,7 +7,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=mt_wifi7
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 P4REV:=
 PKG_VERSION:=24.10.20261104
 PKG_SOURCE_URL:=https://raw.githubusercontent.com/MedyMa/immortalwrt-mt798x-25.12/main/dl
@@ -409,7 +409,7 @@ define Build/Compile
 		M="$(PKG_BUILD_DIR)/mt_wifi_ap" \
 		LINUX_DIR="$(KERNEL_BUILD_DIR)" \
 		$(if $(CONFIG_MTK_WIFI7_CFG80211_SUPPORT),UL_CTRL=CFG80211) \
-		CFG_CFG80211_VERSION="$(BACKPORT_VERSION)" \
+		CFG_CFG80211_VERSION="$(if $(CONFIG_MTK_WIFI7_CFG80211_SUPPORT),$(BACKPORT_VERSION))" \
 		$(foreach c, $(PKG_KCONFIG),$(if $(CONFIG_MTK_WIFI7_$c),CONFIG_$(c)=$(CONFIG_MTK_WIFI7_$(c)))) \
 		NOSTDINC_FLAGS="$(NOSTDINC_FLAGS)" \
 	 	KCFLAGS="$(KCFLAGS)" \

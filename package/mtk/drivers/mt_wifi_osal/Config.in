@@ -33,3 +33,12 @@ config MTK_WIFI_OSAL_NETIF_RX_DISPATCH
 	help
 	  Say Y, if you need mt_wifi_osal to dispatch rx skb.
 
+
+config MTK_WIFI_OSAL_FIPS_SUPPORT
+	bool "OSAL FIPS Generic Netlink transport"
+	depends on PACKAGE_kmod-mt_wifi_osal
+	default n
+	help
+	  Enable only for drivers registering netdevices through the full OSAL
+	  interface. The legacy WiFi7 WEXT compatibility driver does not implement
+	  this transport; its netdevice private layout is different.

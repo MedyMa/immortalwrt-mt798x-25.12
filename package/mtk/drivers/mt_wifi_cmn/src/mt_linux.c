@@ -88,6 +88,12 @@ void mt_synchronize_rcu(void)
 }
 EXPORT_SYMBOL(mt_synchronize_rcu);
 
+void mt_rcu_barrier(void)
+{
+	rcu_barrier();
+}
+EXPORT_SYMBOL(mt_rcu_barrier);
+
 
 ktime_t mt_ktime_get(void)
 {

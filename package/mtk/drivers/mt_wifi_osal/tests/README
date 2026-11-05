@@ -1,0 +1,20 @@
+This is an optional regression module, excluded from normal firmware/package builds.
+It calls the real OSAL and Linux kernel APIs; it does not emulate their implementation.
+
+Build against the exact prepared kernel and OSAL source used by the target:
+
+  make -C "$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-openwrt-linux-musl- \
+    M="$PWD/package/mtk/drivers/mt_wifi_osal/tests" OSAL_SRC="$OSAL_SRC" \
+    KBUILD_EXTRA_SYMBOLS="$OSAL_SRC/Module.symvers" modules
+
+On an isolated test board, unload other OSAL consumers first and load the matching
+mt_wifi_osal.ko, then mt_wifi_osal_regression.ko. The tests temporarily own OSAL
+device slot 1. They run at module insertion and report each result to the kernel
+log; an error causes insertion to fail. Unload the regression module afterwards.
+
+Cases cover RX checksum equivalence with skb_pull_rcsum, VLAN wire order, calendar
+and boottime units, nonzero kthread exit, delayed-work cancellation/requeue,
+running-timer synchronization (SMP), and completion of queued RCU callbacks.
+
+Compilation does not execute these checks. This module does not validate WiFi RF,
+throughput, NETDEV unregister under cfg80211, or FIPS daemon protocol behavior.

@@ -1,0 +1,56 @@
+Subject: wifi7: drain module-owned RCU callbacks after the last producer stops
+
+--- a/mt_wifi/include/os/mt_linux.h
++++ b/mt_wifi/include/os/mt_linux.h
+@@ -58,6 +58,7 @@
+ unsigned long mt_kallsyms_lookup_name(const char *name);
+ void mt_call_rcu(struct rcu_head *head, rcu_callback_t func);
+ void mt_synchronize_rcu(void);
++void mt_rcu_barrier(void);
+ ktime_t mt_ktime_get(void);
+ ktime_t mt_ktime_get_with_offset(enum tk_offsets offs);
+ u64 mt_ktime_get_boottime_ns(void);
+@@ -118,6 +119,7 @@
+ #define mt_rcu_read_unlock() rcu_read_unlock()
+ #define mt_call_rcu(head, func) call_rcu(head, func)
+ #define mt_synchronize_rcu() synchronize_rcu()
++#define mt_rcu_barrier() rcu_barrier()
+ #define mt_ktime_get() ktime_get()
+ #define mt_ktime_get_with_offset(offs) ktime_get_with_offset(offs)
+ #define mt_ktime_get_boottime_ns() ktime_get_boottime_ns()
+--- a/mt_wifi/include/os/rt_none.h
++++ b/mt_wifi/include/os/rt_none.h
+@@ -1405,6 +1405,7 @@
+ int find_last_bit(unsigned long *bitmap, int size);
+ void *kzalloc(size_t size, int flags);
+ void mt_synchronize_rcu(void);
++void mt_rcu_barrier(void);
+ 
+ /*******************************************************************************
+  * Device Register I/O Access related definitions and data structures.
+--- a/mt_wifi/os/linux/mt_linux.c
++++ b/mt_wifi/os/linux/mt_linux.c
+@@ -88,6 +88,12 @@
+ }
+ EXPORT_SYMBOL(mt_synchronize_rcu);
+ 
++void mt_rcu_barrier(void)
++{
++	rcu_barrier();
++}
++EXPORT_SYMBOL(mt_rcu_barrier);
++
+ /*
+  * mt_ktime_get, mt_ktime_get_with_offset, mt_ktime_get_boottime_ns,
+  * and mt_ktime_get_real_ts64 are provided by kmod-mt_wifi_cmn to avoid
+--- a/mt_wifi/os/linux/rt_linux.c
++++ b/mt_wifi/os/linux/rt_linux.c
+@@ -4151,4 +4151,7 @@
+ 	physical_device_exit();
+ 
+ 	rt_profile_deinit();
+-}
++
++	/* All callback producers are stopped. Their code belongs to mt_wifi. */
++	mt_rcu_barrier();
++}
