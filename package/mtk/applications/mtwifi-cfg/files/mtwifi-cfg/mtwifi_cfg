@@ -202,12 +202,36 @@ function vif_count(cfg)
     return vif_num, ap_num, apcli_num
 end
 
+local function ordered_vifs(cfg)
+    local interfaces = cfg.interfaces or {}
+    local keys = {}
+    for key in pairs(interfaces) do
+        keys[#keys + 1] = key
+    end
+    -- netifd uses zero-based keys in 24.10 and padded, one-based keys in 25.12.
+    table.sort(keys, function(a, b)
+        local na, nb = tonumber(a), tonumber(b)
+        if na and nb then
+            if na ~= nb then return na < nb end
+        elseif na then
+            return true
+        elseif nb then
+            return false
+        end
+        return tostring(a) < tostring(b)
+    end)
+
+    local vifs = {}
+    for _, key in ipairs(keys) do
+        vifs[#vifs + 1] = interfaces[key]
+    end
+    return vifs
+end
+
 function mtwifi_cfg_foreach_vif(cfg, mode, func)
     if cfg == nil or func == nil then return end
 
-    local vif_num,_,_ = vif_count(cfg)
-    for idx=0,vif_num-1 do
-        local v = cfg.interfaces[string.format("%d", idx)]
+    for _, v in ipairs(ordered_vifs(cfg)) do
         if v.config.mode and v.config.mode == mode then
             func(v)
         end
@@ -837,8 +861,7 @@ function mtwifi_cfg_setup(argv)
 
     -- setup vif cfgs
     local apidx = 1
-    for idx = 0,vif_num-1 do
-        v = cfg.interfaces[string.format("%d", idx)]
+    for _, v in ipairs(ordered_vifs(cfg)) do
         if v.config.mode == "ap" then
             set_idx_dat(dats, apidx, "SSID", v.config.ssid)
             set_idx_dat(dats, apidx, "WPAPSK", v.config.key or "")
