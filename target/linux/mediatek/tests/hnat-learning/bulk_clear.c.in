@@ -1,0 +1,65 @@
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+
+typedef uint32_t u32;
+typedef uint64_t u64;
+struct slot { void *owner; u64 generation; };
+struct hnat_account_ppe { bool clearing; int lock; struct slot slots[4]; };
+struct account { u32 ppe_num, slot_count; struct hnat_account_ppe ppe[3]; };
+struct foe_entry { struct { int state; } bfib1; };
+struct mtk_hnat {
+	u32 ppe_num, foe_etry_num;
+	struct account *account;
+	struct foe_entry *foe_table_cpu[3];
+};
+#define MAX_PPE_NUM 3
+#define CFG_PPE_NUM 3
+#define BIND 2
+#define min(a, b) ((a) < (b) ? (a) : (b))
+static unsigned int clears, sweeps, loss;
+static void spin_lock_bh(int *lock) { assert(!*lock); *lock = 1; }
+static void spin_unlock_bh(int *lock) { assert(*lock); *lock = 0; }
+static bool hnat_account_enabled(struct mtk_hnat *h) { return h && h->account; }
+static bool account_valid(struct mtk_hnat *h, u32 ppe, u32 slot)
+{
+	return hnat_account_enabled(h) && ppe < h->ppe_num && slot < h->foe_etry_num;
+}
+static void account_clear(struct mtk_hnat *h, u32 ppe, u32 slot,
+			  bool a, bool b, u64 c, bool d)
+{
+	(void)a; (void)b; (void)c; (void)d;
+	assert(h->account->ppe[ppe].clearing);
+	h->foe_table_cpu[ppe][slot].bfib1.state = 0;
+	h->account->ppe[ppe].slots[slot].generation++;
+	h->account->ppe[ppe].slots[slot].owner = NULL;
+	clears++; loss++;
+}
+static void hnat_flow_entry_clear(u32 ppe) { assert(ppe == 0); sweeps++; }
+
+@FUNCTION@
+
+int main(void)
+{
+	struct account account = { .ppe_num = 3, .slot_count = 4 };
+	struct foe_entry entries[3][4] = {};
+	struct mtk_hnat h = { .ppe_num = 3, .foe_etry_num = 4, .account = &account };
+	unsigned int i;
+
+	for (i = 0; i < 3; i++) h.foe_table_cpu[i] = entries[i];
+	for (i = 0; i < 4; i++) account.ppe[0].slots[i].generation = 5;
+	entries[0][1].bfib1.state = 1;
+	entries[0][2].bfib1.state = BIND;
+	account.ppe[0].slots[2].owner = &h;
+	account.ppe[0].slots[3].owner = &h; /* An UNBIND prefill owner. */
+	assert(hnat_account_clear_all_bindings(&h, 0));
+	for (i = 0; i < 4; i++) assert(account.ppe[0].slots[i].generation == 6);
+	assert(clears == 2 && loss == 2 && sweeps == 1 && !account.ppe[0].clearing);
+	account.ppe[0].clearing = true;
+	assert(hnat_account_clear_all_bindings(&h, 0));
+	assert(clears == 2 && sweeps == 1);
+	assert(!hnat_account_clear_all_bindings(&h, 3));
+	puts("PASS: actual bulk-clear fence advances every preparation epoch, retires bound/prefill owners, and adds no fresh-slot loss event");
+	return 0;
+}

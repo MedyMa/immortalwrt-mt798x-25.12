@@ -1,0 +1,223 @@
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef struct { bool held; } spinlock_t;
+struct hlist_node { struct hlist_node *next, **pprev; };
+struct hlist_head { struct hlist_node *first; };
+struct rcu_head { void (*callback)(struct rcu_head *); };
+struct nf_conn { unsigned int refs; };
+struct net_device { unsigned int refs; };
+struct foe_entry { u32 key; bool unbound; };
+struct hnat_flow_entry {
+	struct hlist_node list;
+	struct rcu_head rcu;
+	struct foe_entry data;
+	struct nf_conn *tunnel_ct;
+	struct net_device *tunnel_dev;
+	u16 ppe_index, hash;
+	u64 generation, sequence;
+	unsigned long last_update;
+	unsigned char tunnel_ctinfo;
+};
+struct mtk_hnat {
+	u32 foe_etry_num;
+	spinlock_t entry_lock, flow_entry_lock;
+	struct hlist_head *foe_flow[3];
+	struct foe_entry *foe_table_cpu[3];
+};
+enum ip_conntrack_info { ORIGINAL, REPLY };
+#define MAX_PPE_NUM 3
+#define CFG_PPE_NUM 3
+#define HZ 1000
+#define GFP_ATOMIC 0
+#define ERR_PTR(value) ((void *)(intptr_t)(value))
+#define IS_ERR(value) ((uintptr_t)(value) >= (uintptr_t)-4095)
+#define container_of(p, type, field) ((type *)((char *)(p) - offsetof(type, field)))
+#define time_after_eq(a, b) ((long)((a) - (b)) >= 0)
+#define INIT_HLIST_NODE(p) do { (p)->next = NULL; (p)->pprev = NULL; } while (0)
+#define hlist_entry_safe(p, type, member) ((p) ? container_of(p, type, member) : NULL)
+#define hlist_for_each_entry(pos, head, member) \
+	for ((pos) = hlist_entry_safe((head)->first, typeof(*(pos)), member); \
+	     (pos); (pos) = hlist_entry_safe((pos)->member.next, typeof(*(pos)), member))
+#define hlist_for_each_entry_safe(pos, next, head, member) \
+	for ((pos) = hlist_entry_safe((head)->first, typeof(*(pos)), member); \
+	     (pos) && (((next) = (pos)->member.next), 1); \
+	     (pos) = hlist_entry_safe(next, typeof(*(pos)), member))
+
+static struct mtk_hnat priv, *hnat_priv = &priv;
+static struct hlist_head buckets[3][2];
+static struct foe_entry table[3][8];
+static unsigned long jiffies = 100;
+static u64 hnat_flow_entry_sequence, generation = 7;
+static struct rcu_head *retirements[128];
+static unsigned int retire_count, allocations, outstanding;
+static bool fail_alloc, paused;
+static void spin_lock_bh(spinlock_t *lock) { assert(!lock->held); lock->held = true; }
+static void spin_unlock_bh(spinlock_t *lock) { assert(lock->held); lock->held = false; }
+#define lockdep_assert_held(lock) assert((lock)->held)
+static u64 atomic64_inc_return(u64 *value) { return ++*value; }
+static void *kzalloc(size_t size, int flags)
+{
+	void *result;
+
+	(void)flags;
+	assert(!priv.entry_lock.held);
+	allocations++;
+	if (fail_alloc) return NULL;
+	result = calloc(1, size);
+	assert(result);
+	outstanding++;
+	return result;
+}
+static void kfree(void *ptr)
+{
+	if (ptr) { assert(outstanding); outstanding--; free(ptr); }
+}
+static void dev_hold(struct net_device *dev) { dev->refs++; }
+static void dev_put(struct net_device *dev) { assert(dev->refs); dev->refs--; }
+static void nf_ct_put(struct nf_conn *ct) { assert(ct->refs); ct->refs--; }
+/* Match the kernel API spelling used in the extracted store function. */
+#define ct_general refs
+#define nf_conntrack_get(p) do { \
+	unsigned int *reference = (unsigned int *)(p); (*reference)++; \
+} while (0)
+static void call_rcu(struct rcu_head *rcu, void (*callback)(struct rcu_head *))
+{
+	assert(retire_count < 128);
+	rcu->callback = callback;
+	retirements[retire_count++] = rcu;
+}
+static void flush_rcu(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < retire_count; i++) retirements[i]->callback(retirements[i]);
+	retire_count = 0;
+}
+static void hlist_add_head(struct hlist_node *node, struct hlist_head *head)
+{
+	node->next = head->first;
+	if (node->next) node->next->pprev = &node->next;
+	head->first = node;
+	node->pprev = &head->first;
+}
+static void hlist_del_init(struct hlist_node *node)
+{
+	if (!node->pprev) return;
+	*node->pprev = node->next;
+	if (node->next) node->next->pprev = node->pprev;
+	INIT_HLIST_NODE(node);
+}
+static bool hnat_account_enabled(struct mtk_hnat *h) { (void)h; return true; }
+static bool hnat_account_generation_snapshot(struct mtk_hnat *h, u32 ppe, u32 slot, u64 *value)
+{
+	(void)h; (void)ppe; (void)slot;
+	*value = generation;
+	return !paused;
+}
+static bool hnat_flow_entry_match(const struct foe_entry *a, const struct foe_entry *b)
+{
+	return a->key == b->key;
+}
+static bool hnat_flow_entry_unbind_match(const struct foe_entry *a, const struct foe_entry *b)
+{
+	return b->unbound && a->key == b->key;
+}
+
+@FUNCTIONS@
+
+static bool store(struct foe_entry *entry, u64 epoch, struct net_device *dev,
+		  struct nf_conn *ct, struct hnat_flow_entry **spare)
+{
+	bool result;
+
+	spin_lock_bh(&priv.entry_lock);
+	result = hnat_flow_entry_store(entry, 0, 1, epoch, dev, ct, ORIGINAL, spare);
+	spin_unlock_bh(&priv.entry_lock);
+	return result;
+}
+
+int main(void)
+{
+	struct foe_entry key = { 11, true };
+	struct hnat_flow_entry *spare, *flow, *locked = NULL;
+	struct net_device a = {}, b = {};
+	struct nf_conn ct = {};
+	unsigned int before, i;
+	u64 seq;
+
+	priv.foe_etry_num = 8;
+	for (i = 0; i < 3; i++) {
+		priv.foe_flow[i] = buckets[i];
+		priv.foe_table_cpu[i] = table[i];
+	}
+	table[0][1] = key;
+	assert(IS_ERR(hnat_flow_entry_reserve(&key, 3, 1, NULL, &ct)));
+	assert(IS_ERR(hnat_flow_entry_reserve(&key, 0, 8, NULL, &ct)));
+	spare = hnat_flow_entry_reserve(&key, 0, 1, NULL, &ct);
+	assert(spare && store(&key, generation, NULL, &ct, &spare) && !spare);
+	flow = hnat_flow_entry_search(&key, 0, 1, false);
+	assert(flow && !flow->tunnel_ct && !flow->tunnel_dev);
+	before = allocations;
+	seq = flow->sequence;
+	spare = hnat_flow_entry_reserve(&key, 0, 1, NULL, &ct);
+	assert(!spare && allocations == before);
+	assert(store(&key, generation, NULL, &ct, &spare));
+	assert(flow->sequence != seq && retire_count == 0);
+	spin_lock_bh(&priv.entry_lock);
+	assert(!hnat_flow_entry_lock_current(&key, 0, 1, generation, seq, &locked));
+	assert(!priv.flow_entry_lock.held);
+	assert(!hnat_flow_entry_lock_current(&key, 0, 1, generation + 1, flow->sequence, &locked));
+	assert(hnat_flow_entry_lock_current(&key, 0, 1, generation, flow->sequence, &locked));
+	assert(locked == flow && priv.flow_entry_lock.held);
+	spin_unlock_bh(&priv.flow_entry_lock);
+	spin_unlock_bh(&priv.entry_lock);
+	/* A reuse hint invalidated by teardown cannot allocate inside publication. */
+	hnat_flow_entry_delete(flow);
+	assert(!store(&key, generation, NULL, &ct, &spare));
+	flush_rcu();
+	assert(!outstanding);
+	fail_alloc = true;
+	spare = hnat_flow_entry_reserve(&key, 0, 1, NULL, &ct);
+	assert(IS_ERR(spare));
+	fail_alloc = false;
+	spare = hnat_flow_entry_reserve(&key, 0, 1, &a, &ct);
+	assert(!store(&key, generation + 1, &a, &ct, &spare) && spare);
+	assert(!a.refs && !ct.refs);
+	paused = true;
+	assert(!store(&key, generation, &a, &ct, &spare));
+	paused = false;
+	table[0][1].unbound = false;
+	assert(!store(&key, generation, &a, &ct, &spare));
+	table[0][1].unbound = true;
+	assert(store(&key, generation, &a, &ct, &spare) && !spare);
+	assert(a.refs == 1 && ct.refs == 1);
+	spare = hnat_flow_entry_reserve(&key, 0, 1, &b, &ct);
+	assert(spare && store(&key, generation, &b, &ct, &spare) && !spare);
+	assert(a.refs == 1 && b.refs == 1 && ct.refs == 2 && retire_count == 1);
+	flush_rcu();
+	assert(a.refs == 0 && b.refs == 1 && ct.refs == 1);
+	flow = hnat_flow_entry_search(&key, 0, 1, false);
+	seq = flow->sequence;
+	hnat_flow_entry_sequence = UINT64_MAX;
+	assert(store(&key, generation, &b, &ct, &spare));
+	assert(flow->sequence != 0 && flow->sequence != seq);
+	jiffies += 3 * HZ;
+	spin_lock_bh(&priv.entry_lock);
+	assert(!hnat_flow_entry_lock_current(&key, 0, 1, generation, flow->sequence, &locked));
+	spin_unlock_bh(&priv.entry_lock);
+	assert(!hnat_flow_entry_search(&key, 0, 1, false));
+	flush_rcu();
+	assert(!a.refs && !b.refs && !ct.refs && !outstanding);
+	puts("PASS: actual shadow reuse, allocation failure, retirement race, generation/sequence rejection, publication state, RCU device/CT lifetime");
+	return 0;
+}

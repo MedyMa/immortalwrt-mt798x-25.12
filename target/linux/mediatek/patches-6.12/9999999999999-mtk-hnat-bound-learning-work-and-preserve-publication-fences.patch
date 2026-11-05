@@ -1,0 +1,761 @@
+Subject: mediatek: bound HNAT learning work and retain publication fences
+
+Keep packet preparation outside the global entry lock, while rechecking the
+slot generation and complete live key before publication. Reuse matching
+shadows without allocation and fence unowned slots during a bulk clear.
+Filter detailed diagnostic work and report actual sampling gaps without
+adding a second hardware counter reader.
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_account.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_account.c
+@@ -47,7 +47,7 @@
+ module_param(account_poll_interval_ms, uint, 0444);
+ module_param(account_poll_budget, uint, 0444);
+ MODULE_PARM_DESC(account_poll_interval_ms, "MIB polling interval, 0=off or 100..60000 ms");
+-MODULE_PARM_DESC(account_poll_budget, "Maximum slots examined per poll across all PPEs, 1..64");
++MODULE_PARM_DESC(account_poll_budget, "Maximum slots examined per poll across all PPEs, 1..256; also limited to 2 ms");
+ #define HNAT_ACCOUNT_POLL_TIME_NS 2000000ULL
+ 
+ static unsigned int account_net_id;
+@@ -87,6 +87,7 @@
+ 	u64 retire_rule_bytes, retire_rule_packets;
+ 	u64 ct_written_bytes, ct_written_packets;
+ 	u64 poll_scanned, poll_reads, poll_errors;
++	u64 poll_last_sample_ms, poll_observed_gap_ms, poll_max_gap_ms;
+ 	u64 final_reads, final_errors;
+ };
+ struct hnat_account_ctx {
+@@ -902,6 +903,11 @@
+ 		spin_lock_bh(&p->lock);
+ 		needs_clear = h->foe_table_cpu[ppe][slot].bfib1.state == BIND ||
+ 			      p->slots[slot].owner;
++		/* Also fence a parser that snapshotted an unowned UNBIND slot
++		 * before this bulk clear. No byte-loss event is inferred here.
++		 */
++		if (!needs_clear)
++			p->slots[slot].generation++;
+ 		spin_unlock_bh(&p->lock);
+ 
+ 		/* Publishers are fenced. Another retirement may advance generation
+@@ -1130,8 +1136,18 @@
+ 				p->unknown_loss++;
+ 				retire_locked(p, s);
+ 			} else {
++				u64 now = ktime_to_ms(ktime_get());
++				u64 sampled = s->owner->diag_sampled_ms;
++				u64 gap = sampled && now >= sampled ? now - sampled :
++					jiffies_to_msecs(jiffies - s->owner->seen);
++
+ 				err = drain_locked(h, ppe, slot, &d);
+ 				if (!err) {
++					if (s->owner && !s->owner->prefill) {
++						p->poll_last_sample_ms = s->owner->diag_sampled_ms;
++						p->poll_observed_gap_ms = gap;
++						p->poll_max_gap_ms = max(p->poll_max_gap_ms, gap);
++					}
+ 					p->poll_reads++;
+ 				} else {
+ 					p->poll_errors++;
+@@ -1191,7 +1207,7 @@
+ #endif
+ 	if ((account_poll_interval_ms &&
+ 	     (account_poll_interval_ms < 100 || account_poll_interval_ms > 60000)) ||
+-	    !account_poll_budget || account_poll_budget > 64)
++	    !account_poll_budget || account_poll_budget > 256)
+ 		return -EINVAL;
+ 	if (!h || !h->data || !h->data->per_flow_accounting ||
+ 	    !h->ppe_num || h->ppe_num > MAX_PPE_NUM || h->ppe_num > CFG_PPE_NUM || !h->foe_etry_num)
+@@ -1283,7 +1299,8 @@
+ int hnat_account_show(struct seq_file *m, void *unused)
+ {
+ 	struct mtk_hnat *h = m->private;
+-	u32 ppe;
++	u32 ppe, total_active = 0;
++	u64 nominal_round_ms;
+ 	seq_printf(m, "experimental_enabled=%u\n", hnat_account_enabled(h));
+ 	if (!hnat_account_enabled(h))
+ 		return 0;
+@@ -1301,6 +1318,7 @@
+ 		snap = *p;
+ 		active = bitmap_weight(p->poll_active, h->account->slot_count);
+ 		spin_unlock_bh(&p->lock);
++		total_active += active;
+ 		seq_printf(m, "ppe=%u paused=%u quarantine=%u reads=%llu read_error=%llu unknown_loss_events=%llu untracked=%llu mismatch=%llu retired=%llu no_acct=%llu discarded_bytes=%llu discarded_packets=%llu retire_rule_unpublished_bytes=%llu retire_rule_unpublished_packets=%llu\n",
+ 			   ppe, snap.paused, snap.quarantined, snap.reads,
+ 			   snap.read_error, snap.unknown_loss, snap.untracked,
+@@ -1315,6 +1333,15 @@
+ 			   ppe, snap.final_reads, snap.final_errors);
+ 		seq_printf(m, "ppe=%u poll_active_owned_slots=%u poll_selection=owned_bitmap\n",
+ 			   ppe, active);
+-	}
++		seq_printf(m, "ppe=%u poll_last_sample_ms=%llu poll_observed_gap_ms=%llu poll_max_gap_ms=%llu\n",
++			   ppe, snap.poll_last_sample_ms, snap.poll_observed_gap_ms,
++			   snap.poll_max_gap_ms);
++	}
++	nominal_round_ms = (u64)DIV_ROUND_UP(total_active, account_poll_budget) *
++		account_poll_interval_ms;
++	seq_printf(m, "poll_active_owned_slots_total=%u poll_nominal_round_ms=%llu poll_enabled=%u\n",
++		   total_active, nominal_round_ms,
++		   !!account_poll_interval_ms && !!READ_ONCE(h->nf_stat_en));
++	seq_puts(m, "poll_freshness=nominal_round_is_not_a_deadline; time_budget_contention_and_keepalive_change_sample_gaps\n");
+ 	return 0;
+ }
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_diag.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_diag.c
+@@ -3,6 +3,9 @@
+ #include <linux/module.h>
+ #include <linux/seq_file.h>
+ #include <linux/ktime.h>
++#include <linux/bitmap.h>
++#include <linux/hash.h>
++#include <linux/jiffies.h>
+ #include <linux/ip.h>
+ #include <linux/ipv6.h>
+ #include <linux/udp.h>
+@@ -33,6 +36,58 @@
+ static DEFINE_SPINLOCK(diag_lock);
+ static struct hnat_diag_row diag_rows[HNAT_DIAG_ENTRIES];
+ static bool diag_has_rows;
++static unsigned long diag_active_until;
++#define HNAT_DIAG_HINT_BITS 256
++static DECLARE_BITMAP(diag_hint, HNAT_DIAG_HINT_BITS);
++static bool flow_diagnostics = true;
++module_param(flow_diagnostics, bool, 0644);
++MODULE_PARM_DESC(flow_diagnostics, "Collect detailed tunnel decision history (default on)");
++
++static bool diag_rows_live(void)
++{
++	return READ_ONCE(diag_has_rows) &&
++		time_before(jiffies, READ_ONCE(diag_active_until));
++}
++
++static unsigned int diag_hint_index(const struct hnat_diag_key *key)
++{
++	u32 value = key->ct_id ^ key->netns ^ ((u32)key->direction << 31);
++
++	if (!key->tracked)
++		value ^= (__force u32)key->tuple.src.u3.ip ^
++			 (__force u32)key->tuple.dst.u3.ip;
++	return hash_32(value, 8);
++}
++
++/* A hint is never an identity/ownership decision. False positives are
++ * resolved under diag_lock with the complete key. Rebuild native words
++ * without a transient zero bitmap, so retained rows keep their hints.
++ */
++static void diag_hint_rebuild(void)
++{
++	DECLARE_BITMAP(next, HNAT_DIAG_HINT_BITS) = {};
++	unsigned int i;
++
++	for (i = 0; i < HNAT_DIAG_ENTRIES; i++)
++		if (diag_rows[i].used)
++			__set_bit(diag_hint_index(&diag_rows[i].key), next);
++	for (i = 0; i < ARRAY_SIZE(diag_hint); i++)
++		WRITE_ONCE(diag_hint[i], next[i]);
++}
++
++static bool diag_hint_matches(const struct hnat_diag_key *key)
++{
++	unsigned int bit = diag_hint_index(key);
++
++	return READ_ONCE(diag_hint[BIT_WORD(bit)]) & BIT_MASK(bit);
++}
++
++static void diag_touch(struct hnat_diag_row *row)
++{
++	row->seen_ms = ktime_to_ms(ktime_get());
++	WRITE_ONCE(diag_active_until,
++		   jiffies + msecs_to_jiffies(HNAT_DIAG_MAX_AGE_MS));
++}
+ static const char *const reasons[] = {
+ 	"eligible", "parameters", "sync_pending", "npu_not_ready", "security_policy",
+ 	"invalid_metadata", "unsupported_protocol", "parameter_error", "no_tunnel",
+@@ -115,6 +170,7 @@
+ 	oldest->tunnel = oldest->classifier = -1;
+ 	oldest->candidate_ppe = oldest->candidate_slot = -1;
+ 	oldest->used = true;
++	diag_hint_rebuild();
+ 	WRITE_ONCE(diag_has_rows, true);
+ 	return oldest;
+ }
+@@ -169,7 +225,8 @@
+ 	bool candidate, metadata;
+ 	int ppe = -1, slot = -1;
+ 
+-	if (!skb || (unsigned int)reason >= HNAT_DIAG_REASON_MAX)
++	if (!READ_ONCE(flow_diagnostics) || !skb ||
++	    (unsigned int)reason >= HNAT_DIAG_REASON_MAX)
+ 		return;
+ 	metadata = IS_SPACE_AVAILABLE_HEAD(skb) && is_magic_tag_valid(skb);
+ 	if (metadata) {
+@@ -186,15 +243,15 @@
+ 		}
+ 	}
+ 	candidate = path || tunnel >= 0 || tunnel_candidate(skb);
+-	if (!candidate && !READ_ONCE(diag_has_rows))
+-		return;
+-	if (!diag_key(skb, &key))
++	if (!candidate && !diag_rows_live())
++		return;
++	if (!diag_key(skb, &key) || (!candidate && !diag_hint_matches(&key)))
+ 		return;
+ 	spin_lock_irqsave(&diag_lock, flags);
+ 	r = diag_row(&key, candidate);
+ 	if (r) {
+ 		r->events++;
+-		r->seen_ms = ktime_to_ms(ktime_get());
++		diag_touch(r);
+ 		r->reason = reason;
+ 		r->error = error;
+ 		/* Metadata is a candidate location only; it never validates an owner. */
+@@ -231,15 +288,19 @@
+ 	unsigned long flags;
+ 	bool candidate;
+ 
+-	if (!ct || nf_ct_is_template(ct))
++	if (!READ_ONCE(flow_diagnostics) || !ct || nf_ct_is_template(ct))
++		return;
++	candidate = hnat_diag_npu_entry(entry);
++	if (!candidate && !diag_rows_live())
+ 		return;
+ 	diag_ct_key(&key, ct, info);
+-	candidate = hnat_diag_npu_entry(entry);
++	if (!candidate && !diag_hint_matches(&key))
++		return;
+ 	spin_lock_irqsave(&diag_lock, flags);
+ 	r = diag_row(&key, candidate);
+ 	if (r) {
+ 		r->events++;
+-		r->seen_ms = ktime_to_ms(ktime_get());
++		diag_touch(r);
+ 		r->ppe = ppe;
+ 		r->slot = slot;
+ 		r->foe_generation = generation;
+@@ -271,7 +332,8 @@
+ 	struct hnat_diag_row *row;
+ 	unsigned long flags;
+ 
+-	if (!ct || nf_ct_is_template(ct) || tunnel >= 32 || !generation)
++	if (!READ_ONCE(flow_diagnostics) || !ct || nf_ct_is_template(ct) ||
++	    tunnel >= 32 || !generation)
+ 		return;
+ 	diag_ct_key(&key, ct, info);
+ 	spin_lock_irqsave(&diag_lock, flags);
+@@ -287,7 +349,7 @@
+ 	row->tunnel = tunnel;
+ 	row->tunnel_generation = generation;
+ 	row->paths |= path & 3;
+-	row->seen_ms = ktime_to_ms(ktime_get());
++	diag_touch(row);
+ 	spin_unlock_irqrestore(&diag_lock, flags);
+ }
+ 
+@@ -299,13 +361,14 @@
+ 	struct hnat_diag_row *row;
+ 	unsigned long flags;
+ 
+-	if (!ct || nf_ct_is_template(ct) || (unsigned int)reason >= HNAT_DIAG_REASON_MAX)
++	if (!READ_ONCE(flow_diagnostics) || !ct || nf_ct_is_template(ct) ||
++	    (unsigned int)reason >= HNAT_DIAG_REASON_MAX)
+ 		return;
+ 	diag_ct_key(&key, ct, info);
+ 	spin_lock_irqsave(&diag_lock, flags);
+ 	row = diag_row(&key, true);
+ 	row->events++;
+-	row->seen_ms = ktime_to_ms(ktime_get());
++	diag_touch(row);
+ 	row->reason = reason;
+ 	row->error = error;
+ 	row->paths |= path & 3;
+@@ -324,12 +387,15 @@
+ 	int i;
+ 
+ 	seq_printf(s, "{\"schema\":1,\"source\":\"hnat_owner_ledger\",\"max_entries\":32,"
+-		   "\"sampled_ms\":\"%llu\",\"max_age_ms\":60000,\"entries\":[", now);
++		   "\"sampled_ms\":\"%llu\",\"max_age_ms\":60000,"
++		   "\"collection_enabled\":%s,\"entries\":[", now,
++		   READ_ONCE(flow_diagnostics) ? "true" : "false");
+ 	for (i = 0; i < HNAT_DIAG_ENTRIES; i++) {
+ 		spin_lock_irqsave(&diag_lock, flags);
+ 		row = diag_rows[i];
+ 		spin_unlock_irqrestore(&diag_lock, flags);
+-		if (!row.used || now < row.seen_ms || now - row.seen_ms > HNAT_DIAG_MAX_AGE_MS)
++		if (!READ_ONCE(flow_diagnostics) || !row.used || now < row.seen_ms ||
++		    now - row.seen_ms > HNAT_DIAG_MAX_AGE_MS)
+ 			continue;
+ 		memset(&sample, 0, sizeof(sample));
+ 		/* Drop the diagnostic lock before taking the owner-ledger lock. */
+@@ -388,6 +454,8 @@
+ 
+ 	spin_lock_irqsave(&diag_lock, flags);
+ 	memset(diag_rows, 0, sizeof(diag_rows));
++	bitmap_zero(diag_hint, HNAT_DIAG_HINT_BITS);
++	WRITE_ONCE(diag_active_until, 0);
+ 	WRITE_ONCE(diag_has_rows, false);
+ 	spin_unlock_irqrestore(&diag_lock, flags);
+ 	diag_file = debugfs_create_file("flow_diagnostics", 0400, root, NULL, &hnat_diag_fops);
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -2009,90 +2009,115 @@
+ 			 identity_mask);
+ }
+ 
++/* Allocation is speculative, outside entry_lock. A concurrent retirement
++ * may invalidate this hint; the final store then falls back rather than
++ * allocating with the global publication lock held.
++ */
++static struct hnat_flow_entry *
++hnat_flow_entry_reserve(const struct foe_entry *entry, u32 ppe, u32 slot,
++			struct net_device *dev, struct nf_conn *ct)
++{
++	struct hnat_flow_entry *flow;
++	bool reuse;
++
++	if (ppe >= MAX_PPE_NUM || ppe >= CFG_PPE_NUM ||
++	    slot >= hnat_priv->foe_etry_num || !hnat_priv->foe_flow[ppe])
++		return ERR_PTR(-EINVAL);
++	spin_lock_bh(&hnat_priv->flow_entry_lock);
++	flow = hnat_flow_entry_search(entry, ppe, slot, false);
++	reuse = flow && flow->tunnel_dev == dev &&
++		flow->tunnel_ct == (dev ? ct : NULL);
++	spin_unlock_bh(&hnat_priv->flow_entry_lock);
++	if (reuse)
++		return NULL;
++	flow = kzalloc(sizeof(*flow), GFP_ATOMIC);
++	return flow ? flow : ERR_PTR(-ENOMEM);
++}
++
++/* Caller holds entry_lock; spare has no references until consumed here. */
+ static bool hnat_flow_entry_store(const struct foe_entry *entry, u32 ppe,
+ 				  u32 slot, u64 generation, struct net_device *tunnel_dev,
+-				  struct nf_conn *ct, enum ip_conntrack_info ctinfo)
++				  struct nf_conn *ct, enum ip_conntrack_info ctinfo,
++				  struct hnat_flow_entry **spare)
+ {
+ 	struct hnat_flow_entry *flow, *new_flow, *found = NULL;
+ 	struct hlist_head *head;
+ 	struct hlist_node *next;
+ 	struct foe_entry *live;
+ 	u64 seq, live_generation;
+-
++	bool same_refs;
++
++	lockdep_assert_held(&hnat_priv->entry_lock);
+ 	if (ppe >= MAX_PPE_NUM || ppe >= CFG_PPE_NUM ||
+ 	    slot >= hnat_priv->foe_etry_num || !hnat_priv->foe_flow[ppe])
+ 		return false;
+-
+-	new_flow = kzalloc(sizeof(*new_flow), GFP_ATOMIC);
+-	if (!new_flow)
+-		return false;
+-	INIT_HLIST_NODE(&new_flow->list);
+-	if (tunnel_dev) {
+-		dev_hold(tunnel_dev);
+-		new_flow->tunnel_dev = tunnel_dev;
+-		if (ct) {
+-			nf_conntrack_get(&ct->ct_general);
+-			new_flow->tunnel_ct = ct;
+-			new_flow->tunnel_ctinfo = ctinfo;
+-		}
+-	}
+-	memcpy(&new_flow->data, entry, sizeof(*entry));
++	live = &hnat_priv->foe_table_cpu[ppe][slot];
++	head = &hnat_priv->foe_flow[ppe][slot / 4];
++	spin_lock_bh(&hnat_priv->flow_entry_lock);
++	if ((hnat_account_enabled(hnat_priv) &&
++	     (!hnat_account_generation_snapshot(hnat_priv, ppe, slot,
++					       &live_generation) ||
++	      live_generation != generation)) ||
++	    !hnat_flow_entry_unbind_match(entry, live))
++		goto reject;
++
++	/* Resolve the current identity before consuming the allocation hint. */
++	hlist_for_each_entry(flow, head, list) {
++		if (flow->ppe_index == ppe && flow->hash == slot &&
++		    hnat_flow_entry_match(&flow->data, entry)) {
++			found = flow;
++			break;
++		}
++	}
++	same_refs = found && found->tunnel_dev == tunnel_dev &&
++		found->tunnel_ct == (tunnel_dev ? ct : NULL);
++	if (!same_refs && !*spare)
++		goto reject;
++
++	hlist_for_each_entry_safe(flow, next, head, list) {
++		if (flow != found && flow->ppe_index == ppe && flow->hash == slot)
++			hnat_flow_entry_delete(flow);
++	}
++	seq = atomic64_inc_return(&hnat_flow_entry_sequence);
++	if (!seq)
++		seq = atomic64_inc_return(&hnat_flow_entry_sequence);
++	if (same_refs) {
++		/* No reference replacement and no allocation/RCU callback. Readers
++		 * still validate the fresh sequence before descriptor publication.
++		 */
++		new_flow = found;
++	} else {
++		new_flow = *spare;
++		*spare = NULL;
++		INIT_HLIST_NODE(&new_flow->list);
++		if (tunnel_dev) {
++			dev_hold(tunnel_dev);
++			new_flow->tunnel_dev = tunnel_dev;
++			if (ct) {
++				nf_conntrack_get(&ct->ct_general);
++				new_flow->tunnel_ct = ct;
++			}
++		}
++		if (found) {
++			/* Replace the full record. Its old CT/device references remain
++			 * pinned until the original RCU retirement callback completes.
++			 */
++			hnat_flow_entry_delete(found);
++		}
++		hlist_add_head(&new_flow->list, head);
++	}
++	new_flow->data = *entry;
+ 	new_flow->ppe_index = ppe;
+ 	new_flow->hash = slot;
+ 	new_flow->generation = generation;
+ 	new_flow->last_update = jiffies;
+-	seq = atomic64_inc_return(&hnat_flow_entry_sequence);
+-	if (!seq)
+-		seq = atomic64_inc_return(&hnat_flow_entry_sequence);
+ 	new_flow->sequence = seq;
+-
+-	live = &hnat_priv->foe_table_cpu[ppe][slot];
+-	head = &hnat_priv->foe_flow[ppe][slot / 4];
+-	spin_lock_bh(&hnat_priv->flow_entry_lock);
+-	/* Serialize the final epoch check with bulk shadow retirement. */
+-	if ((hnat_account_enabled(hnat_priv) &&
+-	     (!hnat_account_generation_snapshot(hnat_priv, ppe, slot,
+-					       &live_generation) ||
+-	      live_generation != generation)) ||
+-	    !hnat_flow_entry_unbind_match(entry, live)) {
+-		spin_unlock_bh(&hnat_priv->flow_entry_lock);
+-		hnat_flow_entry_delete(new_flow);
+-		return false;
+-	}
+-
+-	/* A PPE slot has one current key. Retire any old identity for this
+-	 * slot before adding the new one, while preserving the bucket chain.
+-	 */
+-	hlist_for_each_entry_safe(flow, next, head, list) {
+-		if (flow->ppe_index != ppe || flow->hash != slot)
+-			continue;
+-		if (hnat_flow_entry_match(&flow->data, entry) && !found) {
+-			found = flow;
+-			continue;
+-		}
+-		hnat_flow_entry_delete(flow);
+-	}
+-	if (found) {
+-		memcpy(&found->data, entry, sizeof(*entry));
+-		found->generation = generation;
+-		found->last_update = jiffies;
+-		found->sequence = seq;
+-		{
+-			struct net_device *old_dev = found->tunnel_dev;
+-			struct nf_conn *old_ct = found->tunnel_ct;
+-
+-			found->tunnel_dev = new_flow->tunnel_dev;
+-			found->tunnel_ct = new_flow->tunnel_ct;
+-			found->tunnel_ctinfo = new_flow->tunnel_ctinfo;
+-			new_flow->tunnel_dev = old_dev;
+-			new_flow->tunnel_ct = old_ct;
+-		}
+-		hnat_flow_entry_delete(new_flow);
+-	} else {
+-		hlist_add_head(&new_flow->list, head);
+-	}
++	new_flow->tunnel_ctinfo = ctinfo;
+ 	spin_unlock_bh(&hnat_priv->flow_entry_lock);
+ 	return true;
++reject:
++	spin_unlock_bh(&hnat_priv->flow_entry_lock);
++	return false;
+ }
+ 
+ static void hnat_flow_sweep(struct net_device *dev)
+@@ -2355,6 +2380,110 @@
+ 	       sizeof(*dst) - offset);
+ }
+ 
++/* Packet parsing and shadow reservation are complete. This is the publication
++ * phase; all hardware/owner checks remain serialized with reset and teardown.
++ */
++static unsigned int hnat_publish_entry_locked(struct sk_buff *skb,
++		const struct net_device *dev, struct foe_entry *foe,
++		struct foe_entry *entry, const struct ethhdr *eth,
++		const struct net_device *vif,
++		struct nf_conn *ct, enum ip_conntrack_info ctinfo,
++		bool whnat, bool tunnel_prefill, bool empty_key,
++		struct hnat_flow_entry **spare)
++{
++	u64 account_generation = 0;
++	bool account_handled, accepted = false;
++
++	lockdep_assert_held(&hnat_priv->entry_lock);
++	if (!netif_running(dev) || (vif && !netif_running(vif)))
++		return hnat_diag_skip(skb, HNAT_DIAG_UNSUPPORTED_DEVICE);
++	if (!hnat_flow_entry_unbind_match(entry, foe))
++		return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
++
++	/* WHNAT keeps the complete prepared entry in software.  The hardware slot
++	 * remains UNBIND until TX confirms this skb's flow identity.
++	 */
++	/* WED RX -> GMAC binds here, without the WHNAT TX shadow confirmation.
++	 * For ordinary IPv4, also prove that the PPE key and post-NAT skb belong
++	 * to the same CT direction.  Encapsulation needs its own identity parser;
++	 * this check does not infer an inner tuple or change those existing paths.
++	 */
++	if ((empty_key || FROM_WED(skb)) && skb->protocol == htons(ETH_P_IP) &&
++	    !skb->encapsulation &&
++	    !hnat_flow_ipv4_ct_match(skb, entry, ct, ctinfo))
++		return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
++
++	/* NETSYSv3 replication is owned by the NPU MDB provider. Cache
++	 * validation and descriptor publication share entry_lock, so leave
++	 * and reset cannot race a fresh BIND. No MCU call runs in this path.
++	 */
++	if (!hnat_priv->data->mcast && is_multicast_ether_addr(eth->h_dest)) {
++		if (whnat || tunnel_prefill)
++			return hnat_diag_skip(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL);
++		lockdep_assert_held(&hnat_priv->entry_lock);
++		if (!hnat_npu_mcast_prepare(skb, dev, entry, skb_hnat_ppe(skb),
++					    skb_hnat_entry(skb))) {
++			entry->bfib1.ttl = 1;
++			entry->bfib1.state = BIND;
++			hnat_account_commit_vif(hnat_priv, skb_hnat_ppe(skb),
++					    skb_hnat_entry(skb), skb, entry,
++					    false, &accepted, vif);
++		}
++		return 0;
++	}
++
++	if (whnat || tunnel_prefill) {
++		if (!hnat_flow_entry_unbind_match(entry, foe) ||
++		    !hnat_flow_ipv4_ct_match(skb, entry, ct, ctinfo))
++			return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
++		account_handled = hnat_account_commit_vif(hnat_priv, skb_hnat_ppe(skb),
++						      skb_hnat_entry(skb), skb,
++						      entry, true, &accepted, vif);
++		if ((account_handled && !accepted) ||
++		    (!account_handled && hnat_priv->data->per_flow_accounting))
++			return hnat_diag_skip(skb, account_handled ? HNAT_DIAG_ACCOUNT_OWNER : HNAT_DIAG_ACCOUNT_UNAVAILABLE);
++		if (account_handled &&
++		    !hnat_account_generation_snapshot(hnat_priv,
++						     skb_hnat_ppe(skb),
++						     skb_hnat_entry(skb),
++						     &account_generation)) {
++			hnat_account_invalidate(hnat_priv, skb_hnat_ppe(skb),
++						skb_hnat_entry(skb));
++			return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
++		}
++		if (!hnat_flow_entry_store(entry, skb_hnat_ppe(skb),
++					   skb_hnat_entry(skb), account_generation,
++					   tunnel_prefill ? (struct net_device *)dev : NULL,
++					   ct, ctinfo, spare)) {
++			if (account_handled)
++				hnat_account_invalidate(hnat_priv, skb_hnat_ppe(skb),
++							skb_hnat_entry(skb));
++			return hnat_diag_skip(skb, HNAT_DIAG_REJECTED);
++		}
++		skb_hnat_filled(skb) = HNAT_INFO_FILLED;
++		return 0;
++	}
++
++	entry->bfib1.ttl = 1;
++	entry->bfib1.state = BIND;
++	account_handled = hnat_account_commit_vif(hnat_priv, skb_hnat_ppe(skb),
++						      skb_hnat_entry(skb), skb,
++						      entry, false, &accepted, vif);
++	if (!account_handled) {
++		hnat_diag_note(skb, HNAT_DIAG_ACCOUNT_UNAVAILABLE, 0, 0, -1, 0, -1);
++		if (!hnat_priv->data->per_flow_accounting &&
++		    hnat_flow_entry_unbind_match(entry, foe)) {
++			hnat_copy_foe_info(foe, entry);
++			wmb();
++			memcpy(&foe->bfib1, &entry->bfib1, sizeof(entry->bfib1));
++			dma_wmb();
++		}
++	} else if (!accepted) {
++		return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
++	}
++	return 0;
++}
++
+ static unsigned int skb_to_hnat_info(struct sk_buff *skb,
+ 				     const struct net_device *dev,
+ 				     struct foe_entry *foe,
+@@ -2362,7 +2491,9 @@
+ 				     const struct net_device *vif)
+ {
+ 	struct net_device *master_dev = (struct net_device *)dev;
+-	struct foe_entry entry = { 0 };
++	struct foe_entry entry = { 0 }, snapshot;
++	struct foe_entry *live = foe;
++	struct hnat_flow_entry *spare = NULL;
+ 	struct mtk_mac *mac;
+ 	int whnat = IS_WHNAT(dev);
+ 	bool tunnel_prefill = false;
+@@ -2379,15 +2510,34 @@
+ 	enum ip_conntrack_info ctinfo;
+ 	int gmac = NR_DISCARD;
+ 	int udp = 0;
+-	bool account_handled, accepted = false;
+-	bool empty_key = hnat_flow_entry_unbind_empty(foe);
+-	u64 account_generation = 0;
++	bool empty_key, accounted;
++	u64 parse_generation = 0, live_generation;
++	unsigned int result;
+ 	u32 qid = 0;
+ 	int port_id = 0;
+ 	int mape = 0;
+ 	u8  dscp = 0;
+ 
+ 
++	/* Snapshot under the established lock order, then parse without the
++	 * global publication lock. A changed software epoch must not publish
++	 * even if hardware has recycled the slot with the same tuple.
++	 */
++	spin_lock_bh(&hnat_priv->entry_lock);
++	accounted = hnat_account_enabled(hnat_priv);
++	if (accounted) {
++		if (!hnat_account_entry_snapshot(hnat_priv, skb_hnat_ppe(skb),
++					 skb_hnat_entry(skb), &snapshot,
++					 &parse_generation)) {
++			spin_unlock_bh(&hnat_priv->entry_lock);
++			return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_UNAVAILABLE);
++		}
++	} else {
++		snapshot = *live;
++	}
++	spin_unlock_bh(&hnat_priv->entry_lock);
++	foe = &snapshot;
++	empty_key = hnat_flow_entry_unbind_empty(foe);
+ 	ct = nf_ct_get(skb, &ctinfo);
+ 
+ 	if (ipv6_hdr(skb)->nexthdr == NEXTHDR_IPIP)
+@@ -3027,88 +3177,27 @@
+ 	}
+ #endif
+ 
+-	/* WHNAT keeps the complete prepared entry in software.  The hardware slot
+-	 * remains UNBIND until TX confirms this skb's flow identity.
+-	 */
+-	/* WED RX -> GMAC binds here, without the WHNAT TX shadow confirmation.
+-	 * For ordinary IPv4, also prove that the PPE key and post-NAT skb belong
+-	 * to the same CT direction.  Encapsulation needs its own identity parser;
+-	 * this check does not infer an inner tuple or change those existing paths.
+-	 */
+-	if ((empty_key || FROM_WED(skb)) && skb->protocol == htons(ETH_P_IP) &&
+-	    !skb->encapsulation &&
+-	    !hnat_flow_ipv4_ct_match(skb, &entry, ct, ctinfo))
+-		return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
+-
+-	/* NETSYSv3 replication is owned by the NPU MDB provider. Cache
+-	 * validation and descriptor publication share entry_lock, so leave
+-	 * and reset cannot race a fresh BIND. No MCU call runs in this path.
+-	 */
+-	if (!hnat_priv->data->mcast && is_multicast_ether_addr(eth->h_dest)) {
+-		if (whnat || tunnel_prefill)
+-			return hnat_diag_skip(skb, HNAT_DIAG_UNSUPPORTED_PROTOCOL);
+-		lockdep_assert_held(&hnat_priv->entry_lock);
+-		if (!hnat_npu_mcast_prepare(skb, dev, &entry, skb_hnat_ppe(skb),
+-					    skb_hnat_entry(skb))) {
+-			entry.bfib1.ttl = 1;
+-			entry.bfib1.state = BIND;
+-			hnat_account_commit_vif(hnat_priv, skb_hnat_ppe(skb),
+-					    skb_hnat_entry(skb), skb, &entry,
+-					    false, &accepted, vif);
+-		}
+-		return 0;
+-	}
+-
+-	if (whnat || tunnel_prefill) {
+-		if (!hnat_flow_entry_unbind_match(&entry, foe) ||
+-		    !hnat_flow_ipv4_ct_match(skb, &entry, ct, ctinfo))
+-			return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
+-		account_handled = hnat_account_commit_vif(hnat_priv, skb_hnat_ppe(skb),
+-						      skb_hnat_entry(skb), skb,
+-						      &entry, true, &accepted, vif);
+-		if ((account_handled && !accepted) ||
+-		    (!account_handled && hnat_priv->data->per_flow_accounting))
+-			return hnat_diag_skip(skb, account_handled ? HNAT_DIAG_ACCOUNT_OWNER : HNAT_DIAG_ACCOUNT_UNAVAILABLE);
+-		if (account_handled &&
+-		    !hnat_account_generation_snapshot(hnat_priv,
+-						     skb_hnat_ppe(skb),
+-						     skb_hnat_entry(skb),
+-						     &account_generation)) {
+-			hnat_account_invalidate(hnat_priv, skb_hnat_ppe(skb),
+-						skb_hnat_entry(skb));
+-			return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
+-		}
+-		if (!hnat_flow_entry_store(&entry, skb_hnat_ppe(skb),
+-					   skb_hnat_entry(skb), account_generation,
+-					   tunnel_prefill ? (struct net_device *)dev : NULL,
+-					   ct, ctinfo)) {
+-			if (account_handled)
+-				hnat_account_invalidate(hnat_priv, skb_hnat_ppe(skb),
+-							skb_hnat_entry(skb));
+-			return hnat_diag_skip(skb, HNAT_DIAG_REJECTED);
+-		}
+-		skb_hnat_filled(skb) = HNAT_INFO_FILLED;
+-		return 0;
+-	}
+-
+-	entry.bfib1.ttl = 1;
+-	entry.bfib1.state = BIND;
+-	account_handled = hnat_account_commit_vif(hnat_priv, skb_hnat_ppe(skb),
+-						      skb_hnat_entry(skb), skb,
+-						      &entry, false, &accepted, vif);
+-	if (!account_handled) {
+-		hnat_diag_note(skb, HNAT_DIAG_ACCOUNT_UNAVAILABLE, 0, 0, -1, 0, -1);
+-		if (!hnat_priv->data->per_flow_accounting &&
+-		    hnat_flow_entry_unbind_match(&entry, foe)) {
+-			hnat_copy_foe_info(foe, &entry);
+-			wmb();
+-			memcpy(&foe->bfib1, &entry.bfib1, sizeof(entry.bfib1));
+-			dma_wmb();
+-		}
+-	} else if (!accepted) {
+-		return hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
+-	}
+-	return 0;
++	if (whnat || tunnel_prefill)
++		spare = hnat_flow_entry_reserve(&entry, skb_hnat_ppe(skb),
++					       skb_hnat_entry(skb),
++					       tunnel_prefill ? (struct net_device *)dev : NULL, ct);
++	if (IS_ERR(spare))
++		return hnat_diag_skip(skb, HNAT_DIAG_NO_MEMORY);
++
++	spin_lock_bh(&hnat_priv->entry_lock);
++	if (accounted &&
++	    (!hnat_account_generation_snapshot(hnat_priv, skb_hnat_ppe(skb),
++					       skb_hnat_entry(skb), &live_generation) ||
++	     live_generation != parse_generation)) {
++		result = hnat_diag_skip(skb, HNAT_DIAG_ACCOUNT_OWNER);
++	} else {
++		result = hnat_publish_entry_locked(skb, dev, live, &entry, eth, vif,
++				ct, ctinfo, whnat, tunnel_prefill, empty_key, &spare);
++	}
++	spin_unlock_bh(&hnat_priv->entry_lock);
++	/* An unconsumed spare is unlinked and has never acquired references. */
++	kfree(spare);
++	return result;
+ }
+ 
+ int mtk_sw_nat_hook_tx(struct sk_buff *skb, int gmac_no)
+@@ -4600,9 +4689,7 @@
+ 			}
+ 			if (rx)
+ 				hnat_diag_note(skb, HNAT_DIAG_PARAMETERS, 0, 2, rx_token.index, rx_token.generation, -1);
+-			spin_lock_bh(&hnat_priv->entry_lock);
+ 			skb_to_hnat_info(skb, out, entry, &hw_path, route_out);
+-			spin_unlock_bh(&hnat_priv->entry_lock);
+ 			if (rx)
+ 				hnat_tunnel_bind_unlock(&rx_token);
+ 		}
