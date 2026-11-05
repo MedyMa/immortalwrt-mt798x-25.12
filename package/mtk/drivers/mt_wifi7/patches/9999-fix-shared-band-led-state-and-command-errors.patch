@@ -1,0 +1,105 @@
+Subject: wifi7: retain shared-band LEDs and expose command failures
+
+Count every active interface on a band so closing one BSS cannot turn off
+the LED shared with another running BSS. Keep the existing chip GPIO map
+and make mapping queue failures and MCU command failures observable.
+
+--- a/mt_wifi/common/rt_led.c
++++ b/mt_wifi/common/rt_led.c
+@@ -99,6 +99,7 @@
+ 	UCHAR LedMode;
+ 	BOOLEAN	bIgnored = FALSE;
+ 	INT	LED_CMD = -1;
++	INT32 ret = NDIS_STATUS_SUCCESS;
+ 	struct wifi_dev *wdev = NULL;
+ #ifdef WSC_INCLUDED
+ #ifdef WSC_LED_SUPPORT
+@@ -365,16 +366,15 @@
+ 				if (wdev_temp && wdev_temp->if_up_down_state) {
+ 					if (HcGetBandByWdev(wdev_temp) == BandIdx) {
+ 						wdev_same_band_cnt++;
+-						break;
+ 					}
+ 				}
+ 			}
+ 
+ 			if ((Status == LED_RADIO_OFF) && (wdev_same_band_cnt == 0)) { /* Interface down case */
+-				AndesLedEnhanceOP(pAd, led_idx, LED_TX_OVER_BLINK_DISABLE, LED_REVERSE_POLARITY_DISABLE,
++				ret = AndesLedEnhanceOP(pAd, led_idx, LED_TX_OVER_BLINK_DISABLE, LED_REVERSE_POLARITY_DISABLE,
+ 					BandIdx, LED_TX_DATA_ONLY, 0, 0, LED_CMD);
+ 			} else if ((Status == LED_LINK_DOWN) && (wdev_same_band_cnt == 1)) { /* Radio On/Off case */
+-				AndesLedEnhanceOP(pAd, led_idx, LED_TX_OVER_BLINK_DISABLE, LED_REVERSE_POLARITY_DISABLE,
++				ret = AndesLedEnhanceOP(pAd, led_idx, LED_TX_OVER_BLINK_DISABLE, LED_REVERSE_POLARITY_DISABLE,
+ 						BandIdx, LED_TX_DATA_ONLY, 0, 0, LED_CMD);
+ 			}
+ 		} else {
+@@ -382,13 +382,17 @@
+ 				IS_MT7992(pAd) ||
+ 				IS_MT7993(pAd)) {
+ 				if ((Status == LED_LINK_UP) || (Status == LED_RADIO_ON))
+-					AndesLedEnhanceOP(pAd, led_idx, LED_TX_OVER_BLINK_DISABLE, LED_REVERSE_POLARITY_DISABLE,
++					ret = AndesLedEnhanceOP(pAd, led_idx, LED_TX_OVER_BLINK_DISABLE, LED_REVERSE_POLARITY_DISABLE,
+ 										BandIdx, LED_TX_DATA_ONLY, 0, 0, LED_CMD);
+ 			} else {
+-				AndesLedEnhanceOP(pAd, led_idx, LED_TX_OVER_BLINK_DISABLE, LED_REVERSE_POLARITY_DISABLE,
++				ret = AndesLedEnhanceOP(pAd, led_idx, LED_TX_OVER_BLINK_DISABLE, LED_REVERSE_POLARITY_DISABLE,
+ 								BandIdx, LED_TX_DATA_ONLY, 0, 0, LED_CMD);
+ 			}
+ 		}
++		if (ret != NDIS_STATUS_SUCCESS)
++			MTWF_DBG(pAd, DBG_CAT_CFG, CATCFG_DBGLOG, DBG_LVL_ERROR,
++				"LED %u band %u status %u command failed: %d\n",
++				led_idx, BandIdx, Status, ret);
+ 	}
+ 
+ 	/*
+--- a/mt_wifi/hw_ctrl/hw_ctrl.c
++++ b/mt_wifi/hw_ctrl/hw_ctrl.c
+@@ -1386,17 +1386,22 @@
+ static NTSTATUS HwCtrlLedGpioMap(RTMP_ADAPTER *pAd, HwCmdQElmt *CMDQelmt)
+ {
+ 	PMT_LED_GPIO_MAP prLedMapping = (PMT_LED_GPIO_MAP)(CMDQelmt->buffer);
++	INT32 ret;
+ #ifdef WIFI_UNIFIED_COMMAND
+ 	RTMP_CHIP_CAP * pChipCap = hc_get_chip_cap(pAd->hdev_ctrl);
+ #endif /* WIFI_UNIFIED_COMMAND */
+ 
+ #ifdef WIFI_UNIFIED_COMMAND
+ 	if (pChipCap->uni_cmd_support)
+-		UniCmdLedGpio(pAd, prLedMapping->led_index, prLedMapping->map_index, prLedMapping->ctr_type);
++		ret = UniCmdLedGpio(pAd, prLedMapping->led_index, prLedMapping->map_index, prLedMapping->ctr_type);
+ 	else
+ #endif /* WIFI_UNIFIED_COMMAND */
+-		AndesLedGpioMap(pAd, prLedMapping->led_index, prLedMapping->map_index, prLedMapping->ctr_type);
+-	return NDIS_STATUS_SUCCESS;
++		ret = AndesLedGpioMap(pAd, prLedMapping->led_index, prLedMapping->map_index, prLedMapping->ctr_type);
++	if (ret != NDIS_STATUS_SUCCESS)
++		MTWF_DBG(pAd, DBG_CAT_CFG, CATCFG_DBGLOG, DBG_LVL_ERROR,
++			"LED %u GPIO %u mapping failed: %d\n",
++			prLedMapping->led_index, prLedMapping->map_index, ret);
++	return ret;
+ }
+ 
+ #endif /* LED_CONTROL_SUPPORT */
+--- a/mt_wifi/hw_ctrl/hw_ctrl_cmd.c
++++ b/mt_wifi/hw_ctrl/hw_ctrl_cmd.c
+@@ -116,12 +116,17 @@
+ 
+ VOID RTMP_LED_GPIO_MAP(RTMP_ADAPTER *pAd, UINT8 led_index, UINT16 map_index, BOOLEAN ctr_type)
+ {
+-	MT_LED_GPIO_MAP led_gpio_map;
++	MT_LED_GPIO_MAP led_gpio_map = {0};
++	INT32 ret;
+ 
+ 	led_gpio_map.led_index = led_index;
+ 	led_gpio_map.map_index = map_index;
+ 	led_gpio_map.ctr_type = ctr_type;
+-	HW_CTRL_BASIC_ENQ(pAd, HWCMD_TYPE_PERIPHERAL, HWCMD_ID_LED_GPIO_MAP, sizeof(MT_LED_GPIO_MAP), &led_gpio_map);
++	ret = HW_CTRL_BASIC_ENQ(pAd, HWCMD_TYPE_PERIPHERAL, HWCMD_ID_LED_GPIO_MAP, sizeof(MT_LED_GPIO_MAP), &led_gpio_map);
++	if (ret != NDIS_STATUS_SUCCESS)
++		MTWF_DBG(pAd, DBG_CAT_CFG, CATCFG_DBGLOG, DBG_LVL_ERROR,
++			"LED %u GPIO %u mapping enqueue failed: %d\n",
++			led_index, map_index, ret);
+ }
+ 
+ /* PCI, USB use the same LP function */
