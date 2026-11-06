@@ -7,10 +7,12 @@ append DRIVERS "mtwifi"
 
 detect_mtwifi() {
 	local idx ifname
-	local band htmode htbsscoex ssid dbdc_main
+	local band htmode htbsscoex ssid dbdc_main channel encryption
 	if [ -d "/sys/module/mt_wifi" ]; then
 		dev_list="$(l1util list)"
 		for dev in $dev_list; do
+			encryption="none"
+			channel="auto"
 			config_get type ${dev} type
 			[ "$type" = "mtwifi" ] || {
 				ifname="$(l1util get ${dev} main_ifname)"
@@ -37,6 +39,8 @@ detect_mtwifi() {
 					htmode="EHT160"
 					htbsscoex="0"
 					ssid="ImmortalWrt-6G"
+					channel="5"
+					encryption="owe"
 				fi
 
 				uci -q batch <<-EOF
@@ -58,7 +62,7 @@ detect_mtwifi() {
 					set wireless.default_${dev}.network=lan
 					set wireless.default_${dev}.mode=ap
 					set wireless.default_${dev}.ssid=${ssid}
-					set wireless.default_${dev}.encryption=none
+					set wireless.default_${dev}.encryption=${encryption}
 EOF
 				uci -q commit wireless
 			}

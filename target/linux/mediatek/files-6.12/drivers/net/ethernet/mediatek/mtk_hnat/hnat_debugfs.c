@@ -3541,18 +3541,10 @@ static void hnat_qos_toggle_usage(void)
 
 static int hnat_qos_toggle_read(struct seq_file *m, void *private)
 {
-	if (qos_toggle == 0) {
-		pr_info("HQoS is disabled now!\n");
-	} else if (qos_toggle == 1) {
-		pr_info("HQoS is enabled now!\n");
-		pr_info("HQoS uplink is %s now!\n",
-				qos_ul_toggle ? "enabled" : "disabled");
-		pr_info("HQoS downlink is %s now!\n",
-				qos_dl_toggle ? "enabled" : "disabled");
-	} else if (qos_toggle == 2) {
-		pr_info("Per-port-per-queue mode is enabled!\n");
-	}
+	struct mtk_hnat *h = m->private;
 
+	seq_printf(m, "mode=%d\nuplink=%d\ndownlink=%d\ndscp_mapping=%d\n",
+		   qos_toggle, qos_ul_toggle, qos_dl_toggle, !!h->dscp_en);
 	return 0;
 }
 

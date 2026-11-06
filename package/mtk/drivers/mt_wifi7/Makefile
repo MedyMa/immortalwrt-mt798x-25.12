@@ -7,7 +7,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=mt_wifi7
-PKG_RELEASE:=6
+PKG_RELEASE:=7
 P4REV:=
 PKG_VERSION:=24.10.20261104
 PKG_SOURCE_URL:=https://raw.githubusercontent.com/MedyMa/immortalwrt-mt798x-25.12/main/dl

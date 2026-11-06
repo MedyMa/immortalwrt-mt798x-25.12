@@ -1,0 +1,238 @@
+Subject: [PATCH] wifi7: validate firmware replies and retire inactive BSS state
+
+Preserve firmware rejection codes through both command transports, validate
+reply lengths, retire cached profiles after group removal, and leave empty
+optional MAC overrides to EEPROM defaults. Legacy AP mode is a valid BSS type.
+Guard the cfg80211-only country OID when building the WEXT data path.
+Stop failed PP/VOW fragments from being masked by subsequent sends and
+include the rejected subcommand or requested VOW tags in failure diagnostics.
+
+--- a/mt_wifi/chip/mcu/andes_core.c
++++ b/mt_wifi/chip/mcu/andes_core.c
+@@ -993,6 +993,10 @@
+ 				ret = msg->cmd_return_status;
+ 			}
+ 
++#ifdef WIFI_UNIFIED_COMMAND
++			if (IS_CMD_MSG_UNI_CMD_FLAG_SET(msg))
++				ret = msg->cmd_return_status;
++#endif
+ 			MTWF_DBG(NULL, DBG_CAT_FW, CATFW_DBGINFO, DBG_LVL_DEBUG,
+ 					 "msg state = %d\n", state);
+ 			/* msg will be free after enqueuing to tx_doneq. So msg is not able to pass FW's response to caller. */
+--- a/mt_wifi/chip/mcu/cmm_fw_uni_cmd.c
++++ b/mt_wifi/chip/mcu/cmm_fw_uni_cmd.c
+@@ -20494,6 +20494,12 @@
+ 
+ 			/* Send out CMD */
+ 			Ret = chip_cmd_tx(pAd, msg);
++			if (Ret != NDIS_STATUS_SUCCESS) {
++				MTWF_DBG(pAd, DBG_CAT_HW, CATHW_PHY, DBG_LVL_WARN,
++					"PP update failed: subcmd=%u status=0x%x\n",
++					pp_cmd_cap->cmd_sub_id, Ret);
++				goto error;
++			}
+ 
+ 			/* Process next remaining payload */
+ 			u4RemainingPayloadSize -= u4SendBufSize;
+@@ -31628,6 +31634,15 @@
+ 			/* Send out CMD */
+ 			call_fw_cmd_notifieriers(WO_CMD_DEV_INFO, pAd, msg->net_pkt);
+ 			Ret = chip_cmd_tx(pAd, msg);
++			if (Ret != NDIS_STATUS_SUCCESS) {
++				for (i = 0; i < UNI_CMD_VOW_MAX_NUM; i++) {
++					if (pVOWParam->VOWTagValid[i])
++						MTWF_DBG(pAd, DBG_CAT_AP, CATAP_VOW, DBG_LVL_WARN,
++							"VOW update failed: tag=0x%llx set=%u status=0x%x\n",
++							UniCmdVowTab[i].u8CmdFeature, isSet, Ret);
++				}
++				goto error;
++			}
+ 
+ 			/* Process next remaining payload */
+ 			u4RemainingPayloadSize -= u4SendBufSize;
+--- a/mt_wifi/chip/mcu/cmm_fw_uni_event.c
++++ b/mt_wifi/chip/mcu/cmm_fw_uni_event.c
+@@ -56,6 +56,14 @@
+ {
+ 	struct UNI_EVENT_CMD_RESULT_T *UniCmdResult = (struct UNI_EVENT_CMD_RESULT_T *)payload;
+ 
++	if (!payload || payload_len < sizeof(*UniCmdResult)) {
++		msg->cmd_return_status = NDIS_STATUS_FAILURE;
++		MTWF_DBG(NULL, DBG_CAT_FW, CATFW_DBGINFO, DBG_LVL_WARN,
++			"short command response: cid=0x%x len=%u\n",
++			msg->attr.type, payload_len);
++		return;
++	}
++
+ 	UniCmdResult->u2CID = le2cpu16(UniCmdResult->u2CID);
+ 	UniCmdResult->u4Status = le2cpu32(UniCmdResult->u4Status);
+ 
+@@ -63,11 +71,14 @@
+ 			"UniCmdResult.ucCID = 0x%x, UniCmdResult.u4Status = 0x%x\n",
+ 			UniCmdResult->u2CID, UniCmdResult->u4Status);
+ 
+-	if (UniCmdResult->u4Status != 0 || (UniCmdResult->u2CID != msg->attr.type)) {
++	msg->cmd_return_status = UniCmdResult->u2CID == msg->attr.type ?
++		UniCmdResult->u4Status : NDIS_STATUS_FAILURE;
++	if (msg->cmd_return_status != NDIS_STATUS_SUCCESS) {
+ 		MTWF_DBG(NULL, DBG_CAT_FW, CATFW_DBGINFO, DBG_LVL_WARN,
+-			"BUG::UniCmdResult.u4Status = 0x%x cid: = 0x%x\n",
+-			UniCmdResult->u4Status, UniCmdResult->u2CID);
+-	}
++			"firmware command rejected: cid=0x%x expected=0x%x status=0x%x\n",
++			UniCmdResult->u2CID, msg->attr.type, UniCmdResult->u4Status);
++	}
++
+ }
+ 
+ VOID UniCmdStaRecRsp(struct cmd_msg *msg, char *payload, UINT16 payload_len)
+--- a/mt_wifi/common/bss_mngr/bss_mngr.c
++++ b/mt_wifi/common/bss_mngr/bss_mngr.c
+@@ -5367,20 +5367,7 @@
+ 		return;
+ 	}
+ 
+-	mld_grp = entry->entry_info.mld_grp;
+-	mld = BMGR_VALID_MLD_GRP_IDX(mld_grp) ? GET_MLD_BY_GRP_IDX(mld_grp) : NULL;
+-	if (!BMGR_VALID_MLO_DEV(mld)) {
+-		MTWF_DBG(NULL, DBG_CAT_MLO, CATMLO_BMGR, DBG_LVL_ERROR,
+-			"bss_idx (%d), mld grp invalid(%d)\n",
+-			entry->bss_idx, entry->entry_info.mld_grp);
+-		return;
+-	}
+-
+-	MTWF_DBG(NULL, DBG_CAT_MLO, CATMLO_BMGR, DBG_LVL_NOTICE,
+-		"%s(%s) sync probe rsp STA-Pf, mlo:%d, cnt:%d\n",
+-		pNetDev->name, entry->valid ? "active" : "inactive",
+-		entry->mlo_en, mld->mld_link_cnt);
+-
++	/* Retire cached profiles even after the MLD group has been destroyed. */
+ 	if (!BMGR_VALID_MLO_BSS_ENTRY(entry)) {
+ 		for (link = 0; link < BSS_MNGR_MAX_BAND_NUM; link++) {
+ 			/* free non-MLO entry's buffer */
+@@ -5392,6 +5379,23 @@
+ 
+ 		}
+ 	}
++
++	mld_grp = entry->entry_info.mld_grp;
++	mld = BMGR_VALID_MLD_GRP_IDX(mld_grp) ? GET_MLD_BY_GRP_IDX(mld_grp) : NULL;
++	if (!BMGR_VALID_MLO_DEV(mld)) {
++		if (!entry->valid)
++			return;
++		MTWF_DBG(NULL, DBG_CAT_MLO, CATMLO_BMGR, DBG_LVL_ERROR,
++			"bss_idx (%d), mld grp invalid(%d)\n",
++			entry->bss_idx, entry->entry_info.mld_grp);
++		return;
++	}
++
++	MTWF_DBG(NULL, DBG_CAT_MLO, CATMLO_BMGR, DBG_LVL_NOTICE,
++		"%s(%s) sync probe rsp STA-Pf, mlo:%d, cnt:%d\n",
++		pNetDev->name, entry->valid ? "active" : "inactive",
++		entry->mlo_en, mld->mld_link_cnt);
++
+ 
+ 	/* query probe response frames to driver */
+ 	for (link = 0; link < BSS_MNGR_MAX_BAND_NUM; link++) {
+--- a/mt_wifi/common/bss_mngr/bss_mngr_main.c
++++ b/mt_wifi/common/bss_mngr/bss_mngr_main.c
+@@ -1350,11 +1350,13 @@
+ #ifdef CONFIG_AP_SUPPORT
+ 	BSS_STRUCT *pMbss = NULL;
+ #endif
+-	PSECURITY_CONFIG pSecConfig = &wdev->SecConfig;
++	PSECURITY_CONFIG pSecConfig;
+ 	u8 band_idx = 0;
+ 	ULONG sys_time;
+ 
+ 	u8 dot11v_mbssid_idx = 0;
++	if (!reg_info)
++		return NDIS_STATUS_FAILURE;
+ 	if (wdev) {
+ #ifdef CONFIG_AP_SUPPORT
+ 		if (wdev->wdev_type == WDEV_TYPE_AP)
+@@ -1363,6 +1365,7 @@
+ 	} else {
+ 		return NDIS_STATUS_FAILURE;
+ 	}
++	pSecConfig = &wdev->SecConfig;
+ 	ad = (struct _RTMP_ADAPTER *)wdev->sys_handle;
+ 	if (ad == NULL)
+ 		return NDIS_STATUS_FAILURE;
+@@ -1383,8 +1386,8 @@
+ 			reg_info->dev_type = DEV_TYPE_AP_COH;
+ 		else {
+ 			reg_info->dev_type = DEV_TYPE_AP_LEGACY;
+-			MTWF_DBG(NULL, DBG_CAT_MLO, CATMLO_BMGR, DBG_LVL_ERROR,
+-					"dev_type UNDEFINED\n");
++			MTWF_DBG(NULL, DBG_CAT_MLO, CATMLO_BMGR, DBG_LVL_DEBUG,
++					"legacy AP BSS\n");
+ 		}
+ 
+ 		reg_info->max_bssid_indicator =
+--- a/mt_wifi/hw_ctrl/hwifi_main.c
++++ b/mt_wifi/hw_ctrl/hwifi_main.c
+@@ -1347,8 +1347,17 @@
+ 		goto err;
+ 	}
+ 
+-	if (attr->rsp.handler && mcu_msg.rx_data)
+-		attr->rsp.handler(msg, mcu_msg.rx_data, mcu_msg.rx_len);
++	if (attr->rsp.handler) {
++		if (mcu_msg.rx_data) {
++			attr->rsp.handler(msg, mcu_msg.rx_data, mcu_msg.rx_len);
++			if (mcu_msg.uni_cmd)
++				ret = msg->cmd_return_status;
++		} else if (mcu_msg.is_wait) {
++			ret = NDIS_STATUS_FAILURE;
++			MTWF_DBG(ad, DBG_CAT_FW, CATFW_DBGINFO, DBG_LVL_WARN,
++				"missing firmware response: cid=0x%x\n", mcu_msg.cmd);
++		}
++	}
+ 
+ 	if (buf)
+ 		os_free_mem(buf);
+--- a/mt_wifi/os/linux/ap_ioctl.c
++++ b/mt_wifi/os/linux/ap_ioctl.c
+@@ -909,7 +909,10 @@
+ 		wdev = pIoctlConfig->wdev;
+ 		subcmd = wrqin->u.data.flags;
+ 		if ((wdev != NULL) && (wdev->if_up_down_state == FALSE)
+-				&& (subcmd!= OID_802_11_COUNTRYCODE)) {
++#ifdef OID_802_11_COUNTRYCODE
++				&& (subcmd != OID_802_11_COUNTRYCODE)
++#endif
++				) {
+ 			MTWF_DBG(pAd, DBG_CAT_CFG, CATCFG_CMD, DBG_LVL_ERROR,
+ 				"interface is down, cmd [%x] return!!!\n", cmd);
+ 			return -ENETDOWN;
+--- a/mt_wifi/profiles/cmm_profile.c
++++ b/mt_wifi/profiles/cmm_profile.c
+@@ -5182,7 +5182,7 @@
+ 					MTWF_DBG(pAd, DBG_CAT_CFG, CATCFG_PROFILE, DBG_LVL_ERROR,
+ 							"snprintf error!\n");
+ 
+-				if (RTMPGetKeyParameter(tok_str, tmpbuf, 25, pBuffer, TRUE)) {
++				if (RTMPGetKeyParameter(tok_str, tmpbuf, 25, pBuffer, TRUE) && tmpbuf[0]) {
+ 					retval = RT_CfgSetMacAddress(pAd, tmpbuf, i, OPMODE_AP);
+ 
+ 					if (retval)
+@@ -5196,7 +5196,7 @@
+ #endif /* MBSS_SUPPORT */
+ 
+ #ifdef CONFIG_APSTA_MIXED_SUPPORT
+-			if (RTMPGetKeyParameter("ApcliMacAddress", tmpbuf, 25, pBuffer, TRUE)) {
++			if (RTMPGetKeyParameter("ApcliMacAddress", tmpbuf, 25, pBuffer, TRUE) && tmpbuf[0]) {
+ 				retval = RT_CfgSetMacAddress(pAd, tmpbuf, 0, OPMODE_STA);
+ 
+ 				if (retval)
+@@ -5204,7 +5204,7 @@
+ 						"ApcliMacAddress = "MACSTR"\n",
+ 						MAC2STR(pAd->ApcliAddr[0]));
+ 			}
+-			if (RTMPGetKeyParameter("ApcliMacAddress1", tmpbuf, 25, pBuffer, TRUE)) {
++			if (RTMPGetKeyParameter("ApcliMacAddress1", tmpbuf, 25, pBuffer, TRUE) && tmpbuf[0]) {
+ 				retval = RT_CfgSetMacAddress(pAd, tmpbuf, 1, OPMODE_STA);
+ 
+ 				if (retval)

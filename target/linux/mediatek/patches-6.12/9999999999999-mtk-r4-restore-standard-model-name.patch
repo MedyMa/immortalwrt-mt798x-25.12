@@ -1,0 +1,16 @@
+Subject: [PATCH] arm64: dts: mediatek: restore the standard BPI-R4 model
+
+The network baseline import shortened the standard board's model. Restore
+the two-SFP+ description without changing compatible strings or variants.
+
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dts
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dts
+@@ -8,7 +8,7 @@
+ #include "mt7988a-bananapi-bpi-r4.dtsi"
+ 
+ / {
+-	model = "Bananapi BPI-R4";
++	model = "Banana Pi BPI-R4 (2x SFP+)";
+ 	compatible = "bananapi,bpi-r4",
+ 		     "mediatek,mt7988a";
+ 

@@ -1,0 +1,193 @@
+Subject: [PATCH] net: mediatek: fix HNAT headers, neighbour lifetime and table sizing
+
+The imported MAC fix still inspected an IPv6 next-header byte on ordinary
+IPv4/L2 packets, and assumed enough space before skb->data. Select headers
+only after checking protocol, linear header bounds and separation from the
+HNAT descriptor. Validate before nexthop helpers write an Ethernet header.
+Keep unsupported layouts on software forwarding without changing the skb.
+
+The 464XLAT neighbour lookups return unreferenced pointers. Copy the MAC
+while the RCU read section still protects that pointer, and reject an
+unresolved neighbour instead of publishing an all-zero destination MAC.
+Keep the accounting, generation and RX descriptor ABI unchanged.
+
+
+Keep all PPE hardware table-size codes consistent after a first-PPE DMA
+allocation fallback. Later PPEs must allocate the already selected size or
+fail probe; shrinking a shared count would invalidate existing allocations.
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
+@@ -694,16 +694,21 @@
+ 	if (ppe_id >= CFG_PPE_NUM)
+ 		return -EINVAL;
+ 
+-	/* mapp the FOE table */
+-	for (etry_num_cfg = DEF_ETRY_NUM_CFG ; etry_num_cfg >= 0 ;
++	/* All PPEs share one entry count. Derive each hardware size code from
++	 * the chosen count, and allow only the first PPE to reduce that count.
++	 */
++	for (etry_num_cfg = ilog2(hnat_priv->foe_etry_num) - 10; etry_num_cfg >= 0;
+ 	     etry_num_cfg--, hnat_priv->foe_etry_num /= 2) {
+ 		foe_table_sz = hnat_priv->foe_etry_num * sizeof(struct foe_entry);
+ 		hnat_priv->foe_table_cpu[ppe_id] = dma_alloc_coherent(
+ 				hnat_priv->dev, foe_table_sz,
+ 				&hnat_priv->foe_table_dev[ppe_id], GFP_KERNEL);
+ 
+-		if (!hnat_priv->foe_table_cpu[ppe_id])
++		if (!hnat_priv->foe_table_cpu[ppe_id]) {
++			if (ppe_id)
++				return -ENOMEM;
+ 			continue;
++		}
+ 
+ 		if (hnat_priv->data->whnat && !hnat_priv->foe_flow[ppe_id]) {
+ 			foe_flow_sz = (hnat_priv->foe_etry_num / 4) *
+@@ -723,7 +728,7 @@
+ 
+ 	if (!hnat_priv->foe_table_cpu[ppe_id] ||
+ 	    (hnat_priv->data->whnat && !hnat_priv->foe_flow[ppe_id]))
+-		return -1;
++		return -ENOMEM;
+ 	dev_info(hnat_priv->dev, "PPE%d entry number = %d\n",
+ 		 ppe_id, hnat_priv->foe_etry_num);
+ 
+@@ -742,7 +747,7 @@
+ 			dma_alloc_coherent(hnat_priv->dev, foe_mib_tb_sz,
+ 					   &hnat_priv->foe_mib_dev[ppe_id], GFP_KERNEL);
+ 		if (!hnat_priv->foe_mib_cpu[ppe_id])
+-			return -1;
++			return -ENOMEM;
+ 		writel(hnat_priv->foe_mib_dev[ppe_id],
+ 		       hnat_priv->ppe_base[ppe_id] + PPE_MIB_TB_BASE);
+ 		memset(hnat_priv->foe_mib_cpu[ppe_id], 0, foe_mib_tb_sz);
+@@ -751,7 +756,7 @@
+ 			kzalloc(hnat_priv->foe_etry_num * sizeof(struct hnat_accounting),
+ 				GFP_KERNEL);
+ 		if (!hnat_priv->acct[ppe_id])
+-			return -1;
++			return -ENOMEM;
+ 	}
+ 
+ 	hnat_priv->etry_num_cfg = etry_num_cfg;
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -1597,6 +1597,44 @@
+ 	return NF_DROP;
+ }
+ 
++/* Offload metadata lives at skb->head. An Ethernet header must not overlap
++ * it, and IPv4 bytes must never be interpreted as an IPv6 next-header field.
++ * Keep this read-only: malformed/nonlinear base headers use software routing.
++ */
++static struct ethhdr *hnat_skb_ethhdr(struct sk_buff *skb,
++				   struct flow_offload_hw_path *hw_path)
++{
++	struct ipv6hdr *ip6h;
++	unsigned char *mac;
++	unsigned int hlen;
++	int offset;
++
++	if (skb->protocol == htons(ETH_P_IPV6)) {
++		offset = skb_network_offset(skb);
++		if (offset < 0 || (unsigned int)offset > skb_headlen(skb) ||
++		    skb_headlen(skb) - offset < sizeof(*ip6h))
++			return NULL;
++		ip6h = ipv6_hdr(skb);
++		if (ip6h->version != 6)
++			return NULL;
++		if (ip6h->nexthdr == NEXTHDR_IPIP) {
++			hlen = ETH_HLEN;
++			if (hw_path->flags & BIT(DEV_PATH_PPPOE))
++				hlen += PPPOE_SES_HLEN;
++			if (skb_headroom(skb) < FOE_INFO_LEN + hlen)
++				return NULL;
++			return (struct ethhdr *)(skb->data - hlen);
++		}
++	}
++	if (!skb_mac_header_was_set(skb))
++		return NULL;
++	mac = skb_mac_header(skb);
++	if (mac < skb->head + FOE_INFO_LEN || mac > skb_tail_pointer(skb) ||
++	    skb_tail_pointer(skb) - mac < ETH_HLEN)
++		return NULL;
++	return (struct ethhdr *)mac;
++}
++
+ static unsigned int hnat_ipv6_get_nexthop(struct sk_buff *skb,
+ 					  const struct net_device *out,
+ 					  struct flow_offload_hw_path *hw_path)
+@@ -1606,6 +1644,9 @@
+ 	struct dst_entry *dst = skb_dst(skb);
+ 	struct ethhdr *eth;
+ 	u16 eth_pppoe_hlen = ETH_HLEN + PPPOE_SES_HLEN;
++
++	if (!hnat_skb_ethhdr(skb, hw_path))
++		return -1;
+ 
+ 	if (hw_path->flags & BIT(DEV_PATH_PPPOE)) {
+ 		if (ipv6_hdr(skb)->nexthdr == NEXTHDR_IPIP) {
+@@ -1664,6 +1705,9 @@
+ 	struct dst_entry *dst = skb_dst(skb);
+ 	struct rtable *rt = (struct rtable *)dst;
+ 	struct net_device *dev = (__force struct net_device *)out;
++
++	if (!hnat_skb_ethhdr(skb, hw_path))
++		return -1;
+ 
+ 	if (hw_path->flags & BIT(DEV_PATH_PPPOE)) {
+ 		memcpy(eth_hdr(skb)->h_source, hw_path->eth_src, ETH_ALEN);
+@@ -1801,19 +1845,6 @@
+ 	return entry;
+ }
+ 
+-static struct ethhdr *get_ipv6_ipip_ethhdr(struct sk_buff *skb,
+-					   struct flow_offload_hw_path *hw_path)
+-{
+-	struct ethhdr *eth;
+-	u16 eth_pppoe_hlen = ETH_HLEN + PPPOE_SES_HLEN;
+-
+-	if (hw_path->flags & BIT(DEV_PATH_PPPOE))
+-		eth = (struct ethhdr *)(skb->data - eth_pppoe_hlen);
+-	else
+-		eth = (struct ethhdr *)(skb->data - ETH_HLEN);
+-
+-	return eth;
+-}
+ 
+ static atomic64_t hnat_flow_entry_sequence = ATOMIC64_INIT(0);
+ 
+@@ -2540,11 +2571,9 @@
+ 	empty_key = hnat_flow_entry_unbind_empty(foe);
+ 	ct = nf_ct_get(skb, &ctinfo);
+ 
+-	if (ipv6_hdr(skb)->nexthdr == NEXTHDR_IPIP)
+-		/* point to ethernet header for DS-Lite and MapE */
+-		eth = get_ipv6_ipip_ethhdr(skb, hw_path);
+-	else
+-		eth = eth_hdr(skb);
++	eth = hnat_skb_ethhdr(skb, hw_path);
++	if (!eth)
++		return hnat_diag_skip(skb, HNAT_DIAG_NO_MAC_HEADER);
+ 
+ 	/*do not bind multicast if PPE mcast not enable*/
+ 	if (!hnat_priv->data->mcast && !hnat_npu_mcast_active() &&
+@@ -3817,13 +3846,17 @@
+ 			return -1;
+ 		}
+ 	}
+-	rcu_read_unlock_bh();
++	if (!is_valid_ether_addr(neigh->ha)) {
++		rcu_read_unlock_bh();
++		return -1;
++	}
+ 
+ 	entry->ipv4_dslite.dmac_hi = swab32(*((u32 *)neigh->ha));
+ 	entry->ipv4_dslite.dmac_lo = swab16(*((u16 *)&neigh->ha[4]));
+ 	entry->ipv4_dslite.smac_hi = swab32(*((u32 *)out->dev_addr));
+ 	entry->ipv4_dslite.smac_lo = swab16(*((u16 *)&out->dev_addr[4]));
+ 
++	rcu_read_unlock_bh();
+ 	return 0;
+ }
+ 

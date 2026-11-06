@@ -1,0 +1,106 @@
+Subject: [PATCH] net: mediatek: report passive PPE binding counts by format
+
+Keep the existing hnat_stats keys, but always count BIND regardless of the
+interactive entry-dump filter. Report IPv4, IPv6 and mixed tunnel formats
+separately and mark absent tables unavailable. Load only the coherent DMA
+IB1 header, without reading MIB counters or holding the learning lock, and
+yield during the scan. A userspace collector caches this bounded summary;
+it is table occupancy, not byte throughput or proof of complete offload.
+Use a nonblocking device mutex to exclude probe/removal without creating a
+deadlock with debugfs removal, and pass the inode context to single_open.
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+@@ -1817,25 +1817,68 @@
+ }
+ static int hnat_stats_read(struct seq_file *m, void *private)
+ {
+-	struct mtk_hnat *h = hnat_priv;
+-	struct foe_entry *entry, *end;
+-	int cnt, i;
+-
+-	seq_printf(m, "PPE_NUM=%d\n", CFG_PPE_NUM);
++	struct mtk_hnat *h = m->private;
++	struct foe_entry *table;
++	unsigned int cnt, ipv4, ipv6, other, slot, size;
++	bool locked;
++	int i;
++	union {
++		struct hnat_bind_info_blk bind;
++		u32 raw;
++	} ib1;
++
++	/* Probe/remove hold the device mutex. Never wait for it from debugfs:
++	 * remove may itself be waiting for an active debugfs read to finish.
++	 */
++	locked = device_trylock(h->dev);
++	seq_printf(m, "STATS_VERSION=2\nPPE_NUM=%d\n", CFG_PPE_NUM);
+ 
+ 	for (i = 0; i < CFG_PPE_NUM; i++) {
+-		cnt = 0;
+-		entry = h->foe_table_cpu[i];
+-		end = h->foe_table_cpu[i] + hnat_priv->foe_etry_num;
+-		while (entry < end) {
+-			if (entry->bfib1.state == dbg_entry_state)
++		table = locked ? READ_ONCE(h->foe_table_cpu[i]) : NULL;
++		if (!table) {
++			seq_printf(m, "AVAILABLE_PPE%d=0\n", i);
++			continue;
++		}
++		size = READ_ONCE(h->foe_etry_num);
++		cnt = ipv4 = ipv6 = other = 0;
++		for (slot = 0; slot < size; slot++) {
++			/* Passive DMA-memory snapshot: no MMIO or read-clear MIB.
++			 * State/type must come from the same IB1 load. Hardware can
++			 * age entries during this non-atomic table observation.
++			 */
++			ib1.raw = READ_ONCE(*(u32 *)&table[slot]);
++			if (ib1.bind.state == BIND) {
+ 				cnt++;
+-			entry++;
++				switch (ib1.bind.pkt_type) {
++				case IPV4_HNAPT:
++				case IPV4_HNAT:
++					ipv4++;
++					break;
++				case IPV6_3T_ROUTE:
++				case IPV6_5T_ROUTE:
++				case IPV6_HNAPT:
++				case IPV6_HNAT:
++					ipv6++;
++					break;
++				default:
++					/* Translation/tunnel formats have mixed families. */
++					other++;
++					break;
++				}
++			}
++			if (!(slot & 255))
++				cond_resched();
+ 		}
+-		seq_printf(m, "ALL_PPE%d=%d\n", i, hnat_priv->foe_etry_num);
+-		seq_printf(m, "BIND_PPE%d=%d\n", i, cnt);
+-	}
+-
++		seq_printf(m, "AVAILABLE_PPE%d=1\n", i);
++		seq_printf(m, "ALL_PPE%d=%u\n", i, size);
++		seq_printf(m, "BIND_PPE%d=%u\n", i, cnt);
++		seq_printf(m, "IPV4_PPE%d=%u\n", i, ipv4);
++		seq_printf(m, "IPV6_PPE%d=%u\n", i, ipv6);
++		seq_printf(m, "OTHER_PPE%d=%u\n", i, other);
++	}
++
++	if (locked)
++		device_unlock(h->dev);
+ 	return 0;
+ }
+ 
+@@ -1956,7 +1999,7 @@
+ 
+ static int hnat_stats_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, hnat_stats_read, file->private_data);
++	return single_open(file, hnat_stats_read, inode->i_private);
+ }
+ 
+ static const struct file_operations hnat_stats_fops = {
