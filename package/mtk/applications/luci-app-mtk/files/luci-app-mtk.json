@@ -1,0 +1,10 @@
+{
+	"admin/mtk": {
+		"title": "MTK",
+		"order": 80,
+		"action": {
+			"type": "firstchild",
+			"recurse": true
+		}
+	}
+}

@@ -2,10 +2,27 @@
 	"luci-app-eqos": {
 		"description": "Grant UCI access for luci-app-eqos",
 		"read": {
-			"uci": [ "eqos" ]
+			"uci": [
+				"eqos"
+			],
+			"ubus": {
+				"luci-rpc": [
+					"getHostHints"
+				],
+				"luci.eqos": [
+					"getStatus"
+				]
+			}
 		},
 		"write": {
-			"uci": [ "eqos" ]
+			"uci": [
+				"eqos"
+			],
+			"ubus": {
+				"luci.eqos": [
+					"apply"
+				]
+			}
 		}
 	}
 }

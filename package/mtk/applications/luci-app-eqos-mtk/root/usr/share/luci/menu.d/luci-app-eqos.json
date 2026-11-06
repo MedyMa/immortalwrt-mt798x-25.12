@@ -1,13 +1,40 @@
 {
-	"admin/services/eqos": {
+	"admin/mtk": {
+		"title": "MTK",
+		"order": 80,
+		"action": {
+			"type": "firstchild",
+			"recurse": true
+		}
+	},
+	"admin/mtk/eqos": {
 		"title": "EQoS",
 		"action": {
 			"type": "view",
 			"path": "eqos"
 		},
 		"depends": {
-			"acl": [ "luci-app-eqos" ],
-			"uci": { "eqos": true }
+			"acl": [
+				"luci-app-eqos"
+			],
+			"uci": {
+				"eqos": true
+			}
+		},
+		"order": 40
+	},
+	"admin/services/eqos": {
+		"action": {
+			"type": "alias",
+			"path": "admin/mtk/eqos"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-eqos"
+			],
+			"uci": {
+				"eqos": true
+			}
 		}
 	}
 }

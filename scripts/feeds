@@ -850,6 +850,18 @@ sub update_feed($$$$$$$)
 	return $rv;
 }
 
+sub run_feed_hook($$) {
+	my ($name, $phase) = @_;
+	my $hook = "./scripts/feeds-hooks/$name";
+	return 0 unless -f $hook;
+
+	if (system("bash", $hook, $phase) != 0) {
+		warn "Local feed hook failed for '$name' ($phase).\n";
+		return 1;
+	}
+	return 0;
+}
+
 sub update {
 	my %opts;
 	my %argv_feeds;
@@ -880,7 +892,18 @@ sub update {
 		my ($type, $name, $src, $flags) = @$feed;
 		next unless $#ARGV == -1 or $opts{a} or $argv_feeds{$name};
 		if (not $opts{i}) {
+			# Remove only source-managed changes before pulling the feed.
+			# Explicit -f leaves reset behavior to the updater.
+			if (!$opts{f} && run_feed_hook($name, "before-update") != 0) {
+				$failed = 1;
+				next;
+			}
 			update_feed($type, $name, $src, $opts{f}, $opts{r}, $opts{s}, $flags) == 0 or $failed=1;
+		}
+		# Also restore managed changes after a failed fetch and before -i.
+		if (run_feed_hook($name, "after-update") != 0) {
+			$failed = 1;
+			next;
 		}
 		push @index_feeds, $name;
 	}

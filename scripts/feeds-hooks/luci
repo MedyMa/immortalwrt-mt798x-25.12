@@ -1,0 +1,64 @@
+#!/bin/bash
+# Source-owned LuCI overview patch, invoked by scripts/feeds before/after
+# updates. Do not leave managed edits in the way of git pull, or replace
+# unrelated edits when migrating the exact earlier CPU/temperature patch.
+set -euo pipefail
+source_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$source_root"
+patch_file="$source_root/patches/feeds/luci/1019-luci-system-acceleration-row.patch"
+phase=${1:-after-update}
+case "$phase" in
+    before-update|after-update) ;;
+    *) echo "Unknown LuCI feed hook phase: $phase" >&2; exit 2 ;;
+esac
+
+if [ ! -d feeds/luci ]; then
+    [ "$phase" = before-update ] && exit 0
+    echo 'LuCI feed is missing; run scripts/feeds update luci first' >&2
+    exit 1
+fi
+
+if git apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+    if [ "$phase" = before-update ]; then
+        git apply --reverse "$patch_file"
+    fi
+    exit 0
+fi
+
+if ! git apply --check "$patch_file" >/dev/null 2>&1; then
+    legacy=(
+        'c81d2ebecccaafcf29d4fd421e43644e9129a9ba8f2b245fd40e517d5d0f63d2 8a7a87a777c7be145b3f5832c1e8b695887f63450fe7cf91719ff76f5eccf990 modules/luci-mod-status/htdocs/luci-static/resources/view/status/include/10_system.js'
+        '4b02a92064a40852678d6e9e03b0267b19dc3dc5c4b060cf96e730a79f7f4253 2dd70d248edffd46b118b66355db4fac1c40331bce30200fed780df6694e0f67 modules/luci-mod-status/root/usr/share/rpcd/acl.d/luci-mod-status-index.json'
+        'dd16922c22459a7dd3cc5ca8f40ccc45238eb75f4458a99972aec86a4030f73c 874c443816f819dca13c1503fb80b2ba9f48981f3f25584dcf037af3ce76320d modules/luci-base/po/zh_Hans/base.po'
+    )
+    staging=$(mktemp -d)
+    trap 'rm -rf -- "$staging"' EXIT
+    index=0
+    for record in "${legacy[@]}"; do
+        read -r old_hash base_hash relative <<< "$record"
+        actual=$(sha256sum "feeds/luci/$relative" | awk '{print $1}')
+        [ "$actual" = "$old_hash" ] || {
+            echo "Unrecognized LuCI edits; refusing to overwrite feeds/luci/$relative" >&2
+            exit 1
+        }
+        git -C feeds/luci show "HEAD:$relative" > "$staging/$index"
+        [ "$(sha256sum "$staging/$index" | awk '{print $1}')" = "$base_hash" ] || {
+            echo "LuCI base changed; refusing an automatic overview migration" >&2
+            exit 1
+        }
+        index=$((index + 1))
+    done
+    index=0
+    for record in "${legacy[@]}"; do
+        read -r old_hash base_hash relative <<< "$record"
+        cat "$staging/$index" > "feeds/luci/$relative"
+        index=$((index + 1))
+    done
+fi
+
+if [ "$phase" = before-update ]; then
+    exit 0
+fi
+
+git apply --check "$patch_file"
+git apply "$patch_file"

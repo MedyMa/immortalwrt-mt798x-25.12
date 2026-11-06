@@ -1,7 +1,9 @@
 include $(TOPDIR)/rules.mk
 
+PKG_RELEASE:=2
+
 LUCI_TITLE:=LuCI support for Easy QoS
-LUCI_DEPENDS:=+tc +nftables +kmod-sched-core +kmod-ifb +kmod-mediatek_hnat @!PACKAGE_luci-app-eqos
+LUCI_DEPENDS:=+tc-full +ip-full +flock +nftables +rpcd +jshn +kmod-sched-core +kmod-ifb +kmod-mediatek_hnat @!PACKAGE_luci-app-eqos
 
 PKG_MAINTAINER:=Jianhui Zhao <jianhuizhao329@gmail.com>
 PKG_NAME:=luci-app-eqos-mtk
