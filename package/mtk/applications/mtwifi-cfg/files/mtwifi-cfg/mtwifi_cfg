@@ -65,29 +65,7 @@ function save_profile(cfgs, path)
 end
 
 local function whnat_groups()
-    local groups, seen = {}, {}
-    for _, entry in ipairs(l1dat) do
-        local path = entry.init_path
-        if path and path ~= "" and not seen[path] then
-            local profiles, first = {}, nil
-            for profile in (entry.profile_path or ""):gmatch("[^;]+") do
-                first = first or profile
-                profiles[profile] = true
-            end
-            local master
-            for name, dev in pairs(l1dat.devname_ridx) do
-                if dev.profile_path == first then
-                    master = name
-                    break
-                end
-            end
-            if master then
-                groups[#groups + 1] = {path = path, profiles = profiles, master = master}
-                seen[path] = true
-            end
-        end
-    end
-    return groups
+    return l1parser.whnat_groups(l1dat)
 end
 
 local function whnat_group(dev)
