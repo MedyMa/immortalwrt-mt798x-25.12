@@ -15,6 +15,10 @@ PKG_NAME:=base-files
 PKG_FLAGS:=nonshared
 PKG_RELEASE:=$(COMMITCOUNT)
 
+# getver also uses g<hash> for source snapshots without upstream history.
+# APK's ~ suffix accepts the hexadecimal commit ID without the g prefix.
+BASE_FILES_VERSION:=$(PKG_RELEASE)~$(patsubst g%,%,$(lastword $(subst -, ,$(REVISION))))
+
 PKG_FILE_DEPENDS:=$(PLATFORM_DIR)/ $(GENERIC_PLATFORM_DIR)/base-files/
 PKG_BUILD_DEPENDS:=usign/host ucert/host
 PKG_LICENSE:=GPL-2.0
@@ -46,7 +50,7 @@ define Package/base-files
 	+SELINUX:busybox-selinux +!SELINUX:busybox
   TITLE:=Base filesystem for OpenWrt
   URL:=http://openwrt.org/
-  VERSION:=$(PKG_RELEASE)~$(lastword $(subst -, ,$(REVISION)))
+  VERSION:=$(BASE_FILES_VERSION)
 endef
 
 define Package/base-files/conffiles
@@ -256,7 +260,7 @@ ifneq ($(CONFIG_USE_APK),)
 
 	rm -f $(1)/etc/uci-defaults/13_fix-group-user
 	rm -f $(1)/sbin/pkg_check
-	echo $(PKG_RELEASE)~$(lastword $(subst -, ,$(REVISION))) >$(STAGING_DIR)/base-files.version
+	echo $(BASE_FILES_VERSION) >$(STAGING_DIR)/base-files.version
 else
 	$(if $(CONFIG_CLEAN_IPKG),, \
 		mkdir -p $(1)/etc/opkg; \

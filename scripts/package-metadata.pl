@@ -194,10 +194,12 @@ sub mconf_depends {
 
 				$depend = shift @vdeps;
 
+				# Keep an explicitly selected alternative provider. Comparing
+				# against the consumer creates a recursive Kconfig dependency.
 				if (@vdeps > 1) {
-					$condition = ($condition ? "$condition && " : '') . join("&&", map { "PACKAGE_$_<PACKAGE_$pkgname" } @vdeps);
+					$condition = ($condition ? "$condition && " : '') . join("&&", map { "PACKAGE_$_=n" } @vdeps);
 				} elsif (@vdeps > 0) {
-					$condition = ($condition ? "$condition && " : '') . "PACKAGE_${vdeps[0]}<PACKAGE_$pkgname";
+					$condition = ($condition ? "$condition && " : '') . "PACKAGE_${vdeps[0]}=n";
 				}
 			}
 
