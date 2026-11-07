@@ -81,6 +81,9 @@ write_hnat() {
 need_qdma_layout() {
 	need_hnat
 
+	[ -r "$HNAT_DIR/qos_status" ] ||
+		die "update the HNAT module before using EQoS"
+
 	for node in qdma_sch$UP_SCH qdma_sch$DL_SCH \
 		qdma_txq$UP_QID_BASE qdma_txq$DL_QID_BASE qdma_txq$MANAGED_QID_LAST; do
 		[ -w "$HNAT_DIR/$node" ] || die "$HNAT_DIR/$node is not writable"
@@ -559,8 +562,8 @@ snapshot_qdma() {
 		[ -f "$STATE_DIR/mode" ] || die "incomplete QDMA snapshot; refusing to change hardware"
 		return 0
 	fi
-	mode=$(sed -n 's/^mode=//p' "$HNAT_DIR/qos_toggle")
-	dscp=$(sed -n 's/^dscp_mapping=//p' "$HNAT_DIR/qos_toggle")
+	mode=$(sed -n 's/^mode=//p' "$HNAT_DIR/qos_status")
+	dscp=$(sed -n 's/^dscp_mapping=//p' "$HNAT_DIR/qos_status")
 	[ "$dscp" != 1 ] || die "DSCP queue mapping is active; disable it before using per-device EQoS"
 	case "$mode" in 0|2) ;; *) die "QDMA is owned by another QoS service or its status ABI is unavailable" ;; esac
 	tmp=$(mktemp -d /var/run/eqos.XXXXXX) || return 1

@@ -1,0 +1,58 @@
+Subject: [PATCH] net: mediatek: fix QoS seq_file private context
+
+Opening EQoS reads qos_toggle before any shaping action. Pass inode data to
+single_open so the show callback does not dereference a null private pointer.
+Reject a missing context and provide a distinct read-only status node so new
+clients can avoid the broken read ABI on older installed modules.
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+@@ -2607,6 +2607,9 @@
+ {
+ 	struct mtk_hnat *h = m->private;
+ 
++	if (!h)
++		return -ENODEV;
++
+ 	seq_printf(m, "mode=%d\nuplink=%d\ndownlink=%d\ndscp_mapping=%d\n",
+ 		   qos_toggle, qos_ul_toggle, qos_dl_toggle, !!h->dscp_en);
+ 	return 0;
+@@ -2614,7 +2617,7 @@
+ 
+ static int hnat_qos_toggle_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, hnat_qos_toggle_read, file->private_data);
++	return single_open(file, hnat_qos_toggle_read, inode->i_private);
+ }
+ 
+ void hnat_qos_shaper_ebl(u32 id, u32 enable)
+@@ -2749,10 +2752,20 @@
+ }
+ 
+ static const struct file_operations hnat_qos_toggle_fops = {
++	.owner = THIS_MODULE,
+ 	.open = hnat_qos_toggle_open,
+ 	.read = seq_read,
+ 	.llseek = seq_lseek,
+ 	.write = hnat_qos_toggle_write,
++	.release = single_release,
++};
++
++/* A separate read-only ABI lets clients avoid qos_toggle on older kernels. */
++static const struct file_operations hnat_qos_status_fops = {
++	.owner = THIS_MODULE,
++	.open = hnat_qos_toggle_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
+ 	.release = single_release,
+ };
+ 
+@@ -3255,6 +3268,8 @@
+ 			    &hnat_mape_toggle_fops);
+ 	debugfs_create_file("qos_toggle", 0444, root, h,
+ 			    &hnat_qos_toggle_fops);
++	debugfs_create_file("qos_status", 0444, root, h,
++			    &hnat_qos_status_fops);
+ 	debugfs_create_file("hnat_version", 0444, root, h,
+ 			    &hnat_version_fops);
+ 	debugfs_create_file("hnat_ppd_if", 0444, root, h,

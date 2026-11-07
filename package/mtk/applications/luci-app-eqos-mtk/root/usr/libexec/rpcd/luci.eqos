@@ -41,7 +41,7 @@ call)
 	}
 	config_foreach count_rule device
 	hook=$(cat /sys/kernel/debug/hnat/hook_toggle 2>/dev/null)
-	mode=$(sed -n 's/^mode=//p' /sys/kernel/debug/hnat/qos_toggle 2>/dev/null)
+	mode=$(sed -n 's/^mode=//p' /sys/kernel/debug/hnat/qos_status 2>/dev/null)
 	json_init
 	json_add_int schema 1
 	if [ -f /var/run/eqos/mode ]; then json_add_boolean owned 1; else json_add_boolean owned 0; fi
