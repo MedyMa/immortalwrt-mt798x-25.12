@@ -13,6 +13,7 @@ try_version() {
 
 try_git() {
 	REBOOT=ee53a240ac902dc83209008a2671e7fdcf55957a
+	SDK_REVISION=r6
 	git rev-parse --git-dir >/dev/null 2>&1 || return 1
 
 	[ -n "$GET_REV" ] || GET_REV="HEAD"
@@ -36,7 +37,7 @@ try_git() {
 		# revision count. Do not turn a failed rev-list into a misleading r0.
 		if [ "$(git rev-parse --is-shallow-repository)" = true ] ||
 		   ! git merge-base --is-ancestor "$REBOOT" "$GET_REV" 2>/dev/null; then
-			REV="g$(git rev-parse --short "$GET_REV")"
+			REV="${SDK_REVISION}-g$(git rev-parse --short "$GET_REV")"
 			return 0
 		fi
 		BRANCH="$(git rev-parse --abbrev-ref HEAD)"

@@ -74,6 +74,8 @@ define Device/bananapi_bpi-r4
   DEVICE_DTS := mt7988a-bananapi-bpi-r4
   DEVICE_DTS_CONFIG := config-mt7988a-bananapi-bpi-r4
   $(call Device/bananapi_bpi-r4-common)
+  # A73 retains the original eth1/eth2 names and the 1.0 config schema.
+  DEVICE_COMPAT_VERSION := 1.0
 endef
 TARGET_DEVICES += bananapi_bpi-r4
 
