@@ -1,6 +1,6 @@
 include $(TOPDIR)/rules.mk
 
-PKG_RELEASE:=3
+PKG_RELEASE:=5
 
 LUCI_TITLE:=LuCI support for Easy QoS
 LUCI_DEPENDS:=+tc-full +ip-full +flock +nftables +rpcd +jshn +kmod-sched-core +kmod-ifb +kmod-mediatek_hnat @!PACKAGE_luci-app-eqos

@@ -1,0 +1,211 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] wifi7: fix EAPOL MIC storage and association diagnostics
+
+Declare the variable MIC/key data tail as a flexible array without changing
+wire or binary layout. Hash the existing EAPOL frame after checking its
+length, avoiding the fixed 512-byte copy used for MIC calculation.
+
+Keep AP and STA PMK cache selection separate in AP/STA builds. Recognize
+extension IEs already parsed by the EHT handler, and log ignored optional
+IEs and normal BA debug buffer retirement at debug level. Malformed EHT
+IEs, bad cache indices and allocation failures remain errors.
+
+--- a/mt_wifi/include/common/security/dot11i_wpa.h
++++ b/mt_wifi/include/common/security/dot11i_wpa.h
+@@ -226,7 +226,7 @@
+ 	UCHAR		KeyIv[LEN_KEY_DESC_IV];
+ 	UCHAR		KeyRsc[LEN_KEY_DESC_RSC];
+ 	UCHAR		KeyId[LEN_KEY_DESC_ID];
+-	UCHAR		KeyMicAndData[0];
++	UCHAR		KeyMicAndData[];
+ }	KEY_DESCRIPTER, *PKEY_DESCRIPTER;
+ 
+ typedef	struct GNU_PACKED _EAPOL_PACKET {
+--- a/mt_wifi/common/security/cmm_wpa.c
++++ b/mt_wifi/common/security/cmm_wpa.c
+@@ -3336,63 +3336,57 @@
+ 	IN UINT8 key_deri_alg,
+ 	OUT PEAPOL_PACKET pMsg)
+ {
+-	UCHAR *OutBuffer;
+-	ULONG FrameLen = 0;
++	UCHAR *frame = (UCHAR *)pMsg;
++	ULONG FrameLen = CONV_ARRARY_TO_UINT16(pMsg->Body_Len) + LENGTH_EAPOL_H;
+ 	UCHAR	mic[LEN_KEY_DESC_MIC_MAX];
+ 	UCHAR	digest[80] = {0};
+ 	UINT8 mic_len = LEN_KEY_DESC_MIC;
+-	/* allocate memory for MIC calculation*/
+-	os_alloc_mem(NULL, (PUCHAR *)&OutBuffer, 512);
+-
+-	if (OutBuffer == NULL) {
++
++	if (FrameLen < MIN_LEN_OF_EAPOL_KEY_MSG + LENGTH_EAPOL_H ||
++	    FrameLen > TX_EAPOL_BUFFER) {
+ 		MTWF_DBG(NULL, DBG_CAT_SEC, CATSEC_WPA, DBG_LVL_ERROR,
+-			"!!!CalculateMIC: no memory!!!\n");
++			"invalid EAPOL MIC frame length: %lu\n", FrameLen);
+ 		return;
+ 	}
+ 
+-	/* make a frame for calculating MIC.*/
+-	MakeOutgoingFrame(OutBuffer, &FrameLen,
+-					  CONV_ARRARY_TO_UINT16(pMsg->Body_Len) + 4, pMsg,
+-					  END_OF_ARGS);
+ 	NdisZeroMemory(mic, sizeof(mic));
+ 
+-	/* Calculate MIC*/
++	/* The caller cleared the MIC; hash before writing the result. */
+ 	if (KeyDescVer == KEY_DESC_AES) {
+-		RT_HMAC_SHA1(PTK, LEN_PTK_KCK, OutBuffer,  FrameLen, digest, SHA1_DIGEST_SIZE);
++		RT_HMAC_SHA1(PTK, LEN_PTK_KCK, frame,  FrameLen, digest, SHA1_DIGEST_SIZE);
+ 		NdisMoveMemory(mic, digest, LEN_KEY_DESC_MIC);
+ 	} else if (KeyDescVer == KEY_DESC_TKIP)
+-		RT_HMAC_MD5(PTK, LEN_PTK_KCK, OutBuffer, FrameLen, mic, MD5_DIGEST_SIZE);
++		RT_HMAC_MD5(PTK, LEN_PTK_KCK, frame, FrameLen, mic, MD5_DIGEST_SIZE);
+ 	else if ((KeyDescVer == KEY_DESC_NOT_DEFINED) && IS_AKM_SHA384(AKMMap)) {
+-		RT_HMAC_SHA384(PTK, LEN_PTK_KCK_SHA384, OutBuffer, FrameLen, mic, LEN_KEY_DESC_MIC_SHA384);
++		RT_HMAC_SHA384(PTK, LEN_PTK_KCK_SHA384, frame, FrameLen, mic, LEN_KEY_DESC_MIC_SHA384);
+ 		mic_len = LEN_KEY_DESC_MIC_SHA384;
+ 	} else if ((KeyDescVer == KEY_DESC_NOT_DEFINED) &&
+ 		   IS_AKM_OWE(AKMMap) &&
+ 		   (key_deri_alg == SEC_KEY_DERI_SHA256)) {
+-		RT_HMAC_SHA256(PTK, LEN_PTK_KCK, OutBuffer, FrameLen, mic, LEN_KEY_DESC_MIC);
++		RT_HMAC_SHA256(PTK, LEN_PTK_KCK, frame, FrameLen, mic, LEN_KEY_DESC_MIC);
+ 		mic_len = LEN_KEY_DESC_MIC;
+ #ifdef DPP_SUPPORT
+ 	} else if ((KeyDescVer == KEY_DESC_NOT_DEFINED) &&
+ 		  IS_AKM_DPP(AKMMap) &&
+ 		  (key_deri_alg == SEC_KEY_DERI_SHA256)) {
+-		RT_HMAC_SHA256(PTK, LEN_PTK_KCK, OutBuffer, FrameLen, mic, LEN_KEY_DESC_MIC);
++		RT_HMAC_SHA256(PTK, LEN_PTK_KCK, frame, FrameLen, mic, LEN_KEY_DESC_MIC);
+ 		mic_len = LEN_KEY_DESC_MIC;
+ #endif /* DPP_SUPPORT */
+ 	} else if ((KeyDescVer == KEY_DESC_NOT_DEFINED) &&
+ 		   IS_AKM_OWE(AKMMap) &&
+ 		   (key_deri_alg == SEC_KEY_DERI_SHA384)) {
+ 		/*TODO: OWE SHA521*/
+-		RT_HMAC_SHA384(PTK, LEN_PTK_KCK_SHA384, OutBuffer, FrameLen, mic, LEN_KEY_DESC_MIC_SHA384);
++		RT_HMAC_SHA384(PTK, LEN_PTK_KCK_SHA384, frame, FrameLen, mic, LEN_KEY_DESC_MIC_SHA384);
+ 		mic_len = LEN_KEY_DESC_MIC_SHA384;
+ 	} else if ((KeyDescVer == KEY_DESC_EXT)
+ 		|| (KeyDescVer == KEY_DESC_NOT_DEFINED)) {
+ 		UINT mlen = AES_KEY128_LENGTH;
+ 
+-		AES_CMAC(OutBuffer, FrameLen, PTK, LEN_PTK_KCK, mic, &mlen);
++		AES_CMAC(frame, FrameLen, PTK, LEN_PTK_KCK, mic, &mlen);
+ 	}
+ 
+ 	/* store the calculated MIC*/
+ 	NdisMoveMemory(pMsg->KeyDesc.KeyMicAndData, mic, mic_len);
+-	os_free_mem(OutBuffer);
+ }
+ #endif /* RT_CFG80211_SUPPORT */
+ 
+--- a/mt_wifi/common/security/cmm_sec.c
++++ b/mt_wifi/common/security/cmm_sec.c
+@@ -1887,37 +1887,39 @@
+ 	if (cache_idx == INVALID_PMKID_IDX) {
+ 		pEntry->SecConfig.pmkid = NULL;
+ 		pEntry->SecConfig.pmk_cache = NULL;
+-	} else {
+-		if (IS_ENTRY_CLIENT(pEntry)) {
++		return;
++	}
++
+ #ifdef CONFIG_AP_SUPPORT
+-			if ((cache_idx < 0) || (cache_idx >= MAX_PMKID_COUNT)) {
+-				MTWF_DBG(pAd, DBG_CAT_SEC, CATSEC_PMK, DBG_LVL_ERROR,
+-					"cache idx(%d) error\n", cache_idx);
+-				return;
+-			}
+-			pEntry->SecConfig.pmkid =
+-				PD_GET_PMKID_PTR(pAd->physical_dev)->BSSIDInfo[cache_idx].PMKID;
+-			pEntry->SecConfig.pmk_cache =
+-				PD_GET_PMKID_PTR(pAd->physical_dev)->BSSIDInfo[cache_idx].PMK;
++	if (IS_ENTRY_CLIENT(pEntry)) {
++		if ((cache_idx < 0) || (cache_idx >= MAX_PMKID_COUNT)) {
++			MTWF_DBG(pAd, DBG_CAT_SEC, CATSEC_PMK, DBG_LVL_ERROR,
++				"cache idx(%d) error\n", cache_idx);
++			return;
++		}
++		pEntry->SecConfig.pmkid =
++			PD_GET_PMKID_PTR(pAd->physical_dev)->BSSIDInfo[cache_idx].PMKID;
++		pEntry->SecConfig.pmk_cache =
++			PD_GET_PMKID_PTR(pAd->physical_dev)->BSSIDInfo[cache_idx].PMK;
++	}
+ #endif
+ #ifdef CONFIG_STA_SUPPORT
+-			{
+-				PSTA_ADMIN_CONFIG pStaCfg = GetStaCfgByWdev(pAd, pEntry->wdev);
+-				if ((cache_idx < 0) || (cache_idx >= PMKID_NO)) {
+-					MTWF_DBG(pAd, DBG_CAT_SEC, CATSEC_PMK, DBG_LVL_ERROR,
+-						"cache idx(%d) error\n", cache_idx);
+-					return;
+-				}
+-				if (pStaCfg) {
+-					pEntry->SecConfig.pmkid = pStaCfg->SavedPMK[cache_idx].PMKID;
+-					pEntry->SecConfig.pmk_cache = pStaCfg->SavedPMK[cache_idx].PMK;
+-				} else
+-					MTWF_DBG(pAd, DBG_CAT_SEC, CATSEC_PMK, DBG_LVL_ERROR,
+-							"pStaCfg is null\n");
+-			}
++	if (IS_ENTRY_PEER_AP(pEntry)) {
++		PSTA_ADMIN_CONFIG pStaCfg = GetStaCfgByWdev(pAd, pEntry->wdev);
++
++		if ((cache_idx < 0) || (cache_idx >= PMKID_NO)) {
++			MTWF_DBG(pAd, DBG_CAT_SEC, CATSEC_PMK, DBG_LVL_ERROR,
++				"cache idx(%d) error\n", cache_idx);
++			return;
++		}
++		if (pStaCfg) {
++			pEntry->SecConfig.pmkid = pStaCfg->SavedPMK[cache_idx].PMKID;
++			pEntry->SecConfig.pmk_cache = pStaCfg->SavedPMK[cache_idx].PMK;
++		} else
++			MTWF_DBG(pAd, DBG_CAT_SEC, CATSEC_PMK, DBG_LVL_ERROR,
++				"pStaCfg is null\n");
++	}
+ #endif
+-		}
+-	}
+ }
+ 
+ UCHAR is_pmkid_cache_in_sec_config(
+--- a/mt_wifi/common/fsm/ap_mgmt_assoc.c
++++ b/mt_wifi/common/fsm/ap_mgmt_assoc.c
+@@ -1557,6 +1557,14 @@
+ #endif /* DOT11_EHT_BE */
+ 
+ 			switch (*extension_id) {
++#ifdef DOT11_EHT_BE
++			case EID_EXT_EHT_CAPS:
++			case EID_EXT_EHT_OP:
++			case EID_EXT_EHT_MULTI_LINK:
++			case IE_EXTENSION_ID_NON_INHERITANCE:
++				/* Already parsed by eht_get_ies(). */
++				break;
++#endif
+ 			case IE_EXTENSION_ID_ECDH:
+ #if defined(CONFIG_OWE_SUPPORT) || defined(HOSTAPD_OWE_SUPPORT)
+ 			{
+@@ -1590,8 +1598,8 @@
+ 				break;
+ #endif
+ 			default:
+-				MTWF_DBG(pAd, DBG_CAT_MLME, CATMLME_ASSOC, DBG_LVL_ERROR,
+-					"IE_WLAN_EXTENSION: no handler for extension_id:%d\n", *extension_id);
++				MTWF_DBG(pAd, DBG_CAT_MLME, CATMLME_ASSOC, DBG_LVL_DEBUG,
++					"IE_WLAN_EXTENSION: ignoring extension_id:%d\n", *extension_id);
+ 				break;
+ 			}
+ 		}
+--- a/mt_wifi/common/ba_action.c
++++ b/mt_wifi/common/ba_action.c
+@@ -2345,7 +2345,7 @@
+ 
+ 		if ((ba_ctl->dbg_flag & SN_HISTORY) && (ba_ctl->numAsRecipient < 5)) {
+ 			if (pBAEntry->ba_rec_dbg != NULL) {
+-				MTWF_DBG(pAd, DBG_CAT_PROTO, CATPROTO_BA, DBG_LVL_ERROR,
++				MTWF_DBG(pAd, DBG_CAT_PROTO, CATPROTO_BA, DBG_LVL_DEBUG,
+ 					"Freeing previous Debug BA Rec %p\n",
+ 					pBAEntry->ba_rec_dbg);
+ 				os_free_mem(pBAEntry->ba_rec_dbg);
