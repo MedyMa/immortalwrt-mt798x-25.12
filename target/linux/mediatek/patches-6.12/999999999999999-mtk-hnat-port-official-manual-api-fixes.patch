@@ -1,0 +1,199 @@
+Subject: [PATCH] net: mediatek: adapt official manual HNAT API fixes to R4 baseline
+
+Port MediaTek c2b24b4806e78af3ea403e3a6668871abea5ddb2 on top of the
+24.10 network baseline used by this target, rather than the superseded
+files-6.12 driver. Keep accounting owners coherent across metadata updates
+and deletion, protect callback loads and invocation with RCU, and serialize
+legacy MIB read-clear transactions without nesting the ledger lock.
+
+The API source/header carry the upstream API fixes. Reconnect them after
+the baseline patch so the corrected API is actually compiled and linked.
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
+@@ -29,6 +29,7 @@
+ 
+ #include "nf_hnat_mtk.h"
+ #include "hnat.h"
++#include "hnat_api.h"
+ 
+ struct mtk_hnat *hnat_priv;
+ static struct socket *_hnat_roam_sock;
+@@ -1268,6 +1269,9 @@
+ 	err = hnat_account_init(hnat_priv);
+ 	if (err)
+ 		goto err_out;
++	err = hnat_api_init();
++	if (err)
++		goto err_out;
+ 
+ 	if (hnat_priv->data->whnat) {
+ 		err = whnat_adjust_nf_hooks();
+@@ -1317,6 +1321,7 @@
+ 
+ err_out:
+ 	hnat_deinit_debugfs(hnat_priv);
++	hnat_api_deinit();
+ 	if (hnat_netdevice_registered) {
+ 		unregister_netdevice_notifier(&nf_hnat_netdevice_nb);
+ 		hnat_netdevice_registered = false;
+@@ -1354,6 +1359,7 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	hnat_deinit_debugfs(hnat_priv);
++	hnat_api_deinit();
+ 	hnat_roaming_disable();
+ 	if (hnat_netdevice_registered) {
+ 		unregister_netdevice_notifier(&nf_hnat_netdevice_nb);
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -40,6 +40,7 @@
+ 
+ #include "nf_hnat_mtk.h"
+ #include "hnat.h"
++#include "hnat_api.h"
+ 
+ #include "../mtk_eth_soc.h"
+ #include "../mtk_eth_reset.h"
+@@ -3281,7 +3282,7 @@
+ 	struct nf_conn *ct;
+ 	enum ip_conntrack_info ctinfo;
+ 	u64 account_generation = 0, shadow_sequence;
+-	bool account_handled, accepted = false;
++	bool account_handled, accepted = false, notify_bind = false;
+ 	struct ethhdr *eth;
+ 	struct hnat_tunnel_token rx_token = {};
+ 	const struct mtk_npu_rx_meta *rx = mtk_npu_rx_meta_find(skb);
+@@ -3680,9 +3681,12 @@
+ 	}
+ #endif
+ 	spin_unlock_bh(&hnat_priv->entry_lock);
++	notify_bind = true;
+ rx_unlock:
+ 	if (rx)
+ 		hnat_tunnel_bind_unlock(&rx_token);
++	if (notify_bind)
++		hnat_trigger_callback(false, skb);
+ 	return NF_ACCEPT;
+ }
+ 
+@@ -4743,6 +4747,9 @@
+ 	case HIT_BIND_EXCEED_MTU:
+ 		hnat_diag_note(skb, HNAT_DIAG_MTU, 0, 0, -1, 0, -1);
+ 		break;
++	case TCP_FIN_SYN_RST:
++		hnat_trigger_callback(true, skb);
++		break;
+ 	case HIT_UNBIND:
+ 		hnat_diag_note(skb, HNAT_DIAG_BIND_THRESHOLD, 0, 0, -1, 0, -1);
+ 		break;
+@@ -4773,6 +4780,7 @@
+ 			skb_to_hnat_info(skb, out, entry, &hw_path, route_out);
+ 			if (rx)
+ 				hnat_tunnel_bind_unlock(&rx_token);
++			hnat_trigger_callback(false, skb);
+ 		}
+ 		break;
+ 	case HIT_BIND_KEEPALIVE_DUP_OLD_HDR:
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+@@ -34,6 +34,11 @@
+ int xlat_toggle;
+ struct hnat_desc headroom[DEF_ETRY_NUM];
+ unsigned int dbg_cpu_reason_cnt[MAX_CRSN_NUM];
++
++/* Legacy fallback only; owner-accounted reads use the ledger's per-PPE lock. */
++static spinlock_t hnat_mib_lock[MAX_PPE_NUM] = {
++	[0 ... MAX_PPE_NUM - 1] = __SPIN_LOCK_UNLOCKED(hnat_mib_lock),
++};
+ 
+ static const char * const entry_state[] = { "INVALID", "UNBIND", "BIND", "FIN" };
+ 
+@@ -1043,11 +1048,15 @@
+ 	if (!hnat_priv->data->per_flow_accounting)
+ 		return NULL;
+ 
+-	if (read_mib(h, ppe_id, index, &bytes, &packets))
++	spin_lock_bh(&hnat_mib_lock[ppe_id]);
++	if (read_mib(h, ppe_id, index, &bytes, &packets)) {
++		spin_unlock_bh(&hnat_mib_lock[ppe_id]);
+ 		return NULL;
++	}
+ 
+ 	h->acct[ppe_id][index].bytes += bytes;
+ 	h->acct[ppe_id][index].packets += packets;
++	spin_unlock_bh(&hnat_mib_lock[ppe_id]);
+ 
+ 	if (diff) {
+ 		diff->bytes = bytes;
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_account.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_account.c
+@@ -432,6 +432,46 @@
+ 	return err;
+ }
+ 
++/* Caller holds entry_lock. Keep API-only metadata changes and the owner's
++ * identity atomic with respect to MIB polling, without replacing the flow or
++ * resetting its generation, pending rule credit or client counters.
++ */
++int hnat_account_update_metadata(struct mtk_hnat *h, u32 ppe, u32 slot,
++				 const struct foe_entry *before,
++				 const struct foe_entry *updated)
++{
++	struct hnat_accounting delta;
++	struct hnat_account_ppe *p;
++	struct foe_entry *entry;
++	int err = -ESTALE;
++
++	if (!before || !updated || !account_valid(h, ppe, slot))
++		return -EINVAL;
++	lockdep_assert_held(&h->entry_lock);
++	p = &h->account->ppe[ppe];
++	entry = &h->foe_table_cpu[ppe][slot];
++	spin_lock_bh(&p->lock);
++	if (p->paused || entry->bfib1.state != BIND ||
++	    !account_identity(before, entry))
++		goto out;
++	err = drain_locked(h, ppe, slot, &delta);
++	if (err)
++		goto out;
++	/* The PPE can age or relearn a slot during the read-clear transaction. */
++	if (entry->bfib1.state != BIND || !account_identity(before, entry)) {
++		err = -ESTALE;
++		goto out;
++	}
++	wmb();
++	memcpy(entry, updated, sizeof(*entry));
++	dma_wmb();
++	if (p->slots[slot].owner)
++		p->slots[slot].owner->identity = *updated;
++out:
++	spin_unlock_bh(&p->lock);
++	return err;
++}
++
+ bool hnat_account_entry_snapshot(struct mtk_hnat *h, u32 ppe, u32 slot,
+ 				 struct foe_entry *entry, u64 *generation)
+ {
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_account.h
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_account.h
+@@ -11,6 +11,9 @@
+ bool hnat_account_enabled(struct mtk_hnat *h);
+ int hnat_account_drain(struct mtk_hnat *h, u32 ppe, u32 slot,
+ 		       struct hnat_accounting *total, struct hnat_accounting *delta);
++int hnat_account_update_metadata(struct mtk_hnat *h, u32 ppe, u32 slot,
++				 const struct foe_entry *before,
++				 const struct foe_entry *updated);
+ bool hnat_account_entry_snapshot(struct mtk_hnat *h, u32 ppe, u32 slot,
+ 				 struct foe_entry *entry, u64 *generation);
+ bool hnat_account_generation_snapshot(struct mtk_hnat *h, u32 ppe, u32 slot,
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/Makefile
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/Makefile
+@@ -1,6 +1,6 @@
+ ccflags-y=-Werror
+ ccflags-y += -Wno-error=attribute-warning
+ obj-$(CONFIG_NET_MEDIATEK_HNAT)         += mtkhnat.o
+-mtkhnat-objs := hnat.o hnat_nf_hook.o hnat_debugfs.o hnat_mcast.o hnat_account.o hnat_diag.o
++mtkhnat-objs := hnat.o hnat_nf_hook.o hnat_debugfs.o hnat_mcast.o hnat_account.o hnat_diag.o hnat_api.o
+ mtkhnat-$(CONFIG_MEDIATEK_NETSYS_V3) += hnat_npu_mcast.o
+ mtkhnat-$(CONFIG_NET_DSA_MT7530)	+= hnat_stag.o

@@ -7,7 +7,10 @@
 #ifndef NF_HNAT_API_H
 #define NF_HNAT_API_H
 
-#include "hnat.h"
+#include <linux/types.h>
+
+struct sk_buff;
+struct dentry;
 
 enum hnat_status {
 	HNAT_ALREADY_SET = 1,
@@ -78,9 +81,6 @@ struct hnat_tuple {
 	unsigned char eg_dev[16]; /* netdev name of egress */
 };
 
-extern void (*hnat_bind_callback)(struct hnat_tuple *opt);
-extern void (*hnat_fin_callback)(struct hnat_tuple *opt);
-
 int mtk_hnat_get_ppe_num(void);
 int mtk_hnat_get_ppe_entry_num(void);
 int mtk_hnat_get_ppe_entry_by_index(struct hnat_tuple *opt);
@@ -129,11 +129,17 @@ int mtk_hnat_update_tid_by_index(unsigned short ppe_index,
 int mtk_hnat_update_tid_by_skb(struct sk_buff *skb, unsigned short tid);
 int mtk_hnat_register_bind_callback(void (*func)(struct hnat_tuple *));
 int mtk_hnat_register_fin_callback(void (*func)(struct hnat_tuple *));
+/* Callbacks run under RCU and cannot sleep. Unregister in module exit,
+ * outside RCU/read or atomic context; unregister waits and may sleep. */
+void mtk_hnat_unregister_bind_callback(void);
+void mtk_hnat_unregister_fin_callback(void);
 int mtk_hnat_get_fin_age_config(unsigned short ppe_index);
 int mtk_hnat_set_fin_age_config(unsigned short ppe_index, bool enable);
 
-void hnat_trigger_callback(void (*func)(struct hnat_tuple *), struct sk_buff *skb);
+void hnat_trigger_callback(bool fin, struct sk_buff *skb);
 void hnat_api_init_debugfs(struct dentry *root);
+int hnat_api_init(void);
+void hnat_api_deinit(void);
 
 #define IS_HNAT_API_SUPPORTED(x)	\
 	(IS_IPV4_HNAPT(x) || IS_IPV6_5T_ROUTE(x))
