@@ -1,0 +1,79 @@
+--- a/mt_wifi/common/rtmp_init.c
++++ b/mt_wifi/common/rtmp_init.c
+@@ -538,7 +538,7 @@
+ 
+ #ifdef LINUX
+ #if defined(DOT11_SAE_SUPPORT) || defined(CONFIG_OWE_SUPPORT)
+-#ifndef RT_CFG80211_SUPPORT
++#if !defined(RT_CFG80211_SUPPORT) && !defined(HWIFI_SUPPORT)
+ #ifdef MULTI_INF_SUPPORT
+     /* The group info shared by all interface so make sure all interface down
+      * before calling group_info_bi_deinit
+@@ -546,7 +546,7 @@
+ 	if (multi_inf_active_cnt() == 0)
+ #endif
+ 		group_info_bi_deinit();
+-#endif /* RT_CFG80211_SUPPORT */
++#endif /* !RT_CFG80211_SUPPORT && !HWIFI_SUPPORT */
+ #endif
+ #endif /* LINUX */
+ 
+--- a/mt_wifi/os/linux/rt_linux.c
++++ b/mt_wifi/os/linux/rt_linux.c
+@@ -4186,10 +4186,6 @@
+ 	bss_mngr_deinit();
+ 
+ 	multi_hif_exit();
+-/* Del out-of-memory notifier */
+-#ifdef MEM_ALLOC_INFO_SUPPORT
+-	MemInfoListExit();
+-#endif /*MEM_ALLOC_INFO_SUPPORT*/
+ #ifdef CONFIG_CONNINFRA_SUPPORT
+ 	conninfra_pwr_off(CONNDRV_TYPE_WIFI);
+ #endif /* CONFIG_CONNINFRA_SUPPORT */
+@@ -4199,4 +4195,14 @@
+ 
+ 	/* All callback producers are stopped. Their code belongs to mt_wifi. */
+ 	mt_rcu_barrier();
++
++#if defined(HWIFI_SUPPORT) && !defined(RT_CFG80211_SUPPORT) && \
++	(defined(DOT11_SAE_SUPPORT) || defined(CONFIG_OWE_SUPPORT))
++	/* HWIFI bands share this cache and do not populate legacy adapt_list. */
++	group_info_bi_deinit();
++#endif
++#ifdef MEM_ALLOC_INFO_SUPPORT
++	/* Keep allocation tracking alive until all module-owned data is freed. */
++	MemInfoListExit();
++#endif /* MEM_ALLOC_INFO_SUPPORT */
+ }
+--- a/mt_wifi/hw_ctrl/hwifi_main.c
++++ b/mt_wifi/hw_ctrl/hwifi_main.c
+@@ -1307,7 +1307,8 @@
+ 	os_alloc_mem(NULL, (UCHAR **)&buf, 2048);
+ 	if (buf == NULL) {
+ 		MTWF_DBG(NULL, DBG_CAT_HIF, CATHIF_HWIFI, DBG_LVL_ERROR,
+-			"can not allocate buf[1024]\n");
++			"can not allocate firmware response buffer[2048]\n");
++		ret = NDIS_STATUS_FAILURE;
+ 		goto err;
+ 	}
+ 
+@@ -1321,6 +1322,7 @@
+ #endif /* WIFI_UNIFIED_COMMAND */
+ 
+ 	mcu_msg.rx_data = buf;
++	mcu_msg.rx_len = 2048;
+ 
+ 	ret = mcu_dest_trans(attr->mcu_dest, &mcu_msg.dest);
+ 
+@@ -1347,8 +1349,8 @@
+ 		goto err;
+ 	}
+ 
+-	if (attr->rsp.handler) {
+-		if (mcu_msg.rx_data) {
++	if (attr->rsp.handler && mcu_msg.is_wait) {
++		if (mcu_msg.rx_data && mcu_msg.rx_len) {
+ 			attr->rsp.handler(msg, mcu_msg.rx_data, mcu_msg.rx_len);
+ 			if (mcu_msg.uni_cmd)
+ 				ret = msg->cmd_return_status;
