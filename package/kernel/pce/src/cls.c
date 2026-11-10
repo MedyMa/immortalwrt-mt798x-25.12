@@ -15,13 +15,13 @@
 #include "pce/internal.h"
 #include "pce/netsys.h"
 
-static RAW_NOTIFIER_HEAD(cls_notif_chain);
+static ATOMIC_NOTIFIER_HEAD(cls_notif_chain);
 
 int mtk_pce_register_cls_notifier(struct notifier_block *nb)
 {
 	int ret;
 
-	ret = raw_notifier_chain_register(&cls_notif_chain, nb);
+	ret = atomic_notifier_chain_register(&cls_notif_chain, nb);
 
 	return ret;
 }
@@ -31,7 +31,7 @@ int mtk_pce_unregister_cls_notifier(struct notifier_block *nb)
 {
 	int ret;
 
-	ret = raw_notifier_chain_unregister(&cls_notif_chain, nb);
+	ret = atomic_notifier_chain_unregister(&cls_notif_chain, nb);
 
 	return ret;
 }
@@ -185,7 +185,7 @@ void mtk_pce_cls_entry_free(struct cls_entry *cls)
 	if (!cls)
 		return;
 
-	raw_notifier_call_chain(&cls_notif_chain, CLS_NOTIFY_DELETE_ENTRY, cls);
+	atomic_notifier_call_chain(&cls_notif_chain, CLS_NOTIFY_DELETE_ENTRY, cls);
 
 	spin_lock_irqsave(&cls_hw.lock, flag);
 	clear_bit(cls->idx - 1, cls_hw.cls_used);
