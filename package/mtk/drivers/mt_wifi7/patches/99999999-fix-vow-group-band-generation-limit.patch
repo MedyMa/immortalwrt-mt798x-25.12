@@ -1,0 +1,22 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] wifi7: apply VOW group-mapping generation limit on AP start
+
+The manual group-to-band control already skips BESRA and later VOW
+implementations as unsupported, but AP start still sends the same legacy
+estimator command. MT7990 uses VOW_GEN_BESRA. Keep the host mapping and
+skip only the unsupported legacy firmware request on these generations.
+
+Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
+---
+--- a/mt_wifi/feature/vow/ap_vow.c
++++ b/mt_wifi/feature/vow/ap_vow.c
+@@ -1817,6 +1817,9 @@
+ 		/* MBSS <--> group 1 to 1 mapping, ex: SSID0 --> Group0 */
+ 		vow_group_band_map(pad, band_idx, group_idx);
+ 		pad->vow_bss_cfg[group_idx].band_idx = band_idx;
++		/* Match the generation limit in set_vow_group2band_map(). */
++		if (pad->vow_gen.VOW_GEN >= VOW_GEN_BESRA)
++			return;
+ #ifdef WIFI_UNIFIED_COMMAND
+ 		if (pChipCap->uni_cmd_support)
+ 			uni_cmd_vow_set_at_estimator_group(pad, ENUM_AT_PROC_EST_GROUP_TO_BAND_MAPPING, group_idx);
