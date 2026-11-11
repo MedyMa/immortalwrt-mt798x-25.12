@@ -1,0 +1,28 @@
+--- a/mt_wifi/include/common/security/dot11w_pmf.h
++++ b/mt_wifi/include/common/security/dot11w_pmf.h
+@@ -87,7 +87,7 @@
+ typedef struct GNU_PACKED _PMF_IGTK_KDE {
+ 	UINT8 KeyID[2];		/* identifies the IGTK used to compute the MIC */
+ 	UINT8 IPN[6];		/* indicates the receive sequence counter for the IGTK being installed */
+-	UINT8 IGTK[0];		/* The length of the IGTK */
++	UINT8 IGTK[];		/* 16 or 32 bytes, depending on the BIP cipher */
+ } PMF_IGTK_KDE, *PPMF_IGTK_KDE;
+ 
+ 
+--- a/mt_wifi/chip/mcu/cmm_fw_uni_event.c
++++ b/mt_wifi/chip/mcu/cmm_fw_uni_event.c
+@@ -8003,9 +8003,12 @@
+ 
+ 			wcid = uni_event_all_sta_record_wcid(record);
+ 			if (!IS_WCID_VALID(pAd, wcid)) {
+-				pr_warn_once("mt_wifi: dropping malformed ALL_STA event: tag=%u record=%u WCID=%u WTBL_MAX=%u\n",
++				pr_warn_ratelimited("mt_wifi: dropping malformed ALL_STA event: tag=%u record=%u WCID=%u WTBL_MAX=%u "
++					"stations=%u tlv_len=%u available=%u record_len=%u\n",
+ 					(unsigned int)tag, (unsigned int)idx, (unsigned int)wcid,
+-					(unsigned int)WTBL_MAX_NUM(pAd));
++					(unsigned int)WTBL_MAX_NUM(pAd), (unsigned int)sta_num,
++					(unsigned int)tlv_len, (unsigned int)tlv_available,
++					(unsigned int)record_len);
+ 				return FALSE;
+ 			}
+ 		}
