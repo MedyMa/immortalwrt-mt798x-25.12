@@ -3,9 +3,10 @@ Subject: [PATCH] wifi7: support both ALL_STA admission-statistics layouts
 
 MediaTek softmac_mt76 b497a8c5525c adds a 52-byte admission-statistics
 record with per-AC failed-byte counters alongside the old 36-byte record.
-Select the stride from known event lengths before validating WCIDs or
-updating counters. Keep rejection of truncated, unknown and invalid-WCID
-events. Do not carry one station's per-AC delta into the next station.
+Select the stride from event length and V2 record alignment before
+validating WCIDs and updating counters. Keep rejection of truncated,
+unknown and invalid-WCID events. Do not carry one station's per-AC delta
+into the next station.
 
 Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
 ---
@@ -53,7 +54,7 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
  			}
  
  			/* sta counter by mpdu, per link */
-@@ -7942,15 +7942,31 @@
+@@ -7942,15 +7942,32 @@
  }
  #endif /* TXRX_STAT_SUPPORT */
  
@@ -61,12 +62,13 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
 +{
 +	UINT32 v1_len = sizeof(struct UNI_EVENT_ONE_STA_TXRX_ADM_STAT_T);
 +	UINT32 v2_len = sizeof(struct UNI_EVENT_ONE_STA_TXRX_ADM_STAT_V2_T);
-+	UINT32 max_sta = UNI_EVENT_ALL_STA_TXRX_ADM_STAT_PER_EVENT;
++	UINT32 v1_capacity = UNI_EVENT_ALL_STA_TXRX_ADM_STAT_PER_EVENT;
 +
-+	/* Firmware may send the full array or only the reported stations. */
-+	if (payload_len == max_sta * v1_len || payload_len == sta_num * v1_len)
++	/* V1 has a fixed array; also preserve compact legacy events. */
++	if (payload_len == v1_capacity * v1_len || payload_len == sta_num * v1_len)
 +		return v1_len;
-+	if (payload_len == max_sta * v2_len || payload_len == sta_num * v2_len)
++	/* V2 capacity varies: MT7990 also reports 25-record padded arrays. */
++	if (payload_len % v2_len == 0)
 +		return v2_len;
 +
 +	return 0;
@@ -88,7 +90,7 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
  	UINT32 record_len = 0, payload_len, idx;
  	UINT16 wcid;
  	const char *reason = "invalid TLV";
-@@ -7977,7 +7993,11 @@
+@@ -7977,7 +7994,11 @@
  		record_len = sizeof(struct UNI_EVENT_ONE_STA_TX_STAT_T);
  		break;
  	case UNI_EVENT_ALL_STA_TXRX_ADM_STAT:
@@ -101,7 +103,7 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
  		break;
  	case UNI_EVENT_ALL_STA_TXRX_AIR_TIME:
  		record_len = sizeof(struct UNI_EVENT_ONE_STA_TXRX_AIR_TIME_T);
-@@ -8017,10 +8037,14 @@
+@@ -8017,10 +8038,14 @@
  	*tag_out = tag;
  	*sta_num_out = sta_num;
  	*payload_len_out = payload_len;
@@ -117,7 +119,7 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
  	return FALSE;
  }
  
-@@ -8034,7 +8058,7 @@
+@@ -8034,7 +8059,7 @@
  	struct UNI_EVENT_ALL_STA_INFO_COMMON_T *tlv;
  	struct _RTMP_ADAPTER *pAd;
  	UINT16 tag, sta_num;
@@ -126,7 +128,7 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
  	UINT32 fixed_len = sizeof(*event);
  
  	if (!physical_dev || !pData) {
-@@ -8056,7 +8080,7 @@
+@@ -8056,7 +8081,7 @@
  	}
  
  	if (!uni_event_validate_all_sta_tlv(pAd, tlv, Length - fixed_len,
@@ -135,7 +137,7 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
  		return;
  
  	switch (tag) {
-@@ -8069,7 +8093,7 @@
+@@ -8069,7 +8094,7 @@
  		break;
  
  	case UNI_EVENT_ALL_STA_TXRX_ADM_STAT:
