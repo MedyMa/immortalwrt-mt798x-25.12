@@ -11,11 +11,17 @@ Expose host-side notifier status, backlog and allocation/queue failures
 in the read-only hnat/roaming debugfs file. Missing switchdev support is
 reported as unavailable rather than a successful stub registration.
 
+Bound dynamic MAC work and use a preallocated recovery job when events
+exceed admission or allocation fails. The existing binding-clear path
+retires accounting/tunnel owners and restores learning through its timer.
+Report matching snapshots rather than claiming confirmed hardware deletions.
+
 Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
+
 ---
 --- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
 +++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
-@@ -15,26 +15,40 @@
+@@ -15,26 +15,46 @@
  #include <linux/atomic.h>
  #include <linux/dma-mapping.h>
  #include <linux/delay.h>
@@ -43,12 +49,15 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
 -static struct delayed_work _hnat_roam_work;
 -static bool _hnat_roam_stopping;
 +
++#define HNAT_ROAM_MAX_PENDING 128U
++
 +struct hnat_roam_work {
 +	struct work_struct work;
 +	u8 mac[ETH_ALEN];
 +};
 +
 +static struct workqueue_struct *hnat_roam_wq;
++static struct work_struct hnat_roam_recovery_work;
 +static bool hnat_roam_enabled;
 +static int hnat_roam_error;
 +static atomic_t hnat_roam_pending = ATOMIC_INIT(0);
@@ -57,11 +66,23 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
 +static atomic64_t hnat_roam_completed = ATOMIC64_INIT(0);
 +static atomic64_t hnat_roam_alloc_failed = ATOMIC64_INIT(0);
 +static atomic64_t hnat_roam_queue_failed = ATOMIC64_INIT(0);
-+static atomic64_t hnat_roam_deleted = ATOMIC64_INIT(0);
++static atomic64_t hnat_roam_matches = ATOMIC64_INIT(0);
++static atomic64_t hnat_roam_overflows = ATOMIC64_INIT(0);
++static atomic64_t hnat_roam_recovery_requests = ATOMIC64_INIT(0);
++static atomic64_t hnat_roam_recovery_runs = ATOMIC64_INIT(0);
  static bool hnat_pack_registered;
  static bool hnat_netdevice_registered;
  static bool hnat_netevent_registered;
-@@ -502,97 +516,129 @@
+@@ -479,7 +499,7 @@
+ 					memset(entry, 0, sizeof(*entry));
+ 				hnat_cache_ebl(1);
+ 				if (debug_level >= 2)
+-					pr_info("delete entry idx = %d\n", index);
++					pr_info("matched entry idx = %d\n", index);
+ 				ret++;
+ 			}
+ 		}
+@@ -502,97 +522,158 @@
  	return ret;
  }
  
@@ -76,15 +97,31 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
 -	int len;
 -
 -	if (READ_ONCE(_hnat_roam_stopping) || !_hnat_roam_sock)
++static void hnat_roam_recovery_handler(struct work_struct *work)
++{
++	/* This existing path retires accounting owners and tunnel shadows before
++	 * invalidating cached bindings. Its timer restores hardware learning.
++	 */
++	foe_clear_all_bind_entries();
++	atomic64_inc(&hnat_roam_recovery_runs);
++}
++
++static void hnat_roam_recover(void)
++{
++	/* A fixed work item coalesces lost events without another allocation. */
++	atomic64_inc(&hnat_roam_recovery_requests);
++	queue_work(hnat_roam_wq, &hnat_roam_recovery_work);
++}
++
 +static void hnat_roam_work_handler(struct work_struct *work)
 +{
 +	struct hnat_roam_work *roam = container_of(work, struct hnat_roam_work, work);
-+	int deleted;
++	int matched;
 +
-+	/* Retain the callback admission and accounting-generation protections. */
-+	deleted = entry_delete_by_mac(roam->mac);
-+	if (deleted > 0)
-+		atomic64_add(deleted, &hnat_roam_deleted);
++	/* Generation fencing may skip a matching slot that has been relearned. */
++	matched = entry_delete_by_mac(roam->mac);
++	if (matched > 0)
++		atomic64_add(matched, &hnat_roam_matches);
 +	atomic64_inc(&hnat_roam_completed);
 +	atomic_dec(&hnat_roam_pending);
 +	kfree(roam);
@@ -111,24 +148,32 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
 +	if (debug_level >= 2)
 +		pr_info("hnat: FDB delete mac=%pM port=%s\n", fdb_info->addr, dev->name);
 +
++	if (!atomic_add_unless(&hnat_roam_pending, 1, HNAT_ROAM_MAX_PENDING)) {
++		atomic64_inc(&hnat_roam_overflows);
++		hnat_roam_recover();
++		return NOTIFY_DONE;
++	}
++
 +	/* The notifier is atomic; own the MAC instead of retaining FDB/dev pointers. */
 +	roam = kmalloc(sizeof(*roam), GFP_ATOMIC);
 +	if (!roam) {
++		atomic_dec(&hnat_roam_pending);
 +		atomic64_inc(&hnat_roam_alloc_failed);
-+		pr_warn_ratelimited("hnat: FDB roaming event dropped: allocation failed\n");
++		hnat_roam_recover();
++		pr_warn_ratelimited("hnat: FDB roaming allocation failed; requesting recovery\n");
 +		return NOTIFY_DONE;
 +	}
 +
 +	ether_addr_copy(roam->mac, fdb_info->addr);
 +	INIT_WORK(&roam->work, hnat_roam_work_handler);
-+	atomic_inc(&hnat_roam_pending);
 +	atomic64_inc(&hnat_roam_queued);
 +	if (!queue_work(hnat_roam_wq, &roam->work)) {
 +		atomic64_dec(&hnat_roam_queued);
 +		atomic_dec(&hnat_roam_pending);
 +		atomic64_inc(&hnat_roam_queue_failed);
 +		kfree(roam);
-+		pr_warn_ratelimited("hnat: FDB roaming event could not be queued\n");
++		hnat_roam_recover();
++		pr_warn_ratelimited("hnat: FDB roaming work could not be queued; requesting recovery\n");
 +	}
 +
 +	return NOTIFY_DONE;
@@ -158,6 +203,7 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
 +		goto fail;
 +	}
 +
++	INIT_WORK(&hnat_roam_recovery_work, hnat_roam_recovery_handler);
 +	ret = register_switchdev_notifier(&hnat_roam_switchdev_nb);
 +	if (ret) {
 +		destroy_workqueue(hnat_roam_wq);
@@ -273,13 +319,17 @@ Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
 +	seq_printf(s, "queued %lld\n", atomic64_read(&hnat_roam_queued));
 +	seq_printf(s, "completed %lld\n", atomic64_read(&hnat_roam_completed));
 +	seq_printf(s, "pending %d\n", atomic_read(&hnat_roam_pending));
++	seq_printf(s, "pending_limit %u\n", HNAT_ROAM_MAX_PENDING);
++	seq_printf(s, "overflow_events %lld\n", atomic64_read(&hnat_roam_overflows));
++	seq_printf(s, "recovery_requests %lld\n", atomic64_read(&hnat_roam_recovery_requests));
++	seq_printf(s, "recovery_work_runs %lld\n", atomic64_read(&hnat_roam_recovery_runs));
 +	seq_printf(s, "allocation_failures %lld\n", atomic64_read(&hnat_roam_alloc_failed));
 +	seq_printf(s, "queue_failures %lld\n", atomic64_read(&hnat_roam_queue_failed));
-+	seq_printf(s, "entries_deleted %lld\n", atomic64_read(&hnat_roam_deleted));
++	seq_printf(s, "matched_entries %lld\n", atomic64_read(&hnat_roam_matches));
  }
  
  static int hnat_hw_init(u32 ppe_id)
-@@ -1311,7 +1357,7 @@
+@@ -1311,7 +1392,7 @@
  
  	err = hnat_roaming_enable();
  	if (err)
