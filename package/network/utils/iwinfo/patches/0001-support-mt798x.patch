@@ -30,7 +30,7 @@
 
 --- a/devices.txt
 +++ b/devices.txt
-@@ -188,6 +188,8 @@
+@@ -188,7 +188,9 @@
  0x14c3 0x7628 0x14c3 0x0004    0      0  "MediaTek" "MT76x8"
  0x14c3 0x7650 0x14c3 0x7650    0      0  "MediaTek" "MT7610E"
  0x14c3 0x7662 0x14c3 0x7662    0      0  "MediaTek" "MT76x2E"
@@ -38,6 +38,7 @@
 +0x14c3 0x7992 0x14c3 0x7992    0      0  "MediaTek" "MT7992"
  0x14c3 0x7915 0x14c3 0x7915    0      0  "MediaTek" "MT7915E"
  0x14c3 0x7906 0x14c3 0x7906    0      0  "MediaTek" "MT7916AN"
+ 0x14c3 0x7961 0x14c3 0x7961    0      0  "MediaTek" "MT7921E"
  0x14c3 0x7925 0x1a3b 0x6002    0      0  "MediaTek" "MT7925E"
 
 --- a/Makefile

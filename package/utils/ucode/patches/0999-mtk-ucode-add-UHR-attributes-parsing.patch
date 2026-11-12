@@ -5,16 +5,13 @@ Subject: [PATCH] mtk: ucode: add UHR attributes parsing
 
 CR-Id: WCNCR00289305
 Signed-off-by: Michael-CY Lee <michael-cy.lee@mediatek.com>
----
- include/linux/nl80211.h | 2 ++
- lib/nl80211.c           | 4 +++-
- 2 files changed, 5 insertions(+), 1 deletion(-)
 
-diff --git a/include/linux/nl80211.h b/include/linux/nl80211.h
-index 6d11437..a5ffb2f 100644
+Retain the upstream EHT MCS/PPE attributes while extending the MTK UHR
+parser. The newer source already has eleven base attributes.
+
 --- a/include/linux/nl80211.h
 +++ b/include/linux/nl80211.h
-@@ -4128,6 +4128,8 @@ enum nl80211_band_iftype_attr {
+@@ -4265,6 +4265,8 @@
  	NL80211_BAND_IFTYPE_ATTR_EHT_CAP_PHY,
  	NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MCS_SET,
  	NL80211_BAND_IFTYPE_ATTR_EHT_CAP_PPE,
@@ -23,28 +20,23 @@ index 6d11437..a5ffb2f 100644
  
  	/* keep last */
  	__NL80211_BAND_IFTYPE_ATTR_AFTER_LAST,
-diff --git a/lib/nl80211.c b/lib/nl80211.c
-index 05a8ed6..fd51dc9 100644
 --- a/lib/nl80211.c
 +++ b/lib/nl80211.c
-@@ -637,7 +637,7 @@ static const uc_nl_nested_spec_t nl80211_wiphy_bands_rates_nla = {
+@@ -653,7 +653,7 @@
  
  static const uc_nl_nested_spec_t nl80211_wiphy_bands_iftype_data_nla = {
  	.headsize = 0,
--	.nattrs = 9,
-+	.nattrs = 11,
+-	.nattrs = 11,
++	.nattrs = 13,
  	.attrs = {
  		{ NL80211_BAND_IFTYPE_ATTR_IFTYPES, "iftypes", DT_NESTED, 0, &nl80211_ifcomb_limit_types_nla },
  		{ NL80211_BAND_IFTYPE_ATTR_HE_CAP_MAC, "he_cap_mac", DT_U8, DF_ARRAY, NULL },
-@@ -648,6 +648,8 @@ static const uc_nl_nested_spec_t nl80211_wiphy_bands_iftype_data_nla = {
- 		{ NL80211_BAND_IFTYPE_ATTR_VENDOR_ELEMS, "vendor_elems", DT_STRING, DF_BINARY, NULL },
- 		{ NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MAC, "eht_cap_mac", DT_U8, DF_ARRAY, NULL },
+@@ -666,6 +666,8 @@
  		{ NL80211_BAND_IFTYPE_ATTR_EHT_CAP_PHY, "eht_cap_phy", DT_U8, DF_ARRAY, NULL },
+ 		{ NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MCS_SET, "eht_cap_mcs_set", DT_U8, DF_ARRAY, NULL },
+ 		{ NL80211_BAND_IFTYPE_ATTR_EHT_CAP_PPE, "eht_cap_ppe", DT_U8, DF_ARRAY, NULL },
 +		{ NL80211_BAND_IFTYPE_ATTR_UHR_CAP_MAC, "uhr_cap_mac", DT_U8, DF_ARRAY, NULL },
 +		{ NL80211_BAND_IFTYPE_ATTR_UHR_CAP_PHY, "uhr_cap_phy", DT_U8, DF_ARRAY, NULL },
  	}
  };
  
--- 
-2.25.1
-
