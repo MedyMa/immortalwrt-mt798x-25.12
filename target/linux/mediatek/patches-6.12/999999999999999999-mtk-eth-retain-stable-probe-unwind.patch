@@ -1,0 +1,109 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] net: mediatek: retain stable probe unwind after vendor baseline
+
+The vendor R4 baseline replaces the probe tail that Linux 6.12.113 fixed.
+Keep the stable NAPI-before-registration ordering, and drain reset and mux
+producers before releasing any registered port or its dependencies. Do this
+also for HNAT builds and failures before dummy/NAPI allocation. Keep the
+proprietary HNAT owner independent of the upstream PPE teardown path.
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -7041,6 +7041,24 @@
+ 	}
+ }
+ 
++static void mtk_quiesce_work(struct mtk_eth *eth)
++{
++	int i;
++
++	if (test_and_set_bit(MTK_STOPPING, &eth->state))
++		return;
++
++	/* Stop producers before draining work that may take RTNL or use a MAC. */
++	mtk_unregister_notifier(eth);
++	mtk_eth_netdevice_event_deinit(eth);
++	for (i = 0; i < MTK_MAX_DEVS; i++) {
++		if (eth->mux[i])
++			disable_delayed_work_sync(&eth->mux[i]->poll);
++	}
++	disable_delayed_work_sync(&eth->reset.monitor_work);
++	disable_work_sync(&eth->pending_work);
++}
++
+ static int mtk_probe(struct platform_device *pdev)
+ {
+ 	struct resource *res = NULL, *res_sram;
+@@ -7445,6 +7463,7 @@
+ 
+ 	err = mtk_eth_netdevice_event_init(eth);
+ 	if (err) {
++		mtk_quiesce_work(eth);
+ 		debug_proc_exit();
+ 		mtketh_debugfs_exit(eth);
+ 		mtk_eth_netdevice_event_deinit(eth);
+@@ -7457,20 +7476,26 @@
+ 	return 0;
+ 
+ err_unreg_netdev:
++	mtk_quiesce_work(eth);
+ 	mtk_unreg_dev(eth);
+ #if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
+-	cancel_work_sync(&eth->pending_work);
+ 	for (i = 0; i < ARRAY_SIZE(eth->ppe); i++)
+ 		mtk_ppe_stop(eth->ppe[i]);
+ #endif
+-	mtk_napi_del(eth);
+-	free_netdev(eth->dummy_dev);
++	if (eth->dummy_dev) {
++		mtk_napi_del(eth);
++		free_netdev(eth->dummy_dev);
++		eth->dummy_dev = NULL;
++	}
+ err_deinit_ppe:
++	mtk_quiesce_work(eth);
++#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
+ 	mtk_ppe_deinit(eth);
++#endif
+ 	mtk_release_all_muxes(eth);
+ 	mtk_mdio_cleanup(eth);
+ err_free_dev:
+-	mtk_unregister_notifier(eth);
++	mtk_quiesce_work(eth);
+ 	mtk_free_dev(eth);
+ 	if (eth->esw_base)
+ 		iounmap(eth->esw_base);
+@@ -7486,20 +7511,14 @@
+ static void mtk_remove(struct platform_device *pdev)
+ {
+ 	struct mtk_eth *eth = platform_get_drvdata(pdev);
++#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
+ 	int i;
++#endif
+ 
+ 	/* Drain producers before unregistering ports or releasing PCS objects. */
+-	set_bit(MTK_STOPPING, &eth->state);
++	mtk_quiesce_work(eth);
+ 	debug_proc_exit();
+ 	mtketh_debugfs_exit(eth);
+-	mtk_unregister_notifier(eth);
+-	for (i = 0; i < MTK_MAX_DEVS; i++) {
+-		if (eth->mux[i])
+-			cancel_delayed_work_sync(&eth->mux[i]->poll);
+-	}
+-	cancel_delayed_work_sync(&eth->reset.monitor_work);
+-	cancel_work_sync(&eth->pending_work);
+-	mtk_eth_netdevice_event_deinit(eth);
+ 
+ 	/* unregister_netdev() closes each running port under RTNL, while its
+ 	 * NAPI, phylink and PCS dependencies are still alive.
+@@ -7514,7 +7533,9 @@
+ 	mtk_wed_exit();
+ 	mtk_cleanup(eth);
+ 	free_netdev(eth->dummy_dev);
++#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
+ 	mtk_ppe_deinit(eth);
++#endif
+ 	mtk_mdio_cleanup(eth);
+ 	mtk_hw_deinit(eth);
+ 
