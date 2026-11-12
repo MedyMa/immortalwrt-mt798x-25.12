@@ -16,7 +16,7 @@ define Package/luci-app-mtk
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=MTK platform applications
-  DEPENDS:=+luci-base +luci-app-turboacc-mtk +luci-app-traffic +luci-app-fan +luci-app-eqos-mtk
+  DEPENDS:=+luci-base +luci-app-turboacc-mtk +luci-app-traffic +luci-app-fan +luci-app-hqos-mtk
 endef
 
 define Build/Compile

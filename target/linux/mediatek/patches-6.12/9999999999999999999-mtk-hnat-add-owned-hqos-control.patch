@@ -1,0 +1,207 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] net: mediatek: add owned HQoS control and software bypass ABI
+
+Let a serialized userspace owner restore only the QDMA settings it changed.
+Expose a root-only CAP_NET_ADMIN control that changes mode and retires FOE
+bindings without resetting all queues, flushing conntrack or restarting hooks.
+Gate writes on completed probe and serialize with administrative reset.
+Recognize the software shaping bit only while the new owner is active.
+
+Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
+
+---
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
+@@ -903,6 +903,11 @@
+  * for the packet flow.
+  */
+ #define HNAT_EXCEPTION_TAG	0x99
++/* Shared with userspace HQoS: preserve routing bits while excluding software
++ * shaped flows from HNAT. This bit is active only in owned HQoS mode.
++ */
++#define HNAT_QOS_SOFTWARE_MARK	0x80
++#define HNAT_QOS_PACKET_MARK	0x4000
+ 
+ struct mib_entry {
+ 	u32 byt_cnt_l;
+@@ -1390,6 +1395,21 @@
+ extern int hook_toggle;
+ extern int mape_toggle;
+ extern int qos_toggle;
++extern bool qos_user_owned;
++
++/* Only the explicit userspace packet namespace may select a managed QID.
++ * Unrelated proxy/PBR marks retain their routing meaning and use Q0.
++ */
++static inline u32 hnat_qos_queue_mark(const struct sk_buff *skb)
++{
++	u32 mark = skb->mark;
++
++	if (READ_ONCE(qos_user_owned) &&
++	    (mark & (0xffffU & ~MTK_QDMA_TX_MASK)) != HNAT_QOS_PACKET_MARK)
++		return 0;
++	return mark;
++}
++
+ 
+ int ext_if_add(struct extdev_entry *ext_entry);
+ int ext_if_del(struct extdev_entry *ext_entry);
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -1247,7 +1247,9 @@
+ 	if (unlikely(!skb_hnat_is_hashed(skb)))
+ 		return ;
+ 		
+-	if (unlikely(skb->mark == HNAT_EXCEPTION_TAG))
++	if (unlikely(skb->mark == HNAT_EXCEPTION_TAG ||
++		     (IS_HQOS_MODE && READ_ONCE(qos_user_owned) &&
++		      (skb->mark & HNAT_QOS_SOFTWARE_MARK))))
+ 		return ;
+  
+ 	ct = nf_ct_get(skb, &ctinfo);
+@@ -2419,7 +2421,7 @@
+ 			   const struct net_device *dev, int port_id,
+ 			   u8 dscp, u16 h_proto)
+ {
+-	u32 mark = skb->mark & MTK_QDMA_TX_MASK;
++	u32 mark = hnat_qos_queue_mark(skb) & MTK_QDMA_TX_MASK;
+ 	u32 qid;
+ 
+ 	/* A selected queue (including a routing mark's low bits) is already a
+@@ -2427,7 +2429,8 @@
+ 	 * can exceed MTK_QDMA_TX_MASK, e.g. 0x50535731 + GMAC3 selects QID 64.
+ 	 */
+ 	if (IS_HQOS_MODE)
+-		return dscp && hnat_priv->dscp_en ? (dscp >> 2) & MTK_QDMA_TX_MASK : mark;
++		return READ_ONCE(qos_user_owned) ? mark :
++		       dscp && hnat_priv->dscp_en ? (dscp >> 2) & MTK_QDMA_TX_MASK : mark;
+ 	/* PPPQ uses the Ethernet driver's queue map, not the wider manual
+ 	 * HNAT/HQoS namespace. Keep unrelated high routing-mark bits out of it.
+ 	 */
+@@ -3012,7 +3015,8 @@
+ 						 MTK_HNAT_V2 ||
+ 						 hnat_priv->data->version ==
+ 						 MTK_HNAT_V3) ?
+-						 skb->mark & 0x7f : skb->mark & 0xf;
++						 hnat_qos_queue_mark(skb) & 0x7f :
++						 hnat_qos_queue_mark(skb) & 0xf;
+ #if defined(CONFIG_MEDIATEK_NETSYS_V3)
+ 					if ((IS_HQOS_UL_MODE && IS_WAN(dev)) ||
+ 					    (IS_HQOS_DL_MODE &&
+@@ -4654,7 +4658,9 @@
+ 	if (unlikely(!skb_hnat_is_hashed(skb)))
+ 		return hnat_diag_skip(skb, HNAT_DIAG_NO_FLOW_HASH);
+ 
+-	if (unlikely(skb->mark == HNAT_EXCEPTION_TAG))
++	if (unlikely(skb->mark == HNAT_EXCEPTION_TAG ||
++		     (IS_HQOS_MODE && READ_ONCE(qos_user_owned) &&
++		      (skb->mark & HNAT_QOS_SOFTWARE_MARK))))
+ 		return hnat_diag_skip(skb, HNAT_DIAG_MARK_EXCLUDED);
+ 
+ #if defined(CONFIG_MEDIATEK_NETSYS_V3)
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+@@ -12,6 +12,8 @@
+  */
+ 
+ #include <linux/kernel.h>
++#include <linux/capability.h>
++#include <linux/kstrtox.h>
+ #include <linux/slab.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/netdevice.h>
+@@ -29,6 +31,7 @@
+ int hook_toggle;
+ int mape_toggle;
+ int qos_toggle;
++bool qos_user_owned;
+ int qos_dl_toggle = 1;
+ int qos_ul_toggle = 1;
+ int xlat_toggle;
+@@ -2618,9 +2621,12 @@
+ 
+ 	if (!h)
+ 		return -ENODEV;
+-
+ 	seq_printf(m, "mode=%d\nuplink=%d\ndownlink=%d\ndscp_mapping=%d\n",
+-		   qos_toggle, qos_ul_toggle, qos_dl_toggle, !!h->dscp_en);
++		   READ_ONCE(qos_toggle), READ_ONCE(qos_ul_toggle),
++		   READ_ONCE(qos_dl_toggle), !!h->dscp_en);
++	seq_printf(m, "control_abi=1\nqueue_mask=%u\nqueue_first=%u\nsoftware_mark=%u\npacket_mark=%u\npacket_owned=%u\n",
++		   MTK_QDMA_TX_MASK, MTK_QDMA_NUM_QUEUES, HNAT_QOS_SOFTWARE_MARK,
++		   HNAT_QOS_PACKET_MARK, READ_ONCE(qos_user_owned));
+ 	return 0;
+ }
+ 
+@@ -2709,6 +2715,9 @@
+ 		return -EFAULT;
+ 
+ 	buf[len] = '\0';
++
++	if (buf[0] == '0' || buf[0] == '1' || buf[0] == '2')
++		WRITE_ONCE(qos_user_owned, false);
+ 
+ 	if (buf[0] == '0') {
+ 		pr_info("HQoS is going to be disabled!\n");
+@@ -2778,6 +2787,52 @@
+ 	.release = single_release,
+ };
+ 
++/* Userspace owns its QDMA snapshot. Do not reset unrelated queues when
++ * entering or leaving HQoS. A same-mode write only retires stale FOE bindings;
++ * it preserves conntrack state and never restarts the HNAT hooks.
++ */
++static ssize_t hnat_qos_control_write(struct file *file,
++				    const char __user *buffer, size_t count,
++				    loff_t *offset)
++{
++	struct mtk_hnat *h = file->private_data;
++	unsigned int mode;
++	int ret;
++
++	if (!capable(CAP_NET_ADMIN))
++		return -EPERM;
++	if (!count || count > 2)
++		return -EINVAL;
++	ret = kstrtouint_from_user(buffer, count, 10, &mode);
++	if (ret || mode > 2)
++		return ret ? ret : -EINVAL;
++
++	hnat_account_admin_lock();
++	/* drvdata is published after timer/accounting initialization and cleared
++	 * before debugfs removal. Removal drains active file operations first.
++	 */
++	if (!h || h != READ_ONCE(hnat_priv) || dev_get_drvdata(h->dev) != h) {
++		ret = -ENODEV;
++		goto out;
++	}
++	WRITE_ONCE(qos_user_owned, mode == 1);
++	WRITE_ONCE(qos_toggle, mode);
++	WRITE_ONCE(qos_ul_toggle, mode != 0);
++	WRITE_ONCE(qos_dl_toggle, mode != 0);
++	if (READ_ONCE(hook_toggle))
++		foe_clear_all_bind_entries();
++	ret = count;
++out:
++	hnat_account_admin_unlock();
++	return ret;
++}
++
++static const struct file_operations hnat_qos_control_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = hnat_qos_control_write,
++};
++
+ static int hnat_version_read(struct seq_file *m, void *private)
+ {
+ 	pr_info("HNAT SW version : %s\nHNAT HW version : %d\n", HNAT_SW_VER, hnat_priv->data->version);
+@@ -3287,6 +3342,8 @@
+ 			    &hnat_qos_toggle_fops);
+ 	debugfs_create_file("qos_status", 0444, root, h,
+ 			    &hnat_qos_status_fops);
++	debugfs_create_file("qos_control", 0200, root, h,
++			    &hnat_qos_control_fops);
+ 	debugfs_create_file("hnat_version", 0444, root, h,
+ 			    &hnat_version_fops);
+ 	debugfs_create_file("hnat_ppd_if", 0444, root, h,
