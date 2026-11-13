@@ -1,0 +1,32 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] arm64: dts: mediatek: restore BPI-R4 LAN port names
+
+The MT7988 switch ports no longer carry generic LAN labels in the 6.12
+SoC description. Name the three BPI-R4 LAN ports in the board description
+to match the network defaults and configurations retained from 24.10.
+Otherwise DSA assigns eth3/eth4/eth5 and netifd cannot add the configured
+lan1/lan2/lan3 devices to br-lan.
+
+Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
+
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dtsi
+@@ -146,6 +146,18 @@
+ 	label = "wan";
+ };
+ 
++&gsw_port1 {
++	label = "lan1";
++};
++
++&gsw_port2 {
++	label = "lan2";
++};
++
++&gsw_port3 {
++	label = "lan3";
++};
++
+ &gsw_phy0_led0 {
+ 	status = "okay";
+ 	color = <LED_COLOR_ID_GREEN>;

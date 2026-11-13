@@ -1,0 +1,25 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] net: phy: aquantia: preserve SFP module startup state
+
+The additional vendor POR reset in aqr107_probe also runs on PHYs inside
+SFP modules. Those PHYs are provisioned by their module controller, and
+resetting them can discard that state before phylink attaches the module.
+Skip this board-level reset for SFP PHYs, as in the 24.10 driver, while
+keeping the existing reset sequence for non-SFP PHYs. Keep the standard
+firmware-readiness wait and the remaining probe and cleanup paths intact.
+
+Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
+
+--- a/drivers/net/phy/aquantia/aquantia_main.c
++++ b/drivers/net/phy/aquantia/aquantia_main.c
+@@ -981,7 +981,9 @@ static int aqr107_probe(struct phy_device *phydev)
+ 	if (!phydev->priv)
+ 		return -ENOMEM;
+ 
+-	aqr107_phy_reset(phydev);
++	/* Preserve provisioning owned by the SFP module controller. */
++	if (!phydev->is_on_sfp_module)
++		aqr107_phy_reset(phydev);
+ 
+ 	ret = aqr_firmware_load(phydev);
+ 	if (ret)
