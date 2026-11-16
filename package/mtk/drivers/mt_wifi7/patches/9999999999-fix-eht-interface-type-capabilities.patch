@@ -1,0 +1,57 @@
+Subject: [PATCH] wifi7: separate AP and station EHT capability entries
+
+cfg80211 rejects EHT capability entries that combine AP and non-AP interface
+types because their MCS/NSS formats can differ. This makes wiphy_register()
+fail with -EINVAL before the BE14 radios can initialize.
+
+Keep separate AP and station entries in the existing per-wiphy storage,
+preserving the advertised HE/EHT capabilities and both interface roles.
+Reinitialization must retain the separate masks instead of merging them again.
+
+--- a/mt_wifi/include/os/cfg80211/cfg80211.h
++++ b/mt_wifi/include/os/cfg80211/cfg80211.h
+@@ -84,7 +84,8 @@
+ 
+ 	/* we can change channel/rate information on the fly so we backup them */
+ 	struct ieee80211_supported_band Cfg80211_bands[IEEE80211_NUM_BANDS];
+-	struct ieee80211_sband_iftype_data sband_data[NUM_NL80211_BANDS];
++	/* Keep AP and STA EHT formats in separate per-wiphy entries. */
++	struct ieee80211_sband_iftype_data sband_data[NUM_NL80211_BANDS][2];
+ 	struct ieee80211_channel *pCfg80211_Channels;
+ 	struct ieee80211_rate *pCfg80211_Rates;
+ 
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_util.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_util.c
+@@ -567,22 +567,21 @@
+ 	}
+ 	phy_caps = pDriverBandInfo->phy_caps;
+ 	nss_cap = MCS_NSS_CAP(mac_ad);
+-	data = &cb->sband_data[band_idx];
+-	os_zero_mem(data, sizeof(struct ieee80211_sband_iftype_data));
+-	data->types_mask = BIT(NL80211_IFTYPE_AP) | BIT(NL80211_IFTYPE_STATION);
++	data = cb->sband_data[band_idx];
++	os_zero_mem(data, sizeof(cb->sband_data[band_idx]));
++	data[0].types_mask = BIT(NL80211_IFTYPE_AP);
+ 	CFG80211_sband_data_he_cap_init(phy_caps, band_idx, data, pDriverBandInfo);
+ 	CFG80211_sband_data_eht_cap_init(pAd, phy_caps, nss_cap, band_idx, data);
+-	band_info->n_iftype_data = 1;
+-	band_info->iftype_data = &cb->sband_data[band_idx];
+ 
+ 	/*
+-	 * ATE would call CFG80211OS_SupBandReInit directly
+-	 * (i.e. w/o calling CFG80211_SupBandInit)
++	 * cfg80211 rejects EHT entries mixing AP and non-AP MCS formats.
++	 * Publish both roles without changing the reported radio capabilities.
++	 * Reinitialization must retain the same separate role masks.
+ 	 */
+-	if (re_init) {
+-		data = (struct ieee80211_sband_iftype_data *)band_info->iftype_data;
+-		data->types_mask |= BIT(NL80211_IFTYPE_STATION);
+-	}
++	data[1] = data[0];
++	data[1].types_mask = BIT(NL80211_IFTYPE_STATION);
++	band_info->n_iftype_data = ARRAY_SIZE(cb->sband_data[band_idx]);
++	band_info->iftype_data = data;
+ }
+ 
+ VOID CFG80211OS_PutBss(

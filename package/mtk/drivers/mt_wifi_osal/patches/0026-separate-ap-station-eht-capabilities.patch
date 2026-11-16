@@ -1,0 +1,53 @@
+Subject: [PATCH] osal: separate AP and station EHT capability entries
+
+Keep the native OSAL cfg80211 registration path consistent with WiFi7: an EHT
+entry cannot advertise AP and non-AP roles together. Preserve both roles in
+separate per-wiphy entries, including when ATE rebuilds the band capabilities.
+
+--- a/inc/mt_osal_cfg80211.h
++++ b/inc/mt_osal_cfg80211.h
+@@ -265,7 +265,8 @@
+ 	void *net_dev;
+ 	void *mac_ad;
+ 	unsigned int mtk_dev_features;
+-	struct ieee80211_sband_iftype_data sband_data[NUM_NL80211_BANDS];
++	/* Keep AP and STA EHT formats in separate per-wiphy entries. */
++	struct ieee80211_sband_iftype_data sband_data[NUM_NL80211_BANDS][2];
+ 	/* we can change channel/rate information on the fly so we backup them */
+ 	struct ieee80211_supported_band Cfg80211_bands[IEEE80211_NUM_BANDS];
+ 	struct ieee80211_channel *pCfg80211_Channels;
+--- a/mt_osal_cfg80211.c
++++ b/mt_osal_cfg80211.c
+@@ -936,22 +936,21 @@
+ 			band_idx, NUM_NL80211_BANDS);
+ 		return;
+ 	}
+-	data = &mt_priv->sband_data[band_idx];
+-	memset(data, 0, sizeof(struct ieee80211_sband_iftype_data));
+-	data->types_mask = BIT(NL80211_IFTYPE_AP) | BIT(NL80211_IFTYPE_STATION);
++	data = mt_priv->sband_data[band_idx];
++	memset(data, 0, sizeof(mt_priv->sband_data[band_idx]));
++	data[0].types_mask = BIT(NL80211_IFTYPE_AP);
+ 	CFG80211_sband_data_he_cap_init(mt_band_info, band_idx, data);
+ 	CFG80211_sband_data_eht_cap_init(mt_band_info, band_idx, data);
+-	band_info->n_iftype_data = 1;
+-	band_info->iftype_data = &mt_priv->sband_data[band_idx];
+ 
+ 	/*
+-	 * ATE would call CFG80211OS_SupBandReInit directly
+-	 * (i.e. w/o calling CFG80211_SupBandInit)
++	 * cfg80211 rejects EHT entries mixing AP and non-AP MCS formats.
++	 * Publish both roles without changing the reported radio capabilities.
++	 * Reinitialization must retain the same separate role masks.
+ 	 */
+-	if (re_init) {
+-		data = (struct ieee80211_sband_iftype_data *)band_info->iftype_data;
+-		data->types_mask |= BIT(NL80211_IFTYPE_STATION);
+-	}
++	data[1] = data[0];
++	data[1].types_mask = BIT(NL80211_IFTYPE_STATION);
++	band_info->n_iftype_data = ARRAY_SIZE(mt_priv->sband_data[band_idx]);
++	band_info->iftype_data = data;
+ }
+ 
+ u16 get_vht_mcs_map(unsigned char nss, enum ieee80211_vht_mcs_support sup)
