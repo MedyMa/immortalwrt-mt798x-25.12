@@ -1,0 +1,1013 @@
+{
+  "format_version": 1,
+  "source_state": "Private source archive with all 38 mt_wifi7 patches applied",
+  "source_commit": "3bda8cd5e751a651ef4a71a6077eeb90b315f088",
+  "source_archive": "dl/mtk-r4-wifi-f5bd1d7389c8-src.tar.xz",
+  "interpretation": "Textual anchors, not proof that a feature is compiled or accepted by firmware. Empty matches do not prove absence.",
+  "topics": {
+    "dfs": {
+      "DfsZeroWait": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6275,
+          "text": "if (RTMPGetKeyParameter(\"DfsZeroWait\", tmpbuf, 50, pBuffer, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6276,
+          "text": "UINT8 DfsZeroWait = os_str_tol(tmpbuf, 0, 10);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6278,
+          "text": "if ((DfsZeroWait == 1)"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6283,
+          "text": "pAd->BgndScanCtrl.DfsZeroWaitSupport = TRUE;/*Enable*/"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6288,
+          "text": "pAd->BgndScanCtrl.DfsZeroWaitSupport = FALSE;"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6295,
+          "text": "\"DfsZeroWait Support=%d/%d\\n\", DfsZeroWait,"
+        }
+      ],
+      "dfschinfo": [],
+      "DfsDedicatedZeroWait": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6300,
+          "text": "if (RTMPGetKeyParameter(\"DfsDedicatedZeroWait\", tmpbuf, 25, pBuffer, TRUE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6301,
+          "text": "UCHAR DfsDedicatedZeroWait = (UCHAR) simple_strtol(tmpbuf, 0, 10);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6305,
+          "text": "switch (DfsDedicatedZeroWait) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6346,
+          "text": "switch (DfsDedicatedZeroWait) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6379,
+          "text": "if (DfsDedicatedZeroWait == 4)"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6385,
+          "text": "if ((DfsDedicatedZeroWait == DFS_SWBASED_ZERO_WAIT_BW160_ENABLE) &&"
+        }
+      ]
+    },
+    "afc": {
+      "AfcDeviceType": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5506,
+          "text": "if (RTMPGetKeyParameter(\"AfcDeviceType\", tmpbuf, 32, pBuffer, TRUE))"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 8392,
+          "text": "pAd->CommonCfg.AfcDeviceType = (UINT8)DeviceType;"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 3719,
+          "text": "UINT8 AfcDeviceType;"
+        },
+        {
+          "file": "mt_wifi/common/mlme.c",
+          "line": 2282,
+          "text": "&& (pAd->CommonCfg.AfcDeviceType == AFC_STANDARD_POWER_DEVICE)))"
+        },
+        {
+          "file": "mt_wifi/common/bcn.c",
+          "line": 1141,
+          "text": "&& (pAd->CommonCfg.AfcDeviceType != AFC_STANDARD_POWER_DEVICE)"
+        },
+        {
+          "file": "mt_wifi/common/bcn.c",
+          "line": 1155,
+          "text": "if (pAd->CommonCfg.AfcDeviceType == AFC_LP_SP_COEX) {"
+        }
+      ],
+      "WIFI_6G_AFC_SUPPORT": []
+    },
+    "airtime": {
+      "VOW_Airtime_Fairness_En": [
+        {
+          "file": "mt_wifi/profiles/ap_profile.c",
+          "line": 1612,
+          "text": "if (RTMPGetKeyParameter(\"VOW_Airtime_Fairness_En\", tmpbuf, 128, buffer, TRUE)"
+        },
+        {
+          "file": "mt_wifi/profiles/ap_profile.c",
+          "line": 1616,
+          "text": "\"VOW_Airtime_Fairness_En --> %d\\n\","
+        }
+      ],
+      "VOW_WATF_Enable": [
+        {
+          "file": "mt_wifi/profiles/ap_profile.c",
+          "line": 1949,
+          "text": "if (RTMPGetKeyParameter(\"VOW_WATF_Enable\", tmpbuf, MAX_PARAM_BUFFER_SIZE, buffer, TRUE)"
+        },
+        {
+          "file": "mt_wifi/profiles/ap_profile.c",
+          "line": 1953,
+          "text": "\"VOW_WATF_Enable --> %d\\n\", pAd->vow_watf_en);"
+        }
+      ],
+      "VOW_GEN_BESRA": [
+        {
+          "file": "mt_wifi/include/ap/ap_vow.h",
+          "line": 33,
+          "text": "#define VOW_GEN_BESRA   4"
+        },
+        {
+          "file": "mt_wifi/feature/vow/ap_vow.c",
+          "line": 1481,
+          "text": "if (pad->vow_gen.VOW_GEN < VOW_GEN_BESRA) {"
+        },
+        {
+          "file": "mt_wifi/feature/vow/ap_vow.c",
+          "line": 1821,
+          "text": "if (pad->vow_gen.VOW_GEN >= VOW_GEN_BESRA)"
+        },
+        {
+          "file": "mt_wifi/feature/vow/ap_vow.c",
+          "line": 5177,
+          "text": "if (pAd->vow_gen.VOW_GEN >= VOW_GEN_BESRA) {"
+        },
+        {
+          "file": "mt_wifi/chip/mt7992/mt7992.c",
+          "line": 13547,
+          "text": "pAd->vow_gen.VOW_GEN = VOW_GEN_BESRA;"
+        },
+        {
+          "file": "mt_wifi/chip/mt7990/mt7990.c",
+          "line": 12645,
+          "text": "pAd->vow_gen.VOW_GEN = VOW_GEN_BESRA;"
+        }
+      ]
+    },
+    "edcca": {
+      "EDCCACfgMode": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6521,
+          "text": "if (RTMPGetKeyParameter(\"EDCCACfgMode\", tmpbuf, 10, pBuffer, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6525,
+          "text": "pAd->CommonCfg.u1EDCCACfgMode = (UCHAR) readvalue;"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 3376,
+          "text": "UINT8 u1EDCCACfgMode;"
+        },
+        {
+          "file": "mt_wifi/common/rtmp_init.c",
+          "line": 1591,
+          "text": "pAd->CommonCfg.u1EDCCACfgMode = FALSE; /* EDCCAMode default OFF. */"
+        },
+        {
+          "file": "mt_wifi/common/cmm_cfg.c",
+          "line": 7683,
+          "text": "/* Save cmd setting to pAd if profile EDCCACfgMode is set to 1 */"
+        },
+        {
+          "file": "mt_wifi/common/cmm_cfg.c",
+          "line": 7684,
+          "text": "if (pAd->CommonCfg.u1EDCCACfgMode == 1)"
+        }
+      ],
+      "EDCCAThreshold": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6542,
+          "text": "if (RTMPGetKeyParameter(\"EDCCAThreshold\", tmpbuf, 32, pBuffer, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6546,
+          "text": "pAd->CommonCfg.u1EDCCAThreshold[i] = 0x7f;"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6549,
+          "text": "pAd->CommonCfg.u1EDCCAThreshold[i] = tmp_thresh;"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6550,
+          "text": "if (pAd->CommonCfg.u1EDCCAThreshold[i] > 0 && pAd->CommonCfg.u1EDCCAThreshold[i] < 0x7f)"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6551,
+          "text": "pAd->CommonCfg.u1EDCCAThreshold[i] = ~pAd->CommonCfg.u1EDCCAThreshold[i] + 1;"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 6553,
+          "text": "\" EDCCAthreshold= %d by profile\\n\", pAd->CommonCfg.u1EDCCAThreshold[i]);"
+        }
+      ]
+    },
+    "led": {
+      "led_setting": [
+        {
+          "file": "mt_wifi/include/rt_led.h",
+          "line": 201,
+          "text": "void rtmp_read_led_setting_from_eeprom(IN RTMP_ADAPTER * pAd);"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/eeprom.c",
+          "line": 664,
+          "text": "rtmp_read_led_setting_from_eeprom(pAd);"
+        },
+        {
+          "file": "mt_wifi/common/rt_led.c",
+          "line": 522,
+          "text": "void rtmp_read_led_setting_from_eeprom(RTMP_ADAPTER *pAd)"
+        },
+        {
+          "file": "mt_wifi/ap/ap_cfg.c",
+          "line": 2142,
+          "text": "{\"led_setting\", Set_Led_Proc},"
+        }
+      ],
+      "LED_CONTROL_SUPPORT": [
+        {
+          "file": "mt_wifi/include/rtmp_timer.h",
+          "line": 296,
+          "text": "#ifdef LED_CONTROL_SUPPORT"
+        },
+        {
+          "file": "mt_wifi/include/rtmp_comm.h",
+          "line": 32,
+          "text": "#ifdef LED_CONTROL_SUPPORT"
+        },
+        {
+          "file": "mt_wifi/include/rtmp_comm.h",
+          "line": 33,
+          "text": "#undef LED_CONTROL_SUPPORT"
+        },
+        {
+          "file": "mt_wifi/include/rtmp_comm.h",
+          "line": 34,
+          "text": "#endif\t/* LED_CONTROL_SUPPORT */"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 160,
+          "text": "#ifdef LED_CONTROL_SUPPORT"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 162,
+          "text": "#endif /* LED_CONTROL_SUPPORT */"
+        }
+      ]
+    },
+    "mu-mimo": {
+      "MuMimoDlEnable": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 1078,
+          "text": "/* ApCliMuMimoDlEnable */"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 1079,
+          "text": "if (RTMPGetKeyParameter(\"ApCliMuMimoDlEnable\", tmpbuf, 128, buffer, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 1092,
+          "text": "\"APCLI[%d] ApCliMuMimoDlEnable = %d\\n\", i, mu_dl_mimo);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3389,
+          "text": "if (RTMPGetKeyParameter(\"MuMimoDlEnable\", tmpbuf, 128, buf, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3414,
+          "text": "\"MBSS[%d] MuMimoDlEnable = %d\\n\", i, mu_dl_mimo);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3427,
+          "text": "\"More MBSS[%d] MuMimoDlEnable = %d\\n\", i, mu_dl_mimo);"
+        }
+      ],
+      "MuMimoUlEnable": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 1097,
+          "text": "/* ApCliMuMimoUlEnable */"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 1098,
+          "text": "if (RTMPGetKeyParameter(\"ApCliMuMimoUlEnable\", tmpbuf, 128, buffer, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 1111,
+          "text": "\"APCLI[%d] ApCliMuMimoUlEnable = %d\\n\", i, mu_ul_mimo);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3514,
+          "text": "if (RTMPGetKeyParameter(\"MuMimoUlEnable\", tmpbuf, 128, buf, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3534,
+          "text": "\"MBSS[%d] MuMimoUlEnable = %d\\n\", i, mu_ul_mimo);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3547,
+          "text": "\"More MBSS[%d] MuMimoUlEnable = %d\\n\", i, mu_ul_mimo);"
+        }
+      ]
+    },
+    "ofdma": {
+      "MuOfdmaDlEnable": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 1040,
+          "text": "/* ApCliMuOfdmaDlEnable */"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 1041,
+          "text": "if (RTMPGetKeyParameter(\"ApCliMuOfdmaDlEnable\", tmpbuf, 128, buffer, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 1054,
+          "text": "\"APCLI[%d] ApCliMuOfdmaDlEnable = %d\\n\", i, mu_dl_ofdma);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3162,
+          "text": "if (RTMPGetKeyParameter(\"MuOfdmaDlEnable\", tmpbuf, 128, buf, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3181,
+          "text": "\"MBSS[%d] MuOfdmaDlEnable = %d\\n\", i, mu_dl_ofdma);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3194,
+          "text": "\"More MBSS[%d] MuOfdmaDlEnable = %d\\n\", i, mu_dl_ofdma);"
+        }
+      ],
+      "set_muru_manual_config": [
+        {
+          "file": "mt_wifi/common/capi.c",
+          "line": 681,
+          "text": "set_muru_manual_config(adapt, muru_config0);"
+        },
+        {
+          "file": "mt_wifi/common/capi.c",
+          "line": 682,
+          "text": "set_muru_manual_config(adapt, \"update\");"
+        },
+        {
+          "file": "mt_wifi/common/capi.c",
+          "line": 687,
+          "text": "/*iwpriv ra0 set set_muru_manual_config=dl_comm_user_cnt:2*/"
+        },
+        {
+          "file": "mt_wifi/common/capi.c",
+          "line": 688,
+          "text": "set_muru_manual_config(adapt, muru_config2);"
+        },
+        {
+          "file": "mt_wifi/common/capi.c",
+          "line": 689,
+          "text": "/*iwpriv ra0 set set_muru_manual_config=update*/"
+        },
+        {
+          "file": "mt_wifi/common/capi.c",
+          "line": 690,
+          "text": "set_muru_manual_config(adapt, \"update\");"
+        }
+      ]
+    },
+    "pta": {
+      "ThreeWireFunctionEnable": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 8935,
+          "text": "if (RTMPGetKeyParameter(\"ThreeWireFunctionEnable\", tmpbuf, 10, pBuffer, TRUE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 8937,
+          "text": "MTWF_PRINT(\"%s: ThreeWireFunctionEnable=%d\\n\", __func__, ph_dev->threeWire_function_enable);"
+        }
+      ]
+    },
+    "pre-calibration": {
+      "GROUPREK": [
+        {
+          "file": "mt_wifi/ate/wlan_service/agent/agent.c",
+          "line": 8826,
+          "text": "{\"GROUPREKClean\", mt_serv_group_prek_clean},"
+        },
+        {
+          "file": "mt_wifi/ate/wlan_service/agent/agent.c",
+          "line": 8827,
+          "text": "{\"GROUPREKDump\", mt_serv_group_prek_dump},"
+        },
+        {
+          "file": "mt_wifi/ate/wlan_service/agent/agent.c",
+          "line": 8828,
+          "text": "{\"GROUPREKDump5G\", mt_serv_group_prek_dump_5g},"
+        },
+        {
+          "file": "mt_wifi/ate/wlan_service/agent/agent.c",
+          "line": 8829,
+          "text": "{\"GROUPREKDump6G\", mt_serv_group_prek_dump_6g},"
+        },
+        {
+          "file": "mt_wifi/ate/wlan_service/agent/agent.c",
+          "line": 8830,
+          "text": "{\"GROUPREK\", mt_serv_group_prek},"
+        }
+      ],
+      "EEPROM_PRECAL": [],
+      "DPDClean": [
+        {
+          "file": "mt_wifi/ate/wlan_service/agent/agent.c",
+          "line": 8831,
+          "text": "{\"DPDClean\", mt_serv_dpd_prek_clean},"
+        }
+      ]
+    },
+    "priority-rate": {
+      "hprirateset": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3854,
+          "text": "ret = snprintf(tok_str, sizeof(tok_str), \"hprirateset%d\", eaprateidx);"
+        }
+      ],
+      "highprirate": [
+        {
+          "file": "mt_wifi/ap/ap_cfg.c",
+          "line": 1446,
+          "text": "{\"highprirate\",\t\t\t\tset_high_pri_rate_proc},"
+        },
+        {
+          "file": "mt_wifi/ap/ap_cfg.c",
+          "line": 2726,
+          "text": "{\"highprirate\",\t\t\tshow_high_pri_rate},"
+        },
+        {
+          "file": "mt_wifi/ap/ap_cfg.c",
+          "line": 23405,
+          "text": "MTWF_PRINT(\"iwpriv ra0 set highprirate=[ratetype]-[phymode]-[mcs]\\n\");"
+        }
+      ],
+      "RA_PHY_RATE_SUPPORT": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 3737,
+          "text": "#ifdef CONFIG_RA_PHY_RATE_SUPPORT"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 4143,
+          "text": "#endif /* CONFIG_RA_PHY_RATE_SUPPORT */"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 7569,
+          "text": "#ifdef CONFIG_RA_PHY_RATE_SUPPORT"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 7571,
+          "text": "#endif /* CONFIG_RA_PHY_RATE_SUPPORT */"
+        },
+        {
+          "file": "mt_wifi/include/rtmp_def.h",
+          "line": 2385,
+          "text": "#ifdef CONFIG_RA_PHY_RATE_SUPPORT"
+        },
+        {
+          "file": "mt_wifi/include/rtmp_def.h",
+          "line": 2399,
+          "text": "#endif /* CONFIG_RA_PHY_RATE_SUPPORT */"
+        }
+      ]
+    },
+    "single-sku": {
+      "SKUenable": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5853,
+          "text": "if (RTMPGetKeyParameter(\"SKUenable\", tmpbuf, 32, pBuffer, TRUE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5855,
+          "text": "pAd->CommonCfg.SKUenable = simple_strtol(tmpbuf, 0, 10);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5857,
+          "text": "\"[SKUenable] BAND%d: %d\\n\","
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5858,
+          "text": "hc_get_hw_band_idx(pAd), pAd->CommonCfg.SKUenable);"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 3356,
+          "text": "UCHAR SKUenable;"
+        },
+        {
+          "file": "mt_wifi/common/cmm_cfg.c",
+          "line": 6177,
+          "text": "pAd->CommonCfg.SKUenable = tx_pwr_sku_en;"
+        }
+      ],
+      "BFBACKOFFenable": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5898,
+          "text": "if (RTMPGetKeyParameter(\"BFBACKOFFenable\", tmpbuf, 32, pBuffer, TRUE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5900,
+          "text": "pAd->CommonCfg.BFBACKOFFenable = simple_strtol(tmpbuf, 0, 10);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5902,
+          "text": "\"[BFBACKOFFenable] BAND%d: %d\\n\","
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5903,
+          "text": "hc_get_hw_band_idx(pAd), pAd->CommonCfg.BFBACKOFFenable);"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 3365,
+          "text": "UCHAR BFBACKOFFenable;"
+        },
+        {
+          "file": "mt_wifi/common/cmm_cfg.c",
+          "line": 6485,
+          "text": "pAd->CommonCfg.BFBACKOFFenable = fgTxBFBackoffEn;"
+        }
+      ],
+      "SkuTableIdx": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5868,
+          "text": "\"[SkuTableIdx]: %d\\n\", pAd->CommonCfg.SKUTableIdx);"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5872,
+          "text": "if (RTMPGetKeyParameter(\"SkuTableIdx\", tmpbuf, 32, pBuffer, TRUE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 5876,
+          "text": "\"[SkuTableIdx]: %d\\n\", pAd->CommonCfg.SKUTableIdx);"
+        }
+      ]
+    },
+    "scs": {
+      "SCSEnable": [
+        {
+          "file": "mt_wifi/include/scs.h",
+          "line": 72,
+          "text": "BOOL\tSCSEnable;\t/* 0:Disable, 1:Enable */"
+        },
+        {
+          "file": "mt_wifi/include/scs.h",
+          "line": 106,
+          "text": "UINT_8    u1SCSEnable;"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 12775,
+          "text": "INT UNI_Set_SCSEnable_Proc(RTMP_ADAPTER *pAd, RTMP_STRING *arg);"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 4760,
+          "text": "RTMP_STRING SCSEnable[2] = \"0\";"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 4767,
+          "text": "strlcpy(SCSEnable, \"1\", sizeof(SCSEnable));  //scs on"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 4770,
+          "text": "strlcpy(SCSEnable, \"0\", sizeof(SCSEnable));  //scs off"
+        }
+      ],
+      "SMART_CARRIER_SENSE_SUPPORT": [
+        {
+          "file": "mt_wifi/include/rt_config.h",
+          "line": 371,
+          "text": "#ifdef SMART_CARRIER_SENSE_SUPPORT"
+        },
+        {
+          "file": "mt_wifi/include/rt_config.h",
+          "line": 373,
+          "text": "#endif /* SMART_CARRIER_SENSE_SUPPORT */"
+        },
+        {
+          "file": "mt_wifi/include/scs.h",
+          "line": 25,
+          "text": "#ifdef SMART_CARRIER_SENSE_SUPPORT"
+        },
+        {
+          "file": "mt_wifi/include/scs.h",
+          "line": 166,
+          "text": "#endif /*SMART_CARRIER_SENSE_SUPPORT*/"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 236,
+          "text": "#ifdef SMART_CARRIER_SENSE_SUPPORT"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 238,
+          "text": "#endif /* SMART_CARRIER_SENSE_SUPPORT */"
+        }
+      ]
+    },
+    "spatial-reuse": {
+      "SRDPDEnable": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 7991,
+          "text": "if (RTMPGetKeyParameter(\"SRDPDEnable\", tmpbuf, 32, pBuffer, TRUE))"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 7992,
+          "text": "SrProfileSRDPDEnable(pAd, tmpbuf);"
+        },
+        {
+          "file": "mt_wifi/include/sr_cmd.h",
+          "line": 60,
+          "text": "NDIS_STATUS SrProfileSRDPDEnable(IN PRTMP_ADAPTER pAd, IN RTMP_STRING * buffer);"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 3670,
+          "text": "UCHAR SRDPDEnable;"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 415,
+          "text": "NDIS_STATUS SrProfileSRDPDEnable(IN PRTMP_ADAPTER pAd, IN RTMP_STRING *buffer)"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 426,
+          "text": "pAd->CommonCfg.SRDPDEnable = simple_strtol(ptr, 0, 10);"
+        }
+      ],
+      "SREnable": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 7985,
+          "text": "if (RTMPGetKeyParameter(\"SREnable\", tmpbuf, 32, pBuffer, TRUE))"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 7986,
+          "text": "SrProfileSREnable(pAd, tmpbuf);"
+        },
+        {
+          "file": "mt_wifi/include/sr_cmd.h",
+          "line": 57,
+          "text": "NDIS_STATUS SrProfileSREnable(IN PRTMP_ADAPTER pAd, IN RTMP_STRING * buffer);"
+        },
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 3667,
+          "text": "UCHAR SREnable;"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 219,
+          "text": "if (pAd->CommonCfg.SREnable == FALSE) {"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 221,
+          "text": "\"SREnable[%d] = %d Return SUCCESS\\n\", u1DbdcIdx, pAd->CommonCfg.SREnable);"
+        }
+      ],
+      "srcfgsren": [
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 3827,
+          "text": "\"iwpriv ra0 set srcfgsren=1\\n\");"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 5609,
+          "text": "\"iwpriv ra0 set srcfgsren=1\\n\");"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 5630,
+          "text": "\"iwpriv ra0 set srcfgsren=1\\n\");"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 5649,
+          "text": "\"iwpriv ra0 set srcfgsren=1\\n\");"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 5669,
+          "text": "\"iwpriv ra0 set srcfgsren=1\\n\");"
+        },
+        {
+          "file": "mt_wifi/hw_ctrl/sr_cmd.c",
+          "line": 6982,
+          "text": "\"iwpriv ra0 show srcfgsren=0\\n\");"
+        }
+      ]
+    },
+    "twt": {
+      "TWTSupport": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2604,
+          "text": "if (RTMPGetKeyParameter(\"TWTSupport\", tmpbuf, 128, buf, TRUE)) {"
+        },
+        {
+          "file": "mt_wifi/common/cmm_info.c",
+          "line": 9253,
+          "text": "/* para_id=0(TWTSupport), para_id=1(TWTInfoFrame) */"
+        },
+        {
+          "file": "mt_wifi/common/cmm_info.c",
+          "line": 9269,
+          "text": "\"%s:if=%d,if_type=%d,TWTSupport=%d\\n\","
+        },
+        {
+          "file": "mt_wifi/common/cmm_info.c",
+          "line": 9284,
+          "text": "\"%s:if=%d,if_type=%d,TWTSupport=%d->%d\\n\","
+        }
+      ],
+      "TWTInfoFrame": [
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2682,
+          "text": "if (RTMPGetKeyParameter(\"TWTInfoFrame\", tmpbuf, 128, buf, TRUE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2708,
+          "text": "\"%d:%s TWTInfoFrame = %d\\n\", i,"
+        },
+        {
+          "file": "mt_wifi/common/cmm_info.c",
+          "line": 9253,
+          "text": "/* para_id=0(TWTSupport), para_id=1(TWTInfoFrame) */"
+        },
+        {
+          "file": "mt_wifi/common/cmm_info.c",
+          "line": 9273,
+          "text": "\"%s:if=%d,if_type=%d,TWTInfoFrame=%d\\n\","
+        },
+        {
+          "file": "mt_wifi/common/cmm_info.c",
+          "line": 9294,
+          "text": "\"%s:if=%d,if_type=%d,TWTInfoFrame=%d->%d\\n\","
+        },
+        {
+          "file": "mt_wifi/common/cmm_info.c",
+          "line": 9313,
+          "text": "\"iwpriv IF set twtsupport=2:x (x=0/1 enable/disable TWTInfoFrame)\\n\");"
+        }
+      ]
+    },
+    "thermal": {
+      "thermal_protect_enable": [
+        {
+          "file": "mt_wifi/ap/ap_cfg.c",
+          "line": 2091,
+          "text": "{\"thermal_protect_enable\", SetThermalProtectEnable},"
+        }
+      ],
+      "SetThermalProtectEnable": [
+        {
+          "file": "mt_wifi/include/rtmp.h",
+          "line": 12860,
+          "text": "INT SetThermalProtectEnable(RTMP_ADAPTER *pAd, RTMP_STRING *arg);"
+        },
+        {
+          "file": "mt_wifi/common/cmm_cfg.c",
+          "line": 9678,
+          "text": "INT SetThermalProtectEnable(RTMP_ADAPTER *pAd, RTMP_STRING *arg)"
+        },
+        {
+          "file": "mt_wifi/ap/ap_cfg.c",
+          "line": 2091,
+          "text": "{\"thermal_protect_enable\", SetThermalProtectEnable},"
+        }
+      ]
+    },
+    "beamforming": {
+      "ETxBfEnCond": [
+        {
+          "file": "mt_wifi/sta/sta_cfg.c",
+          "line": 234,
+          "text": "{\"ETxBfEnCond\",\t\t\t\t\tSet_ETxBfEnCond_Proc},"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2948,
+          "text": "UCHAR ETxBfEnCond = SUBF_OFF;"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2951,
+          "text": "if (RTMPGetKeyParameter(\"ETxBfEnCond\", tmpbuf, PER_BSS_SIZE_2(pAd), buf, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2952,
+          "text": "/* Reset pAd->CommonCfg.ETxBfEnCond */"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2953,
+          "text": "pAd->CommonCfg.ETxBfEnCond = 0;"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2956,
+          "text": "ETxBfEnCond = os_str_tol(macptr, 0, 10);"
+        }
+      ],
+      "ITxBfEn": [
+        {
+          "file": "mt_wifi/sta/sta_cfg.c",
+          "line": 233,
+          "text": "{\"ITxBfEn\",\t\t\t\t\t\tSet_ITxBfEn_Proc},"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2871,
+          "text": "UCHAR ITxBfEn = 0;"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2874,
+          "text": "if (RTMPGetKeyParameter(\"ITxBfEn\", tmpbuf, 128, buf, FALSE)) {"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2875,
+          "text": "/* Reset pAd->CommonCfg.ITxBfEn */"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2876,
+          "text": "pAd->CommonCfg.RegTransmitSetting.field.ITxBfEn = 0;"
+        },
+        {
+          "file": "mt_wifi/profiles/cmm_profile.c",
+          "line": 2879,
+          "text": "ITxBfEn = os_str_tol(macptr, 0, 10);"
+        }
+      ]
+    },
+    "ebf-certification": {
+      "ATEConTxETxBfInitProc": [
+        {
+          "file": "mt_wifi/ate/ate_agent.c",
+          "line": 3900,
+          "text": "INT32 SetATEConTxETxBfInitProc("
+        },
+        {
+          "file": "mt_wifi/ate/ate_agent.c",
+          "line": 4805,
+          "text": "MTWF_PRINT(\" 3)  iwpriv ra0 set ATEConTxETxBfInitProc=02:00:00:01:04:18:036:112:1:04000\\n\");"
+        },
+        {
+          "file": "mt_wifi/ate/ate_agent.c",
+          "line": 4818,
+          "text": "MTWF_PRINT(\" 3)  iwpriv ra0 set ATEConTxETxBfInitProc=02:00:01:01:04:18:036:112:1:04000\\n\");"
+        },
+        {
+          "file": "mt_wifi/ate/ate_agent.c",
+          "line": 4831,
+          "text": "MTWF_PRINT(\" 3)  iwpriv ra0 set ATEConTxETxBfInitProc=04:00:02:01:04:18:036:112:1:16000\\n\");"
+        },
+        {
+          "file": "mt_wifi/ate/ate_agent.c",
+          "line": 4844,
+          "text": "MTWF_PRINT(\" 3)  iwpriv ra0 set ATEConTxETxBfInitProc=04:00:03:01:04:18:036:112:1:16000\\n\");"
+        },
+        {
+          "file": "mt_wifi/ate/ate_agent.c",
+          "line": 4857,
+          "text": "MTWF_PRINT(\" 3)  iwpriv ra0 set ATEConTxETxBfInitProc=04:00:06:01:04:18:036:112:1:16000\\n\");"
+        }
+      ]
+    },
+    "softap": {
+      "rt28xx_send_packets": [
+        {
+          "file": "mt_wifi/sta/sta.c",
+          "line": 102,
+          "text": "netDevHook.xmit = rt28xx_send_packets;  /* hard transmit hook point */"
+        },
+        {
+          "file": "mt_wifi/ap/ap_wds_inf.c",
+          "line": 49,
+          "text": "netDevOpHook.xmit = rt28xx_send_packets;"
+        },
+        {
+          "file": "mt_wifi/ap/ap_mbss_inf.c",
+          "line": 82,
+          "text": "netDevHook.xmit = rt28xx_send_packets;\t/* hard transmit hook point */"
+        },
+        {
+          "file": "mt_wifi/os/linux/rt_main_dev.c",
+          "line": 67,
+          "text": "INT rt28xx_send_packets(IN struct sk_buff *skb_p, IN struct net_device *net_dev);"
+        },
+        {
+          "file": "mt_wifi/os/linux/rt_main_dev.c",
+          "line": 576,
+          "text": "pNetDevHook->xmit = rt28xx_send_packets;"
+        },
+        {
+          "file": "mt_wifi/os/linux/rt_main_dev.c",
+          "line": 686,
+          "text": "int rt28xx_send_packets(struct sk_buff *skb, struct net_device *ndev)"
+        }
+      ],
+      "MTK_NL80211_VENDOR_SUBCMD_SET_AP_VOW": [
+        {
+          "file": "mt_wifi/os/linux/cfg80211/cfg80211.c",
+          "line": 15638,
+          "text": ".subcmd = MTK_NL80211_VENDOR_SUBCMD_SET_AP_VOW,"
+        }
+      ]
+    },
+    "multi-ap": {
+      "MAP_HOSTAPD_SUPPORT": [
+        {
+          "file": "mt_wifi/common/security/cmm_wpa.c",
+          "line": 6979,
+          "text": "#if defined(CONFIG_MAP_SUPPORT) && !defined(MAP_HOSTAPD_SUPPORT)"
+        }
+      ],
+      "MAP_R4_SUPPORT": [],
+      "MAP_Turnkey": []
+    }
+  }
+}
