@@ -1,5 +1,5 @@
 menu "Crypto Offload Configuration"
-	depends on PACKAGE_kmod-crypto-eip && PACKAGE_kmod-mediatek_hnat
+	depends on PACKAGE_kmod-crypto-eip
 
 choice
 	prompt "Crypto Offload Mode"
