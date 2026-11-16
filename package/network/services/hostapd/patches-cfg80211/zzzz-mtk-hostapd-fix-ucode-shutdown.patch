@@ -1,0 +1,40 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] hostapd: release ucode runtime values before destroying the VM
+
+The VM final GC releases runtime values before the resource type prototypes.
+Clear the global prototype first and cancel the deferred GC callback.  BSS
+and interface cleanup can still run after hostapd_ucode_free(), so invalidate
+the cached registries before those callbacks access freed arrays.
+
+--- a/src/utils/ucode.c
++++ b/src/utils/ucode.c
+@@ -493,8 +493,18 @@
+ 
+ void wpa_ucode_free_vm(void)
+ {
++	uc_value_t *proto;
++
+ 	if (!vm.config)
+ 		return;
++
++	uloop_timeout_cancel(&gc_timer);
++	/* Type prototypes outlive the final GC; drop their runtime values first. */
++	proto = ucv_prototype_get(uc_vm_registry_get(&vm, "hostap.global"));
++	ucv_object_foreach(proto, key, val) {
++		(void)val;
++		ucv_object_delete(proto, key);
++	}
+ 
+ 	uc_search_path_free(&vm.config->module_search_path);
+ 	uc_vm_free(&vm);
+--- a/src/ap/ucode.c
++++ b/src/ap/ucode.c
+@@ -904,6 +904,8 @@
+ 	if (wpa_ucode_call_prepare("shutdown") == 0)
+ 		ucv_put(wpa_ucode_call(0));
+ 	wpa_ucode_free_vm();
++	bss_registry = NULL;
++	iface_registry = NULL;
+ }
+ 
+ void hostapd_ucode_free_iface(struct hostapd_iface *iface)

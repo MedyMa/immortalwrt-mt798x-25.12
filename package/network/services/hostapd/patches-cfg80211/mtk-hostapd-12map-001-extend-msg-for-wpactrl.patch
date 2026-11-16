@@ -1,0 +1,242 @@
+Subject: [PATCH] mtk-hostapd-12map-001-extend-msg-for-wpactrl (adapted to shared ucode stack)
+
+--- a/src/ap/wnm_ap.c
++++ b/src/ap/wnm_ap.c
+@@ -488,8 +488,8 @@
+ 			wpa_snprintf_hex(hex, hex_len, pos, end - pos);
+ 	}
+ 	wpa_msg(hapd->msg_ctx, MSG_INFO,
+-		BSS_TM_QUERY MACSTR " reason=%u%s%s",
+-		MAC2STR(addr), reason, hex ? " neighbor=" : "", hex);
++		BSS_TM_QUERY MACSTR " dialog_token=%u reason=%u%s%s",
++		MAC2STR(addr), dialog_token, reason, hex ? " neighbor=" : "", hex);
+ 	os_free(hex);
+ 
+ 	if (!hostapd_ubus_notify_bss_transition_query(hapd, addr, dialog_token, reason, pos, end - pos))
+@@ -518,6 +518,8 @@
+ 	const u8 *pos, *end, *target_bssid = NULL;
+ 	int enabled = hapd->conf->bss_transition;
+ 	struct sta_info *sta;
++	char *hex = NULL;
++	size_t hex_len;
+ 
+ #ifdef CONFIG_MBO
+ 	if (hapd->conf->mbo_enabled)
+@@ -563,24 +565,45 @@
+ 			return;
+ 		}
+ 		target_bssid = pos;
++		pos += 6;
+ 		sta->agreed_to_steer = 1;
+ 		eloop_cancel_timeout(ap_sta_reset_steer_flag_timer, hapd, sta);
+ 		eloop_register_timeout(2, 0, ap_sta_reset_steer_flag_timer,
+ 				       hapd, sta);
+ 		wpa_printf(MSG_DEBUG, "WNM: Target BSSID: " MACSTR,
+-			   MAC2STR(pos));
++			   MAC2STR(target_bssid));
++		if (pos < end) {
++			hex_len = 2 * (end - pos) + 1;
++			hex = os_malloc(hex_len);
++			if (!hex) {
++				wpa_printf(MSG_ERROR, "%s: malloc failed", __func__);
++				return;
++			}
++			wpa_snprintf_hex(hex, hex_len, pos, end - pos);
++		}
+ 		wpa_msg(hapd->msg_ctx, MSG_INFO, BSS_TM_RESP MACSTR
+-			" status_code=%u bss_termination_delay=%u target_bssid="
+-			MACSTR,
+-			MAC2STR(addr), status_code, bss_termination_delay,
+-			MAC2STR(pos));
++			" dialog_token=%u status_code=%u bss_termination_delay=%u target_bssid="
++			MACSTR "%s%s",
++			MAC2STR(addr), dialog_token, status_code, bss_termination_delay,
++			MAC2STR(target_bssid), hex ? " neighbor=" : "", hex);
+ 		pos += ETH_ALEN;
+ 	} else {
++		if (pos < end) {
++			hex_len = 2 * (end - pos) + 1;
++			hex = os_malloc(hex_len);
++			if (!hex) {
++				wpa_printf(MSG_ERROR, "%s: malloc failed", __func__);
++				return;
++			}
++			wpa_snprintf_hex(hex, hex_len, pos, end - pos);
++		}
+ 		sta->agreed_to_steer = 0;
+ 		wpa_msg(hapd->msg_ctx, MSG_INFO, BSS_TM_RESP MACSTR
+-			" status_code=%u bss_termination_delay=%u",
+-			MAC2STR(addr), status_code, bss_termination_delay);
+-	}
++			" dialog_token=%u status_code=%u bss_termination_delay=%u%s%s",
++			MAC2STR(addr), dialog_token, status_code, bss_termination_delay,
++			hex ? " neighbor=" : "", hex);
++	}
++	os_free(hex);
+ 
+ 	hostapd_ubus_notify_bss_transition_response(hapd, sta->addr, dialog_token,
+ 						    status_code, bss_termination_delay,
+@@ -621,6 +644,10 @@
+ 					       size_t len)
+ {
+ 	u8 dialog_token, type;
++	const u8 *payload = NULL;
++	const u8 *end = buf + len;
++	char *hex = NULL;
++	size_t hex_len;
+ 
+ 	if (len < 2)
+ 		return;
+@@ -634,6 +661,17 @@
+ 		   MAC2STR(addr), dialog_token, type);
+ 	wpa_hexdump(MSG_MSGDUMP, "WNM: Notification Request subelements",
+ 		    buf, len);
++
++	payload = buf - 2;
++	hex_len = 2 * (end - payload) + 1;
++	if (hex_len > 1) {
++		hex = os_malloc(hex_len);
++		if (hex) {
++			wpa_snprintf_hex(hex, hex_len, payload, end - payload);
++			wpa_msg(hapd->msg_ctx, MSG_INFO, WNM_NOTIFY_REQ MACSTR " payload=%s", MAC2STR(addr), hex);
++			os_free(hex);
++		}
++	}
+ 
+ 	switch (type) {
+ 	case WNM_NOTIF_TYPE_BEACON_PROTECTION_FAILURE:
+--- a/wpa_supplicant/wnm_sta.c
++++ b/wpa_supplicant/wnm_sta.c
+@@ -1807,6 +1807,9 @@
+ {
+ 	const u8 *pos, *end;
+ 	u8 dialog_token, type;
++	const u8 *payload = NULL;
++	char *hex = NULL;
++	size_t hex_len;
+ 
+ 	/* Dialog Token [1] | Type [1] | Subelements */
+ 
+@@ -1823,6 +1826,17 @@
+ 	wpa_hexdump(MSG_DEBUG, "WNM-Notification Request subelements",
+ 		    pos, end - pos);
+ 
++
++	payload = (const u8 *) (frm - 2);
++	hex_len = 2 * (end - payload) + 1;
++	if (hex_len > 1) {
++		hex = os_malloc(hex_len);
++		if (hex) {
++			wpa_snprintf_hex(hex, hex_len, payload, end - payload);
++			wpa_msg(wpa_s, MSG_INFO, WNM_NOTIFY_REQ MACSTR " payload=%s", MAC2STR(sa), hex);
++			os_free(hex);
++		}
++	}
+ 	if (wpa_s->wpa_state != WPA_COMPLETED ||
+ 	    os_memcmp(sa, wpa_s->bssid, ETH_ALEN) != 0) {
+ 		wpa_dbg(wpa_s, MSG_DEBUG, "WNM: WNM-Notification frame not "
+--- a/src/common/wpa_ctrl.h
++++ b/src/common/wpa_ctrl.h
+@@ -310,6 +310,8 @@
+ /* parameters: <addr> <result> */
+ #define ANQP_QUERY_DONE "ANQP-QUERY-DONE "
+ 
++#define ANQP_INITIAL_REQ "ANQP-INITIAL-REQ "
++
+ #define RX_ANQP "RX-ANQP "
+ #define RX_HS20_ANQP "RX-HS20-ANQP "
+ #define RX_HS20_ANQP_ICON "RX-HS20-ANQP-ICON "
+@@ -378,6 +380,9 @@
+ /* BSS Transition Management Response frame received */
+ #define BSS_TM_RESP "BSS-TM-RESP "
+ 
++/* WNM-Notification Request frame received */
++#define WNM_NOTIFY_REQ "WNM-NOTIFY-REQ "
++
+ /* Collocated Interference Request frame received;
+  * parameters: <dialog token> <automatic report enabled> <report timeout> */
+ #define COLOC_INTF_REQ "COLOC-INTF-REQ "
+@@ -395,6 +400,8 @@
+ #define BEACON_REQ_TX_STATUS "BEACON-REQ-TX-STATUS "
+ /* parameters: <STA address> <dialog token> <report mode> <beacon report> */
+ #define BEACON_RESP_RX "BEACON-RESP-RX "
++/* parameters: <STA address> <dialog token> */
++#define BEACON_RESP_RX_DONE "BEACON-RESP-RX-DONE "
+ 
+ /* PMKSA cache entry added; parameters: <BSSID> <network_id> */
+ #define PMKSA_CACHE_ADDED "PMKSA-CACHE-ADDED "
+--- a/src/ap/rrm.c
++++ b/src/ap/rrm.c
+@@ -101,6 +101,14 @@
+ 	const struct ieee80211_mgmt *mgmt = (const struct ieee80211_mgmt *) buf;
+ 	const u8 *pos, *ie, *end;
+ 	u8 token, rep_mode;
++	u8 ie_len;
++	u8 *payload = NULL;
++	size_t payload_len = 0;
++
++	if (len > 0) {
++		payload = os_malloc((len * 2) + 1);
++		os_memset(payload, 0, (len * 2) + 1 );
++	}
+ 
+ 	end = buf + len;
+ 	token = mgmt->u.action.u.rrm.dialog_token;
+@@ -126,6 +134,11 @@
+ 		case MEASURE_TYPE_BEACON:
+ 			hostapd_handle_beacon_report(hapd, mgmt->sa, token,
+ 						     rep_mode, ie + 2, ie[1]);
++			if (payload && (payload_len < len)) {
++				ie_len = ie[1];
++				payload_len += wpa_snprintf_hex(payload + payload_len,
++							len - payload_len, ie + 5, ie[1] - 3);
++			}
+ 			break;
+ 		default:
+ 			wpa_printf(MSG_DEBUG,
+@@ -136,6 +149,12 @@
+ 
+ 		pos = ie + ie[1] + 2;
+ 	}
++	wpa_msg(hapd->msg_ctx, MSG_INFO, BEACON_RESP_RX_DONE MACSTR " %u %02x %s%s",
++		MAC2STR(mgmt->sa), token, rep_mode, (payload_len > 0)? " ": " ",
++		(payload_len > 0)? (char *)payload: " ");
++
++	if (payload)
++		os_free(payload);
+ }
+ 
+ 
+--- a/src/ap/gas_serv.c
++++ b/src/ap/gas_serv.c
+@@ -1645,6 +1645,13 @@
+ #ifdef CONFIG_DPP
+ 	int dpp = 0;
+ #endif /* CONFIG_DPP */
++	const u8 *frame;
++	char *hex = NULL;
++	size_t hex_len;
++
++
++	frame = data - 3;
++	hex_len = 2 * (end - frame) + 1;
+ 
+ 	if (len < 1 + 2)
+ 		return;
+@@ -1708,6 +1715,16 @@
+ 							 wpabuf_len(buf));
+ 		wpabuf_free(buf);
+ 		return;
++	} else {
++		hex = os_malloc(hex_len);
++		if (!hex) {
++			wpa_printf(MSG_DEBUG, "GAS: malloc failed");
++			return;
++		}
++		wpa_snprintf_hex(hex, hex_len, frame, end - frame);
++		wpa_msg(hapd->msg_ctx, MSG_INFO,
++			ANQP_INITIAL_REQ MACSTR " payload=%s", MAC2STR(sa), hex);
++		os_free(hex);
+ 	}
+ 
+ 	pos = next;

@@ -1,0 +1,17 @@
+Subject: [PATCH] mtk-hostapd-04security-012-sae-group-downgrade-attack (adapted to shared ucode stack)
+
+--- a/src/common/sae.c
++++ b/src/common/sae.c
+@@ -2133,8 +2133,11 @@
+ 
+ 	wpa_hexdump(MSG_DEBUG, "SAE: Possible elements at the end of the frame",
+ 		    *pos, end - *pos);
+-	if (!sae_is_rejected_groups_elem(*pos, end))
++	if (!sae_is_rejected_groups_elem(*pos, end)) {
++		wpabuf_free(sae->tmp->peer_rejected_groups);
++		sae->tmp->peer_rejected_groups = NULL;
+ 		return WLAN_STATUS_SUCCESS;
++	}
+ 
+ 	epos = *pos;
+ 	epos++; /* skip IE type */

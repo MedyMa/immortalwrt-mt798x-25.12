@@ -1,0 +1,20 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] hostapd: use embedded PASN SAE state in mismatch notifications
+
+PASN embeds sae_data instead of storing a pointer. Use member access and
+fall back to the station address if no peer Multi-Link element is present.
+
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -2739,8 +2739,9 @@
+ 		if (res == SAE_KEY_MISMATCH) {
+ 			u8 notify_mac[ETH_ALEN];
+ #ifdef CONFIG_MTK_IEEE80211BE
+-			if (pasn->sae->dot11MultiLinkActivated)
+-				os_memcpy(notify_mac, pasn->sae->peer_ml_ie->ml_addr, ETH_ALEN);
++			if (pasn->sae.dot11MultiLinkActivated &&
++			    pasn->sae.peer_ml_ie)
++				os_memcpy(notify_mac, pasn->sae.peer_ml_ie->ml_addr, ETH_ALEN);
+ 			else
+ #endif
+ 			os_memcpy(notify_mac, sta->addr, ETH_ALEN);

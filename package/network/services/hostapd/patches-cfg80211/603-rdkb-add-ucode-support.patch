@@ -1,0 +1,22 @@
+Subject: [PATCH] hostap: link ucode support in AP and supplicant
+
+--- a/hostapd/Makefile
++++ b/hostapd/Makefile
+@@ -178,6 +178,7 @@
+ OBJS += ../src/utils/ucode.o
+ OBJS += ../src/ap/ucode.o
+ NEED_ULOOP:=y
++LIBS += -lblobmsg_json -lucode
+ endif
+ 
+ ifdef NEED_ULOOP
+--- a/wpa_supplicant/Makefile
++++ b/wpa_supplicant/Makefile
+@@ -195,6 +195,7 @@
+ OBJS += ../src/utils/ucode.o
+ OBJS += ucode.o
+ NEED_ULOOP:=y
++LIBS += -lblobmsg_json -lucode
+ endif
+ 
+ ifdef NEED_ULOOP

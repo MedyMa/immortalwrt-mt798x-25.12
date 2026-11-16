@@ -1,0 +1,19 @@
+Subject: [PATCH] mtk-hostapd-0711v-003-set-own-report-pref-zero (adapted to shared ucode stack)
+
+--- a/src/ap/ctrl_iface_ap.c
++++ b/src/ap/ctrl_iface_ap.c
+@@ -1236,10 +1236,11 @@
+ 		req_mode |= WNM_BSS_TM_REQ_PREF_CAND_LIST_INCLUDED;
+ 	if (os_strstr(cmd, " abridged=1"))
+ 		req_mode |= WNM_BSS_TM_REQ_ABRIDGED;
+-	if (os_strstr(cmd, " disassoc_imminent=1"))
++	if (os_strstr(cmd, " disassoc_imminent=1")) {
+ 		req_mode |= WNM_BSS_TM_REQ_DISASSOC_IMMINENT;
+-
+-	hostapd_neighbor_set_own_report_pref(hapd, nei_rep, nei_len, 0);
++		hostapd_neighbor_set_own_report_pref(hapd, nei_rep, nei_len, 0);
++	}
++
+ #ifdef CONFIG_MBO
+ 
+ 	pos = os_strstr(cmd, "mbo=");

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Detection only; netifd owns setup. Never recursively start Wi-Fi from net hotplug.
+[ "$ACTION" = add ] || exit 0
+case "$INTERFACE" in
+	ra0|rai0|rax0) /sbin/wifi config ;;
+esac

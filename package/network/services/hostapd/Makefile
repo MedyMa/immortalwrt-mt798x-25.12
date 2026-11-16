@@ -5,13 +5,16 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=hostapd
-PKG_RELEASE:=2
+PKG_RELEASE:=5
 
 PKG_SOURCE_URL:=http://w1.fi/hostap.git
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_DATE:=2022-07-29
 PKG_SOURCE_VERSION:=b704dc72ef824dfdd96674b90179b274d1d38105
+PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_SOURCE_DATE)-$(call version_abbrev,$(PKG_SOURCE_VERSION))
+PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.xz
 PKG_MIRROR_HASH:=6c9dd359ef5a4595b6576e07928566d6864957c4af6466d641d6c3f7717f4689
+TAR_OPTIONS= -xf - --strip-components=1 -C $(PKG_BUILD_DIR)
 
 PKG_MAINTAINER:=Felix Fietkau <nbd@nbd.name>
 PKG_LICENSE:=BSD-3-Clause
@@ -21,6 +24,7 @@ PKG_BUILD_PARALLEL:=1
 PKG_ASLR_PIE_REGULAR:=1
 
 PKG_CONFIG_DEPENDS:= \
+	CONFIG_MTK_WIFI7_CFG80211_SUPPORT \
 	CONFIG_PACKAGE_kmod-ath9k \
 	CONFIG_PACKAGE_kmod-cfg80211 \
 	CONFIG_PACKAGE_hostapd \
@@ -34,12 +38,22 @@ PKG_CONFIG_DEPENDS:= \
 	CONFIG_DRIVER_11BE_SUPPORT \
 	CONFIG_PACKAGE_wifi-scripts \
 	CONFIG_PACKAGE_mtwifi-cfg \
+	CONFIG_PACKAGE_mtwifi-scripts \
 	CONFIG_WPA_ENABLE_WEP
 
 EAPOL_TEST_PROVIDERS:=eapol-test eapol-test-openssl eapol-test-wolfssl
 
 SUPPLICANT_PROVIDERS:=
 HOSTAPD_PROVIDERS:=
+
+# Keep the existing WEXT patch/source stack intact. The ucode framework selects
+# its matching hostapd stack at build time, with a separate configure stamp.
+HOSTAPD_FILES:=./files
+ifneq ($(filter y m,$(CONFIG_PACKAGE_mtwifi-scripts)),)
+  PKG_BUILD_DIR=$(BUILD_DIR)/$(if $(BUILD_VARIANT),$(PKG_NAME)-$(BUILD_VARIANT)/)$(PKG_NAME)-$(PKG_VERSION)-cfg80211
+  PATCH_DIR:=./patches-cfg80211
+  HOSTAPD_FILES:=./files-cfg80211
+endif
 
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/kernel.mk
@@ -112,6 +126,23 @@ DRIVER_MAKEOPTS= \
 	CONFIG_DRIVER_WEXT=$(CONFIG_DRIVER_WEXT_SUPPORT) \
 	CONFIG_MBO=$(CONFIG_WPA_MBO_SUPPORT)
 
+CORE_DEPENDS:=+libubus \
+	+PACKAGE_mtwifi-scripts:ucode +PACKAGE_mtwifi-scripts:libucode \
+	+PACKAGE_mtwifi-scripts:libblobmsg-json +PACKAGE_mtwifi-scripts:libudebug \
+	+PACKAGE_mtwifi-scripts:ucode-mod-fs +PACKAGE_mtwifi-scripts:ucode-mod-ubus \
+	+PACKAGE_mtwifi-scripts:ucode-mod-uloop +PACKAGE_mtwifi-scripts:ucode-mod-nl80211 \
+	+PACKAGE_mtwifi-scripts:ucode-mod-rtnl
+ifneq ($(filter y m,$(CONFIG_PACKAGE_mtwifi-scripts)),)
+  DRIVER_MAKEOPTS+=CONFIG_UCODE=y CONFIG_HE_OVERRIDES=y CONFIG_EHT_OVERRIDES=y
+  TARGET_LDFLAGS+=-lblobmsg_json -lucode -ludebug
+
+  define Build/Prepare
+	$(PKG_UNPACK)
+	$(CP) ./src-cfg80211/. $(PKG_BUILD_DIR)
+	$(Build/Patch)
+  endef
+endif
+
 ifeq ($(SSL_VARIANT),openssl)
   DRIVER_MAKEOPTS += CONFIG_TLS=openssl CONFIG_SAE=y
   TARGET_LDFLAGS += -lcrypto -lssl
@@ -162,7 +193,7 @@ define Package/hostapd/Default
   SUBMENU:=WirelessAPD
   TITLE:=IEEE 802.1x Authenticator
   URL:=http://hostap.epitest.fi/
-  DEPENDS:=$(DRV_DEPENDS) +hostapd-common +libubus
+  DEPENDS:=$(DRV_DEPENDS) +hostapd-common $(CORE_DEPENDS)
   EXTRA_DEPENDS:=hostapd-common (=$(PKG_VERSION)-r$(PKG_RELEASE))
   USERID:=network=101:network=101
   PROVIDES:=hostapd
@@ -248,7 +279,7 @@ define Package/wpad/Default
   CATEGORY:=Network
   SUBMENU:=WirelessAPD
   TITLE:=IEEE 802.1x Auth/Supplicant
-  DEPENDS:=$(DRV_DEPENDS) +hostapd-common +libubus
+  DEPENDS:=$(DRV_DEPENDS) +hostapd-common $(CORE_DEPENDS)
   EXTRA_DEPENDS:=hostapd-common (=$(PKG_VERSION)-r$(PKG_RELEASE))
   USERID:=network=101:network=101
   URL:=http://hostap.epitest.fi/
@@ -365,7 +396,7 @@ define Package/wpa-supplicant/Default
   SUBMENU:=WirelessAPD
   TITLE:=WPA Supplicant
   URL:=http://hostap.epitest.fi/wpa_supplicant/
-  DEPENDS:=$(DRV_DEPENDS) +hostapd-common +libubus
+  DEPENDS:=$(DRV_DEPENDS) +hostapd-common $(CORE_DEPENDS)
   EXTRA_DEPENDS:=hostapd-common (=$(PKG_VERSION)-r$(PKG_RELEASE))
   USERID:=network=101:network=101
   PROVIDES:=wpa-supplicant
@@ -514,11 +545,11 @@ endif
 
 define Build/Configure
 	$(Build/Configure/rebuild)
-	$(if $(wildcard ./files/hostapd-$(CONFIG_VARIANT).config), \
-		$(CP) ./files/hostapd-$(CONFIG_VARIANT).config $(PKG_BUILD_DIR)/hostapd/.config \
+	$(if $(wildcard $(HOSTAPD_FILES)/hostapd-$(CONFIG_VARIANT).config), \
+		$(CP) $(HOSTAPD_FILES)/hostapd-$(CONFIG_VARIANT).config $(PKG_BUILD_DIR)/hostapd/.config \
 	)
-	$(if $(wildcard ./files/wpa_supplicant-$(CONFIG_VARIANT).config), \
-		$(CP) ./files/wpa_supplicant-$(CONFIG_VARIANT).config $(PKG_BUILD_DIR)/wpa_supplicant/.config
+	$(if $(wildcard $(HOSTAPD_FILES)/wpa_supplicant-$(CONFIG_VARIANT).config), \
+		$(CP) $(HOSTAPD_FILES)/wpa_supplicant-$(CONFIG_VARIANT).config $(PKG_BUILD_DIR)/wpa_supplicant/.config
 	)
 endef
 
@@ -573,7 +604,7 @@ define Build/Compile/wpad
 	)
 	+export MAKEFLAGS="$(MAKE_JOBSERVER)"; $(TARGET_CC) -o $(PKG_BUILD_DIR)/wpad \
 		$(TARGET_CFLAGS) \
-		./files/multicall.c \
+		$(HOSTAPD_FILES)/multicall.c \
 		$(PKG_BUILD_DIR)/hostapd/hostapd_multi.a \
 		$(PKG_BUILD_DIR)/wpa_supplicant/wpa_supplicant_multi.a \
 		$(TARGET_LDFLAGS)
@@ -616,28 +647,34 @@ endef
 
 define Install/hostapd
 	$(INSTALL_DIR) $(1)/usr/sbin
+	$(if $(filter y m,$(CONFIG_PACKAGE_mtwifi-scripts)), \
+		$(INSTALL_DIR) $(1)/usr/share/hostap; \
+		$(INSTALL_DATA) $(HOSTAPD_FILES)/hostapd.uc $(1)/usr/share/hostap/)
 endef
 
 define Install/supplicant
 	$(INSTALL_DIR) $(1)/usr/sbin
+	$(if $(filter y m,$(CONFIG_PACKAGE_mtwifi-scripts)), \
+		$(INSTALL_DIR) $(1)/usr/share/hostap; \
+		$(INSTALL_DATA) $(HOSTAPD_FILES)/wpa_supplicant.uc $(1)/usr/share/hostap/)
 endef
 
 define Package/hostapd-common/install
 	$(INSTALL_DIR) $(1)/etc/capabilities $(1)/etc/rc.button $(1)/etc/hotplug.d/ieee80211 $(1)/etc/init.d $(1)/lib/netifd  $(1)/usr/share/acl.d
-	$(INSTALL_BIN) ./files/dhcp-get-server.sh $(1)/lib/netifd/dhcp-get-server.sh
-	$(INSTALL_DATA) ./files/hostapd.sh $(1)/lib/netifd/hostapd.sh
-	$(INSTALL_BIN) ./files/wpad.init $(1)/etc/init.d/wpad
+	$(INSTALL_BIN) $(HOSTAPD_FILES)/dhcp-get-server.sh $(1)/lib/netifd/dhcp-get-server.sh
+	$(INSTALL_DATA) $(HOSTAPD_FILES)/hostapd.sh $(1)/lib/netifd/hostapd.sh
+	$(INSTALL_BIN) $(HOSTAPD_FILES)/wpad.init $(1)/etc/init.d/wpad
 	$(INSTALL_DIR) $(1)/etc/config
-	$(INSTALL_DATA) ./files/wpad.config $(1)/etc/config/wpad
-	$(INSTALL_BIN) ./files/wps-hotplug.sh $(1)/etc/rc.button/wps
-	$(INSTALL_DATA) ./files/wpad_acl.json $(1)/usr/share/acl.d
-	$(INSTALL_DATA) ./files/wpad.json $(1)/etc/capabilities
+	$(INSTALL_DATA) $(HOSTAPD_FILES)/wpad.config $(1)/etc/config/wpad
+	$(INSTALL_BIN) $(HOSTAPD_FILES)/wps-hotplug.sh $(1)/etc/rc.button/wps
+	$(INSTALL_DATA) $(HOSTAPD_FILES)/wpad_acl.json $(1)/usr/share/acl.d
+	$(INSTALL_DATA) $(HOSTAPD_FILES)/wpad.json $(1)/etc/capabilities
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_DIR) $(1)/etc/wpad/template
-	$(CP) ./files/*.conf $(1)/etc/wpad/template
-	$(CP) ./files/hostapd_conf_generate.sh $(1)/usr/bin/
+	$(CP) $(HOSTAPD_FILES)/*.conf $(1)/etc/wpad/template
+	$(CP) $(HOSTAPD_FILES)/hostapd_conf_generate.sh $(1)/usr/bin/
 
-	$(if $(or $(CONFIG_PACKAGE_wifi-scripts),$(CONFIG_PACKAGE_mtwifi-cfg)), \
+	$(if $(or $(CONFIG_PACKAGE_wifi-scripts),$(CONFIG_PACKAGE_mtwifi-cfg),$(CONFIG_PACKAGE_mtwifi-scripts)), \
 		rm -f $(1)/lib/netifd/hostapd.sh; \
 		rm -f $(1)/etc/rc.button/wps)
 endef

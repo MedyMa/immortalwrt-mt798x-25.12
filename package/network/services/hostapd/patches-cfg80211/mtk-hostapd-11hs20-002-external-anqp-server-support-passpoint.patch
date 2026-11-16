@@ -1,0 +1,40 @@
+Subject: [PATCH] mtk-hostapd-11hs20-002-external-anqp-server-support-passpoint (adapted to shared ucode stack)
+
+--- a/hostapd/config_file.c
++++ b/hostapd/config_file.c
+@@ -4187,6 +4187,10 @@
+ 	} else if (os_strcmp(buf, "anqp_3gpp_cell_net") == 0) {
+ 		if (parse_3gpp_cell_net(bss, pos, line) < 0)
+ 			return 1;
++#ifdef CONFIG_MTK_PASSPOINT
++	} else if (os_strcmp(buf, "external_anqp_server_test") == 0) {
++		bss->external_anqp_server = atoi(pos);
++#endif
+ 	} else if (os_strcmp(buf, "nai_realm") == 0) {
+ 		if (parse_nai_realm(bss, pos, line) < 0)
+ 			return 1;
+--- a/src/ap/ap_config.h
++++ b/src/ap/ap_config.h
+@@ -597,6 +597,10 @@
+ 	/* Venue URL duples */
+ 	unsigned int venue_url_count;
+ 	struct hostapd_venue_url *venue_url;
++
++#ifdef CONFIG_MTK_PASSPOINT
++	int external_anqp_server;
++#endif
+ 
+ 	/* IEEE 802.11u - Network Authentication Type */
+ 	u8 *network_auth_type;
+--- a/src/ap/gas_serv.c
++++ b/src/ap/gas_serv.c
+@@ -1741,6 +1741,9 @@
+ 	u8 dialog_token;
+ 	size_t frag_len;
+ 	int more = 0;
++#ifdef CONFIG_MTK_PASSPOINT
++	u16 status_code = (hapd->conf->external_anqp_server) ? WLAN_STATUS_ADV_SRV_UNREACHABLE : WLAN_STATUS_SUCCESS;
++#endif
+ 
+ 	wpa_hexdump(MSG_DEBUG, "GAS: RX GAS Comeback Request", data, len);
+ 	if (len < 1)

@@ -11,7 +11,7 @@ include $(INCLUDE_DIR)/kernel.mk
 PKG_NAME:=mac80211
 
 PKG_VERSION:=6.18.39
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 PKG_LICENSE_FILES:=COPYING
 
@@ -101,7 +101,7 @@ PKG_CONFIG_DEPENDS += \
 define KernelPackage/cfg80211
   $(call KernelPackage/mac80211/Default)
   TITLE:=cfg80211 - wireless configuration API
-  DEPENDS+= +iw +!WIFI_SCRIPTS_UCODE:iwinfo +wifi-scripts +wireless-regdb +USE_RFKILL:kmod-rfkill
+  DEPENDS+= +iw +!WIFI_SCRIPTS_UCODE:iwinfo +!MTK_WIFI7_CFG80211_SUPPORT:wifi-scripts +wireless-regdb +USE_RFKILL:kmod-rfkill
   ABI_VERSION:=$(PKG_VERSION)-$(PKG_RELEASE)
   FILES:= \
 	$(PKG_BUILD_DIR)/compat/compat.ko \
