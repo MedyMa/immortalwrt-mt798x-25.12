@@ -1,0 +1,23 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] net: mediatek: release RX buffers with a zero low DMA address
+
+DMA address zero is valid, and a 36-bit address such as 0x100000000 also
+has a zero rxd1. Do not use that register as the allocation sentinel.
+ring->data is assigned only after successful buffer allocation and DMA
+mapping, and already guards the cleanup loop. Use that ownership record
+so plain mappings and Page Pool buffers are both released at this boundary.
+
+Signed-off-by: MedyMa <75345465+MedyMa@users.noreply.github.com>
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -3635,9 +3635,6 @@
+ 				continue;
+ 
+ 			rxd = ring->dma + i * eth->soc->rx.desc_size;
+-			if (!rxd->rxd1)
+-				continue;
+-
+ 			if (MTK_HAS_CAPS(eth->soc->caps, MTK_36BIT_DMA))
+ 				addr64 = RX_DMA_GET_ADDR64(rxd->rxd2);
+ 

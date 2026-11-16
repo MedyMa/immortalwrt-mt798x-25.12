@@ -1,0 +1,42 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] net: mediatek: clean partial RX rings with correct DMA ownership
+
+Record the descriptor count before allocating RX payloads so error unwind
+releases every completed allocation, including on the first open. Let Page
+Pool release its own persistent DMA mappings instead of unmapping them as
+ordinary fragments before returning pages to the pool.
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -3502,6 +3502,9 @@
+ 	if (!ring->data)
+ 		return -ENOMEM;
+ 
++	/* Teardown must cover buffers allocated before a later failure. */
++	ring->dma_size = rx_dma_size;
++
+ 	if (mtk_page_pool_enabled(eth) && rcu_access_pointer(eth->prog))  {
+ 		struct page_pool *pp;
+ 
+@@ -3585,7 +3588,6 @@
+ 		}
+ 	}
+ 
+-	ring->dma_size = rx_dma_size;
+ 	ring->calc_idx_update = false;
+ 	ring->calc_idx = rx_dma_size - 1;
+ 	if (rx_flag == MTK_RX_FLAGS_QDMA)
+@@ -3639,8 +3641,11 @@
+ 			if (MTK_HAS_CAPS(eth->soc->caps, MTK_36BIT_DMA))
+ 				addr64 = RX_DMA_GET_ADDR64(rxd->rxd2);
+ 
+-			dma_unmap_single(eth->dma_dev, ((u64)rxd->rxd1 | addr64),
+-					 ring->buf_size, DMA_FROM_DEVICE);
++			/* Page Pool owns and releases its persistent DMA mappings. */
++			if (!ring->page_pool)
++				dma_unmap_single(eth->dma_dev,
++						 ((u64)rxd->rxd1 | addr64),
++						 ring->buf_size, DMA_FROM_DEVICE);
+ 			mtk_rx_put_buff(ring, ring->data[i], false);
+ 		}
+ 	}

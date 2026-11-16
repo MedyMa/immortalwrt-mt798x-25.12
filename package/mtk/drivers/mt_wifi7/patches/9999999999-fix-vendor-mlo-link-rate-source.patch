@@ -1,0 +1,18 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] wifi7: query each MLO link entry for its vendor rates
+
+The vendor station reply walks MLD link entries but queried the setup
+entry for every slot. Use the matching entry with its own adapter and WCID.
+This changes diagnostics only and retains the existing vendor wire layout.
+
+--- a/mt_wifi/common/cmm_info.c
++++ b/mt_wifi/common/cmm_info.c
+@@ -11880,7 +11880,7 @@
+ 						rssi_len = MCS_NSS_CAP(((struct _RTMP_ADAPTER *)pEntry_link->pAd))->max_path[MAX_PATH_RX];
+ 						rtmp_get_rssi(pEntry_link->pAd, pEntry_link->wcid, sta->mlo_link[n].rssi, rssi_len);
+ 						UniCmdPerStaGetSNR(pEntry_link->pAd, pEntry_link->wcid, sta->mlo_link[n].snr);
+-						get_mac_entry_trx_statistics(pEntry, &tmp_u8, &tmp_u8, &tmp_u8, &tmp_u8,
++						get_mac_entry_trx_statistics(pEntry_link, &tmp_u8, &tmp_u8, &tmp_u8, &tmp_u8,
+ 								&tmp_u8, &tmp_u8, &tmp_u8, &tmp_u8,
+ 								&(sta->mlo_link[n].tx_rate), &(sta->mlo_link[n].rx_rate), &tx_sgi, &rx_sgi, &snr);
+ 					}

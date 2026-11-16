@@ -1,0 +1,36 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] net: mediatek: retain RX allocation failure cleanup
+
+Restore the page-pool failure cleanup after the R4 baseline. Also release
+the pointer array when coherent descriptor allocation fails before DMA
+ownership exists; normal teardown must remain safe after either failure.
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -3505,8 +3505,11 @@
+ 
+ 		pp = mtk_create_page_pool(eth, &ring->xdp_q, ring_no,
+ 					  rx_dma_size);
+-		if (IS_ERR(pp))
++		if (IS_ERR(pp)) {
++			kfree(ring->data);
++			ring->data = NULL;
+ 			return PTR_ERR(pp);
++		}
+ 
+ 		ring->page_pool = pp;
+ 	}
+@@ -3638,9 +3641,10 @@
+ 					 ring->buf_size, DMA_FROM_DEVICE);
+ 			mtk_rx_put_buff(ring, ring->data[i], false);
+ 		}
+-		kfree(ring->data);
+-		ring->data = NULL;
+-	}
++	}
++	/* The pointer array also exists when coherent DMA allocation failed. */
++	kfree(ring->data);
++	ring->data = NULL;
+ 
+ 	if (!in_sram && ring->dma) {
+ 		dma_free_coherent(eth->dma_dev,

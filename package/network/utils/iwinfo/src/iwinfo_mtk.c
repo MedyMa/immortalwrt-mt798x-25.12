@@ -857,12 +857,13 @@ static int mtk_get_assoclist(const char *dev, char *buf, int *len)
 	size_t max_entries;
 	size_t i;
 
+	*len = 0;
 	table = mtk_get_mac_table(dev);
 	if (!table)
 		return -1;
 
 	count = mtk_mac_table_count(table);
-	max_entries = IWINFO_BUFSIZE / sizeof(struct iwinfo_assoclist_entry);
+	max_entries = IWINFO_ASSOCLIST_BUFSIZE / sizeof(struct iwinfo_assoclist_entry);
 	if (count > max_entries)
 		count = max_entries;
 
@@ -870,6 +871,8 @@ static int mtk_get_assoclist(const char *dev, char *buf, int *len)
 		RT_802_11_MAC_ENTRY *pe = &(table->Entry[i]);
 		struct iwinfo_assoclist_entry *e = (struct iwinfo_assoclist_entry *)buf + i;
 
+		/* The WEXT table has no MLO, mesh or authorization metadata. */
+		memset(e, 0, sizeof(*e));
 		memcpy(e->mac, pe->Addr, 6);
 		e->signal = pe->AvgRssi0;
 		e->signal_avg = pe->AvgRssi0;

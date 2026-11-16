@@ -1,0 +1,32 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] net: mediatek: protect short TX fragments on all Netsys
+
+All Netsys TX DMA engines require at least 16 bytes per fragment. Keep the
+R4 transmit implementation: software-segment affected GSO packets before
+MSS rewriting, then linearize short fragments before DMA mapping.
+
+Adapted from MediaTek commit 1f1f4a2d4b2d820be22dc577623780d177c2d9d8.
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -2377,8 +2377,8 @@
+ 		return NETDEV_TX_BUSY;
+ 	}
+ 
+-	if (mtk_is_netsys_v1(eth) &&
+-	    skb_is_gso(skb) && mtk_skb_has_small_frag(skb)) {
++	/* All Netsys TX DMA engines require at least 16 bytes per fragment. */
++	if (skb_is_gso(skb) && mtk_skb_has_small_frag(skb)) {
+ 		segs = skb_gso_segment(skb, dev->features & ~NETIF_F_ALL_TSO);
+ 		if (IS_ERR(segs))
+ 			goto drop;
+@@ -2405,8 +2405,7 @@
+ 	}
+ 
+ 	skb_list_walk_safe(skb, skb, next) {
+-		if ((mtk_is_netsys_v1(eth) &&
+-		     mtk_skb_has_small_frag(skb) && skb_linearize(skb)) ||
++		if ((mtk_skb_has_small_frag(skb) && skb_linearize(skb)) ||
+ 		    mtk_tx_map(skb, dev, tx_num, ring, gso) < 0) {
+ 				stats->tx_dropped++;
+ 				dev_kfree_skb_any(skb);

@@ -1,0 +1,39 @@
+From: MedyMa <75345465+MedyMa@users.noreply.github.com>
+Subject: [PATCH] net: mediatek: bound native TX shaper array access
+
+The native shaper has 16 entries. Reject negative and out-of-range QIDs
+before checking or updating references, and do not program per-port rates
+into the separate HQoS queue space. Index 16 is already out of bounds.
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -1185,7 +1185,8 @@
+ 	int active = 0;
+ 	int i;
+ 
+-	if (!mtk_is_netsys_v3_or_greater(eth) || idx > MTK_QDMA_NUM_QUEUES)
++	if (!mtk_is_netsys_v3_or_greater(eth) || idx < 0 ||
++	    idx >= ARRAY_SIZE(eth->qdma_shaper.refcnt))
+ 		goto out;
+ 
+ 	for (i = 0; i < MTK_QDMA_NUM_QUEUES; i++) {
+@@ -1205,7 +1206,8 @@
+ 
+ void mtk_shaper_update_refcnt(struct mtk_eth *eth, int idx, bool add)
+ {
+-	if (!mtk_is_netsys_v3_or_greater(eth))
++	if (!mtk_is_netsys_v3_or_greater(eth) || idx < 0 ||
++	    idx >= ARRAY_SIZE(eth->qdma_shaper.refcnt))
+ 		return;
+ 
+ 	if (add)
+@@ -1220,7 +1222,8 @@
+ 	const struct mtk_soc_data *soc = eth->soc;
+ 	u32 ofs, val;
+ 
+-	if (!MTK_HAS_CAPS(soc->caps, MTK_QDMA))
++	if (idx >= ARRAY_SIZE(eth->qdma_shaper.speed) ||
++	    !MTK_HAS_CAPS(soc->caps, MTK_QDMA))
+ 		return;
+ 
+ 	val = MTK_QTX_SCH_MIN_RATE_EN |
