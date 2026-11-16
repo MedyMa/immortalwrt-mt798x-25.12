@@ -1,5 +1,5 @@
 #!/bin/bash
-# Source-owned LuCI overview patch, invoked by scripts/feeds before/after
+# Source-owned LuCI patches, invoked by scripts/feeds before/after
 # updates. Do not leave managed edits in the way of git pull, or replace
 # unrelated edits when migrating the exact earlier CPU/temperature patch.
 set -euo pipefail
@@ -18,11 +18,46 @@ if [ ! -d feeds/luci ]; then
     exit 1
 fi
 
+wireless_patches=(
+    "$source_root/patches/feeds/luci/1020-luci-mtwifi-wireless-controls.patch"
+    "$source_root/patches/feeds/luci/1021-luci-mtwifi-wireless-feature-visibility.patch"
+    "$source_root/patches/feeds/luci/1022-luci-mtwifi-feature-defaults.patch"
+)
+apply_wireless_patch() {
+    local wireless_patch=$1
+    if git apply --reverse --check "$wireless_patch" >/dev/null 2>&1; then
+        [ "$phase" != before-update ] || git apply --reverse "$wireless_patch"
+    elif [ "$phase" = after-update ]; then
+        git apply --check "$wireless_patch"
+        git apply "$wireless_patch"
+    fi
+}
+apply_wireless() {
+    local index
+    if [ "$phase" = before-update ]; then
+        for ((index=${#wireless_patches[@]}-1; index>=0; index--)); do
+            apply_wireless_patch "${wireless_patches[index]}"
+        done
+    else
+        # Resume after the newest applied patch; later patches alter earlier context.
+        for ((index=${#wireless_patches[@]}-1; index>=0; index--)); do
+            if git apply --reverse --check "${wireless_patches[index]}" >/dev/null 2>&1; then
+                break
+            fi
+        done
+        for ((index=index+1; index<${#wireless_patches[@]}; index++)); do
+            apply_wireless_patch "${wireless_patches[index]}"
+        done
+    fi
+}
+[ "$phase" != before-update ] || apply_wireless
+
+apply_overview() {
 if git apply --reverse --check "$patch_file" >/dev/null 2>&1; then
     if [ "$phase" = before-update ]; then
         git apply --reverse "$patch_file"
     fi
-    exit 0
+    return 0
 fi
 
 if ! git apply --check "$patch_file" >/dev/null 2>&1; then
@@ -60,8 +95,12 @@ if ! git apply --check "$patch_file" >/dev/null 2>&1; then
 fi
 
 if [ "$phase" = before-update ]; then
-    exit 0
+    return 0
 fi
 
 git apply --check "$patch_file"
 git apply "$patch_file"
+}
+
+apply_overview
+[ "$phase" != after-update ] || apply_wireless

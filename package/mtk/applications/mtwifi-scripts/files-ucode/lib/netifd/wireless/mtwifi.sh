@@ -58,21 +58,28 @@ const EXTRA = {
 		[ 'dbdc_main', TYPE.boolean ],
 		[ 'whnat', TYPE.boolean ],
 		[ 'twt', TYPE.number ],
+		[ 'eht_restricted_twt', TYPE.boolean ],
+		[ 'tx_burst', TYPE.boolean ],
+		[ 'tx_preamble', TYPE.number ],
+		[ 'doth', TYPE.boolean ],
 		[ 'dfs', TYPE.boolean ],
 		[ 'zw_dfs', TYPE.boolean ],
 		[ 'vendor_vht', TYPE.boolean ],
 		[ 'vht_1024', TYPE.boolean ],
 		[ 'he_ldpc', TYPE.boolean ],
+		[ 'mu_beamformer', TYPE.boolean ],
 		[ 'map_mode', TYPE.number ],
 		[ 'obss_interval', TYPE.number ],
 		[ 'eht_bw320_offset', TYPE.number ],
 	],
 	iface: [
 		[ 'mldgroup', TYPE.number ],
+		[ 'ieee80211w', TYPE.number ],
 		[ 'mwds', TYPE.boolean ],
 		[ 'disable_eht', TYPE.boolean ],
 		[ 'amsdu', TYPE.boolean ],
 		[ 'autoba', TYPE.boolean ],
+		[ 'uapsd', TYPE.boolean ],
 		[ 'reliable_11r', TYPE.boolean ],
 		[ 'mumimo_dl', TYPE.boolean ],
 		[ 'mumimo_ul', TYPE.boolean ],
@@ -200,9 +207,14 @@ function resolve_devname(l1, payload, section) {
 /* MTK 私有键在 validate() 之前摘掉，避免官方 schema 报 “not present” */
 function validate_kind(kind, config, extras) {
 	let saved = {};
+	/* Vendor options sharing a schema name must not acquire schema defaults
+	 * or be consumed as unrelated aliases (tx_burst is a WMM alias upstream).
+	 */
+	let optional = {};
 
 	for (let opt in extras) {
 		let key = opt[0];
+		optional[key] = true;
 
 		if (config[key] != null) {
 			saved[key] = opt[1] == TYPE.boolean ? !!+config[key] :
@@ -214,6 +226,8 @@ function validate_kind(kind, config, extras) {
 	}
 
 	validate(kind, config);
+	for (let key in optional)
+		delete config[key];
 
 	for (let key, value in saved)
 		config[key] = value;
@@ -236,6 +250,8 @@ function validate_device(config) {
 	let saved = {};
 
 	validate_kind('device', config, EXTRA.device);
+	if (config.doth != null)
+		config.ieee80211h = config.doth;
 
 	for (let key, value in saved)
 		config[key] = value;

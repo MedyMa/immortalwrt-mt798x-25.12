@@ -12,10 +12,13 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=mtwifi-scripts
 PKG_LICENSE:=GPL-2.0+
 PKG_VERSION:=2.0
-PKG_RELEASE:=5
+PKG_RELEASE:=7
 
 PKG_MAINTAINER:=ChuCi Nan <nanchuci023@gmail.com>
 PKG_CONFIG_DEPENDS:=CONFIG_WIFI_SCRIPTS_UCODE CONFIG_WIFI_SCRIPTS_WPS_BUTTON_DISABLED
+PKG_FILE_DEPENDS:=../mtwifi-cfg/files/mtwifi-cfg/mtwifi_mlo \
+	../mtwifi-cfg/files/mtwifi-cfg/mtwifi_defs.lua \
+	../mtwifi-cfg/files/mtwifi-cfg/mtwifi-mlo-recover
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -27,6 +30,7 @@ define Package/mtwifi-scripts
   DEPENDS:=+wifi-dats +netifd +iwinfo +iw +mwctl +hostapd-utils +wpa-cli wpad-openssl \
 	+ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus \
 	+ucode-mod-nl80211 +ucode-mod-rtnl +ucode-mod-digest \
+	+lua-cjson +libuci-lua +luci-lib-nixio \
 	@MTK_WIFI7_CFG80211_SUPPORT @MTK_WIFI_OSAL_CFG80211_SUPPORT
   CONFLICTS:=wifi-scripts mtwifi-cfg
   PKGARCH:=all
@@ -56,6 +60,12 @@ define Package/mtwifi-scripts/install
 	$(CP) ./files/* $(1)/
 	$(CP) ./files-ucode/* $(1)/
 	$(LN) l1util $(1)/sbin/l1dat
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/lib/lua $(1)/etc/init.d $(1)/lib/upgrade/keep.d
+	$(INSTALL_BIN) ../mtwifi-cfg/files/mtwifi-cfg/mtwifi_mlo $(1)/usr/sbin/mtwifi-mlo-status
+	$(LN) mtwifi-mlo-status $(1)/usr/sbin/mtwifi-mlo-control
+	$(INSTALL_DATA) ../mtwifi-cfg/files/mtwifi-cfg/mtwifi_defs.lua $(1)/usr/lib/lua/
+	$(INSTALL_BIN) ../mtwifi-cfg/files/mtwifi-cfg/mtwifi-mlo-recover $(1)/etc/init.d/mtwifi-mlo-recover
+	echo /etc/mtwifi-cfg/mlo-groups.json > $(1)/lib/upgrade/keep.d/mtwifi-mlo
 ifeq ($(CONFIG_WIFI_SCRIPTS_WPS_BUTTON_DISABLED),y)
 	rm -f $(1)/etc/rc.button/wps
 endif

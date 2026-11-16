@@ -18,6 +18,7 @@
  */
 
 import * as l1dat from 'mtwifi.l1dat';
+import * as uci from 'uci';
 
 const L1_DAT_PATH = l1dat.L1_DAT_PATH;
 
@@ -49,6 +50,25 @@ function get_dev_prop(dev, prop) {
 
 const action = {
 	list: () => show_devs(),
+	whnat: () => {
+		let owners = {};
+		let sections = uci.cursor().get_all('wireless') ?? {};
+		for (let group in l1dat.whnat_groups(l1dat_devs)) {
+			let owner;
+			for (let name, config in sections)
+				if (config['.type'] == 'wifi-device' && config.type == 'mtwifi' &&
+				    (config.devname ?? name) == group.master)
+					owner = name;
+			if (!owner) continue;
+			for (let name, config in sections) {
+				let dev = l1dat_devs[l1dat.DEV_RINDEX][config.devname ?? name];
+				if (config['.type'] == 'wifi-device' && config.type == 'mtwifi' &&
+				    dev && group.profiles[dev.profile_path])
+					owners[name] = owner;
+			}
+		}
+		printf('%J\n', owners);
+	},
 
 	dump: () => dump_l1dat(),
 

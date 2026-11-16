@@ -8,6 +8,7 @@ import {
 	TYPE_ARRAY, TYPE_STRING, TYPE_INT, TYPE_BOOL
 } from "./utils.uc";
 import { find_phy } from "wifi.utils";
+import * as l1dat from "mtwifi.l1dat";
 import * as wdev from "./wireless-device.uc";
 
 let wireless = netifd.wireless = {
@@ -139,6 +140,23 @@ function config_init(uci)
 			list[name] = data;
 	}
 
+	/* Hash the adapter's canonical WHNAT value into every member radio.
+	 * Changing an inactive owner must still reload its active sibling bands.
+	 * This changes only the runtime payload, never the user's UCI sections.
+	 */
+	let l1 = l1dat.load_cached();
+	for (let group in l1 ? l1dat.whnat_groups(l1) : []) {
+		let value = '1';
+		for (let name, data in sections.device)
+			if (data.type == 'mtwifi' && (data.devname ?? name) == group.master)
+				value = data.whnat ?? '1';
+		for (let name, data in sections.device) {
+			let dev = l1[l1dat.DEV_RINDEX][data.devname ?? name];
+			if (data.type == 'mtwifi' && dev && group.profiles[dev.profile_path])
+				data.whnat = value;
+		}
+	}
+
 	for (let name, data in sections.device) {
 		if (!data.type)
 			continue;
@@ -162,7 +180,11 @@ function config_init(uci)
 
 	for (let name, data in sections.iface) {
 		let dev_names = parse_array(data.device);
-		let mlo_vif = parse_bool(data.mlo);
+		/* MTK MldGroup joins driver-owned per-radio VAPs. Generic mac80211
+		 * MLO instead creates one shared ap-mld interface across radios.
+		 */
+		let vendor_mlo = length(dev_names) == 1 && sections.device[dev_names[0]]?.type == 'mtwifi';
+		let mlo_vif = !vendor_mlo && parse_bool(data.mlo);
 		let radios = map(dev_names, (v) => radio_idx[v]);
 		radios = filter(radios, (v) => v != null);
 		let radio_config = map(dev_names, (v) => devices[v]?.config);
@@ -310,7 +332,9 @@ function config_init(uci)
 						if (!config)
 							continue;
 
-						let mlo_vif = parse_bool(config.mlo);
+						let vendor_mlo = length(devs) == 1 &&
+							(sections.device[devs[0]]?.type ?? devices[devs[0]]?.config.type) == 'mtwifi';
+						let mlo_vif = !vendor_mlo && parse_bool(config.mlo);
 						let radios = map(devs, (v) => radio_idx[v]);
 						radios = filter(radios, (v) => v != null);
 						let radio_config = map(devs, (v) => devices[v]?.config);

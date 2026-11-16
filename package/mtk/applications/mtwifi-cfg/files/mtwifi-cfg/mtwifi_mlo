@@ -58,13 +58,20 @@ local function cursor()
 	return uci.cursor()
 end
 
+local function eht_mode(htmode)
+	local modes = { EHT20 = true, EHT40 = true, EHT80 = true,
+		EHT80_80 = true, EHT160 = true, EHT320 = true }
+	if fs.stat("/usr/share/ucode/mtwifi/cfg.uc") then
+		modes["EHT320-1"], modes["EHT320-2"] = true, true
+	end
+	return modes[htmode] == true
+end
+
 local function device_info(c, section)
 	local device = c:get("wireless", section, "device")
 	if not device or c:get("wireless", device, "type") ~= "mtwifi" then return nil end
 	local htmode = c:get("wireless", device, "htmode") or ""
-	local eht_modes = { EHT20 = true, EHT40 = true, EHT80 = true,
-		EHT80_80 = true, EHT160 = true, EHT320 = true }
-	if not eht_modes[htmode] then return nil end
+	if not eht_mode(htmode) then return nil end
 	return device, htmode
 end
 
@@ -72,7 +79,7 @@ local function band_name(c, device, htmode)
 	local band = c:get("wireless", device, "band")
 	if band == "2g" or band == "2.4g" then return "2.4G" end
 	if band == "5g" then return "5G" end
-	if band == "6g" or htmode == "EHT320" then return "6G" end
+	if band == "6g" or htmode:match("^EHT320") then return "6G" end
 	local hwmode = c:get("wireless", device, "hwmode")
 	if hwmode == "a" then return "5G" end
 	return "未知频段"
@@ -394,6 +401,27 @@ local function current_groups(state, c)
 end
 
 local function security_signature(iface)
+	if fs.stat("/usr/share/ucode/mtwifi/cfg.uc") then
+		-- The cfg80211 writer also supports explicit CCMP/GCMP variants.
+		local auth, cipher = (iface.encryption or "none"):match("^([^+]+)%+?(.*)$")
+		local ciphers = { [""] = "ccmp", ccmp = "ccmp", gcmp = "gcmp",
+			ccmp256 = "ccmp256", gcmp256 = "gcmp256" }
+		if (auth ~= "sae" and auth ~= "owe") or not ciphers[cipher] or
+			(iface.ieee80211w ~= nil and scalar(iface.ieee80211w) ~= "2") then return nil end
+		local pairwise = ciphers[cipher]
+		if auth == "sae" and cipher == "" and (iface.gcmp256 == nil or disabled(iface.gcmp256)) then
+			pairwise = "ccmp+gcmp256"
+		end
+		local values = { auth, pairwise, tostring(iface.key or ""), "2",
+			scalar(iface.sae_pwe) or "2", scalar(iface.mobility_domain) or "" }
+		for _, key in ipairs({ "sae_ext_key", "ieee80211r" }) do
+			local value = iface[key]
+			if value == nil and key ~= "ieee80211r" and auth == "sae" then value = "1" end
+			values[#values + 1] = disabled(value) and "1" or "0"
+		end
+		values[#values + 1] = disabled(iface.ft_over_ds) and "1" or "0"
+		return table.concat(values, "\0")
+	end
 	local enc = defs.enc2dat[iface.encryption or "none"]
 	if not enc then return nil end
 	local authmode, cipher = enc[1], enc[2]
@@ -439,8 +467,7 @@ local function selected_aps(c, selected, allow_owned, state)
 		common_network = identity.network
 		local device, htmode = identity.device, identity.htmode
 		if disabled(c:get("wireless", device, "disabled")) then return nil, "unsupported_member" end
-		local eht_modes = { EHT20 = true, EHT40 = true, EHT80 = true, EHT80_80 = true, EHT160 = true, EHT320 = true }
-		if not eht_modes[htmode] then return nil, "unsupported_member" end
+		if not eht_mode(htmode) then return nil, "unsupported_member" end
 		if devices[device] then return nil, "duplicate_radio" end
 		devices[device] = true
 		local group, valid = group_value(iface.mldgroup, iface.mlo)

@@ -285,6 +285,13 @@ function set_dev_dat(dats, dat_key, cfg) {
 		dats[dat_key] = cfg2dat(cfg);
 };
 
+function bssid_tokens(value, count) {
+	let values = [];
+	for (let i = 0; i < count; i++)
+		push(values, cfg2dat(value));
+	return join(';', values);
+};
+
 function set_dat(dats, apidx, dat_key, cfg) {
 	if (cfg != null)
 		dats[dat_key] = dat.token_set(dats[dat_key], apidx, cfg2dat(cfg));
@@ -360,7 +367,7 @@ function __exec_cfg80211_tool(ifname, key, val) {
 
 	if (tool == null) {
 		log_syslog(`no cfg80211 tool found for ${ifname}`);
-		return;
+		die('VENDOR_TOOL_UNAVAILABLE');
 	}
 
 	if (type(val) == 'bool')
@@ -371,7 +378,8 @@ function __exec_cfg80211_tool(ifname, key, val) {
 	let cmd = `${tool} ${shell_quote(ifname)} set ${shell_quote('' + key + '=' + val)}`;
 
 	/* Do not log private wireless command arguments. */
-	system(cmd);
+	if (system(cmd) != 0)
+		die('VENDOR_OPTION_APPLY_FAILED');
 };
 
 
@@ -407,14 +415,24 @@ function mtwifi_cfg_cfg80211_tool_hook(cfg) {
  */
 export function driver_up(devname, payload) {
 	mtwifi_cfg_cfg80211_tool_hook(payload);
+	/* WHNAT is adapter state; updating its profile alone is insufficient
+	 * while sibling bands keep that adapter running. Use its native setter.
+	 */
+	let dev = get_dev(l1dat.load_cached(), devname);
+	let profile = dev ? dat.load_profile(dev.profile_path) : null;
+	for (let _, v in payload.interfaces ?? {}) {
+		if (v.config.disabled) continue;
+		if (profile?.WHNAT != null)
+			__exec_cfg80211_tool(v.config.ifname, 'whnat_en', profile.WHNAT);
+		break;
+	}
 	mtwifi_cfg_foreach_vif(payload, 'ap', (v) => {
-		if (!v.config.disassoc_low_ack)
-			return;
 		let ifn = shell_quote(v.config.ifname);
 		if (v.config.kicklow != null)
-			system(`/usr/sbin/mwctl dev ${ifn} set ${shell_quote('KickStaRssiLow=' + v.config.kicklow)}`);
+			__exec_cfg80211_tool(v.config.ifname, 'KickStaRssiLow', v.config.kicklow);
 		if (v.config.assocthres != null)
-			system(`/usr/sbin/mwctl dev ${ifn} set assocreq_rssi_thres ${shell_quote(v.config.assocthres)}`);
+			if (system(`/usr/sbin/mwctl dev ${ifn} set assocreq_rssi_thres ${shell_quote(v.config.assocthres)}`))
+				die('ASSOC_RSSI_APPLY_FAILED');
 	});
 };
 
@@ -430,7 +448,6 @@ function set_chip_cfg(cfg, dats, devs, dev_name, plan) {
 		return;
 
 	for (let k, v in defs.chip_cfgs) {
-		dats[v[0]] = v[1];
 		set_dev_dat(dats, v[0], cfg.config[k]);
 	}
 
@@ -491,7 +508,7 @@ function get_basic_rate(band, cell_density, legacy_rates, w_mode) {
  * ============================================================ */
 
 /* 找不到的 encryption 不要直接索引 null（原 Lua 会崩） */
-function enc2dat_lookup(enc, sae_ext_key) {
+function enc2dat_lookup(enc, sae_ext_key, gcmp256) {
 	if (enc == null)
 		return null;
 
@@ -510,7 +527,11 @@ function enc2dat_lookup(enc, sae_ext_key) {
 	 */
 	let on = ('' + sae_ext_key) in [ '1', 'true', 'on', 'yes' ];
 
-	return on ? (entry.ext ?? entry.plain) : (entry.plain ?? entry.ext);
+	let result = [ ...(on ? (entry.ext ?? entry.plain) : (entry.plain ?? entry.ext)) ];
+	/* The AKM flag and the automatic pairwise cipher are independent. */
+	if (enc in [ 'sae', 'sae-mixed' ])
+		result[1] = truthy(gcmp256) ? 'CCMP128,GCMP256' : 'CCMP128';
+	return result;
 };
 
 /*
@@ -755,7 +776,7 @@ export function prepare_dat(devname, payload) {
 		dats.MACRepeaterEn = has_text(v.config.bssid) ? 1 : 0;
 		dats.ApCliUAPSDCapable = lua_or(v.config.uapsd, 0);
 
-		let encinfo = enc2dat_lookup(v.config.encryption, v.config.sae_ext_key);
+		let encinfo = enc2dat_lookup(v.config.encryption, v.config.sae_ext_key, v.config.gcmp256);
 
 		if (encinfo == null) {
 			log(`unknown encryption "${v.config.encryption}" on ${iface_key}, skip ApCliAuthMode`);
@@ -848,7 +869,7 @@ export function prepare_dat(devname, payload) {
 	if (txpower != null && txpower < 100) {
 		dats.PERCENTAGEenable = 1;
 		dats.TxPower = txpower;
-	} else {
+	} else if (txpower != null) {
 		dats.PERCENTAGEenable = 0;
 		dats.TxPower = 100;
 	}
@@ -857,24 +878,27 @@ export function prepare_dat(devname, payload) {
 		dats.ETxBfEnCond = 1;
 		dats.MUTxRxEnable = dats.ApCliEnable == 1 ? 3 : 1;
 		dats.ITxBfEn = 1;
-	} else {
+	} else if (payload.config.mu_beamformer != null) {
 		dats.ETxBfEnCond = 0;
 		dats.MUTxRxEnable = 0;
 		dats.ITxBfEn = 0;
 	}
-
-	if (truthy(payload.config.twt)) {
-		/* cfg2dat() 把 boolean 写成 1/0，字符串/数字原样透传 */
-		if (is_ax_mode(payload))
-			dats.TWTSupport = cfg2dat(payload.config.twt) ?? payload.config.twt;
-		else if (is_be_mode(payload))
-			dats.EHT_ApRestrictedTwt = cfg2dat(payload.config.twt) ?? payload.config.twt;
-	} else {
-		dats.TWTSupport = 0;
-		dats.EHT_ApRestrictedTwt = 0;
+	if (payload.config.mu_beamformer != null) {
+		payload.config.he_mu_beamformer = payload.config.mu_beamformer;
+		payload.config.eht_mu_beamformer = payload.config.mu_beamformer;
 	}
 
-	dats.MapMode = payload.config.map_mode ?? 0;
+	/* HE individual/broadcast TWT and EHT restricted TWT are independent. */
+	if (payload.config.twt != null)
+		dats.TWTSupport = payload.config.twt;
+	if (payload.config.eht_restricted_twt != null)
+		dats.EHT_ApRestrictedTwt = bssid_tokens(payload.config.eht_restricted_twt, int(dats.BssidNum));
+	let twt = int(dat.token_get(dats.TWTSupport, 1, '0'));
+	payload.config.he_twt_responder = !!(twt & 1);
+	if (payload.config.he_ldpc != null)
+		dats.HeLdpc = bssid_tokens(payload.config.he_ldpc, int(dats.BssidNum));
+
+	set_dev_dat(dats, 'MapMode', payload.config.map_mode);
 	if (payload.config.map_mode == '1') {
 		dats.SREnable = 0;
 		dats.SRMode = 0;
@@ -891,27 +915,24 @@ export function prepare_dat(devname, payload) {
 	else
 		dats.EDCCARegion = 0;
 
-	if (truthy(payload.config.doth)) {
-		if (band == '2g')
-			dats.SeamlessCSA = 1;
-		else
-			dats.IEEE80211H = 1;
-
-		if (truthy(payload.config.zw_dfs)) {
-			dats.DfsZeroWait = dats.MACRepeaterEn == 1 ? 0 : 1;
-			dats.DfsDedicatedZeroWait = 2;
-			dats.DfsZeroWaitDefault = 1;
-		}
-
-		dats.DfsEnable = truthy(payload.config.dfs) ? 1 : 0;
-	} else {
-		dats.SeamlessCSA = 0;
-		dats.IEEE80211H = 0;
+	if (payload.config.doth != null)
+		set_dev_dat(dats, band == '2g' ? 'SeamlessCSA' : 'IEEE80211H', payload.config.doth);
+	if (band == '5g' && payload.config.doth === false) {
 		dats.DfsEnable = 0;
 		dats.DfsZeroWait = 0;
 		dats.DfsDedicatedZeroWait = 0;
 		dats.DfsZeroWaitDefault = 0;
+	} else if (band == '5g') {
+		set_dev_dat(dats, 'DfsEnable', payload.config.dfs);
+		if (payload.config.zw_dfs != null) {
+			let enable = payload.config.zw_dfs && +dats.IEEE80211H == 1 && +dats.DfsEnable == 1;
+			dats.DfsZeroWait = enable && +dats.MACRepeaterEn != 1 ? 1 : 0;
+			dats.DfsDedicatedZeroWait = enable ? 2 : 0;
+			dats.DfsZeroWaitDefault = enable ? 1 : 0;
+		}
 	}
+	if (band == '5g')
+		payload.config.ieee80211h = +dats.IEEE80211H == 1;
 
 	/* Resolve WHNAT through L1 ownership, never through a global filename glob. */
 	for (let group in l1dat.whnat_groups(devs)) {
@@ -924,10 +945,10 @@ export function prepare_dat(devname, payload) {
 				value = sec.whnat;
 		if (dev_name == group.master && payload.config.whnat != null)
 			value = payload.config.whnat;
-		if (value == null || value == '') value = '1';
+		if (value == null || value === '') value = '1';
 		if (!(value in [ '0', '1', 0, 1, false, true ]))
 			return result;
-		value = (value == '1' || value == 1 || value == true) ? '1' : '0';
+		value = (value === '1' || value === 1 || value === true) ? '1' : '0';
 		let paths = { ...group.profiles, [group.path]: true };
 		for (let path in paths) {
 			let cfgs = result.profiles[path] ?? dat.load_profile(path);
@@ -939,17 +960,22 @@ export function prepare_dat(devname, payload) {
 	}
 
 	/* in mt_wifi cmm_cfg.c set_datcfg_ack_cts_timeout */
-	dats.ACK_CTS_TOUT_EN = has_text(payload.config.distance > 0) ? 1 : 0;
+	dats.ACK_CTS_TOUT_EN = payload.config.distance > 0 ? 1 : 0;
 	dats.Distance = dats.ACK_CTS_TOUT_EN == 1 ? lua_or(payload.config.distance, 0) : 0;
 	dats.BasicRate = get_basic_rate(band, payload.config.cell_density ?? 0,
 	                                truthy(payload.config.legacy_rates) ? 1 : 0, wmode);
 	dats.BGProtection = truthy(payload.config.legacy_rates) ? 1 : 0;
-	dats.Vht1024QamSupport = truthy(payload.config.vht_1024) ? 1 : 0;
-	dats.TxBurst = truthy(payload.config.tx_burst) ? 1 : 0;
-	dats.TxPreamble = truthy(payload.config.short_preamble) ? 1 : 0;
+	set_dev_dat(dats, 'Vht1024QamSupport', payload.config.vht_1024);
+	set_dev_dat(dats, 'TxBurst', payload.config.tx_burst);
+	set_dev_dat(dats, 'TxPreamble', payload.config.tx_preamble);
 
 	/* reset vif cfgs to default */
+	const preserve = [ 'HT_AMSDU', 'HT_AutoBA', 'APSDCapable',
+		'MuMimoDlEnable', 'MuMimoUlEnable', 'MuOfdmaDlEnable', 'MuOfdmaUlEnable',
+		'PpMuMimoDlEnable', 'PpMuMimoUlEnable', 'PpOfdmaDlEnable', 'PpOfdmaUlEnable' ];
 	for (let k, v in defs.vif_cfgs) {
+		if (k in preserve && dats[k] != null)
+			continue;
 		dats[k] = '';
 
 		for (let i = 1; i <= counts.ap; i++)
@@ -995,16 +1021,14 @@ export function prepare_dat(devname, payload) {
 
 		if (v?.config?.mode != 'ap')
 			continue;
+		v.config.preamble = +dats.TxPreamble != 0;
 
 		let ifname = v.config.ifname;
 		let igmp_snooping = igmp_snooping_get();
 		let mac = v.config.macaddr;
-		let mlo = v.config.mlo;
-		let mld_group = v.config.mldgroup;
-
-		if (truthy(mlo)) {
-
-			set_dat(dats, apidx, 'MldGroup', lua_or(mld_group, mlo));
+		let mld_group = v.config.mldgroup ?? (v.config.mlo ? 1 : 0);
+		set_dat(dats, apidx, 'MldGroup', mld_group);
+		if (mld_group > 0) {
 			set_idx_dat(dats, mld_group, 'MldAddr', lua_or(mac, ''));
 		} else {
 			if (ap_index == 0)
@@ -1024,7 +1048,8 @@ export function prepare_dat(devname, payload) {
 		set_dat(dats, apidx, 'RekeyInterval', v.config.wpa_group_rekey);
 		set_dat(dats, apidx, 'HT_AMSDU', v.config.amsdu);
 		set_dat(dats, apidx, 'HT_AutoBA', v.config.autoba);
-		set_dat(dats, apidx, 'APSDCapable', lua_or(v.config.uapsd, 0));
+		set_dat(dats, apidx, 'APSDCapable', v.config.uapsd);
+		v.config.uapsd_advertisement_enabled = +dat.token_get(dats.APSDCapable, apidx, '0') == 1;
 		set_dat(dats, apidx, 'RTSThreshold', v.config.rts);
 		set_dat(dats, apidx, 'FragThreshold', v.config.frag);
 		set_dat(dats, apidx, 'DtimPeriod', v.config.dtim_period);
@@ -1078,7 +1103,7 @@ export function prepare_dat(devname, payload) {
 			set_idx_dat(dats, apidx - 1, 'AccessControlList', maclist);
 		}
 
-		let encinfo = enc2dat_lookup(v.config.encryption, v.config.sae_ext_key);
+		let encinfo = enc2dat_lookup(v.config.encryption, v.config.sae_ext_key, v.config.gcmp256);
 		let authmode = encinfo != null ? encinfo[0] : null;
 
 		if (encinfo == null) {
