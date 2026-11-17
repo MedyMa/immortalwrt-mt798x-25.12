@@ -1,0 +1,663 @@
+Initialize the radio lock before publishing cfg80211 devices and keep it
+across radio opens. Serialize BSS registration and keep Beacon updates on
+the resolved interface. Reject failed AP and scan setup before publishing
+a successful operation.
+
+--- a/mt_wifi/ap/ap_mbss.c
++++ b/mt_wifi/ap/ap_mbss.c
+@@ -158,7 +158,15 @@
+ #endif /* CONFIG_MAP_SUPPORT */
+ 
+ 	/* register this device to OS */
+-	if (RtmpOSNetDevAttach(pAd->OpMode, pDevNew, &netDevHook) != NDIS_STATUS_SUCCESS) {
++#if defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
++	/* ndo_open holds RTNL; cfg80211 registration also needs the wiphy lock. */
++	wiphy_lock(pDevNew->ieee80211_ptr->wiphy);
++#endif
++	ret = RtmpOSNetDevAttach(pAd->OpMode, pDevNew, &netDevHook);
++#if defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
++	wiphy_unlock(pDevNew->ieee80211_ptr->wiphy);
++#endif
++	if (ret != NDIS_STATUS_SUCCESS) {
+ 		MTWF_DBG(pAd, DBG_CAT_AP, CATAP_MBSS, DBG_LVL_ERROR,
+ 				 "create IF %d (%s) failed!!\n",
+ 				 IdBss, RTMP_OS_NETDEV_GET_DEVNAME(pDevNew));
+--- a/mt_wifi/hw_ctrl/hdev_ctrl.c
++++ b/mt_wifi/hw_ctrl/hdev_ctrl.c
+@@ -76,7 +76,7 @@
+ {
+ 	struct hdev_ctrl *ctrl = NULL;
+ 
+-	if (!ad)
++	if (!ad || !ad->hdev_ctrl)
+ 		return NULL;
+ 
+ 	ctrl = (struct hdev_ctrl *)ad->hdev_ctrl;
+--- a/mt_wifi/hw_ctrl/hwifi_main.c
++++ b/mt_wifi/hw_ctrl/hwifi_main.c
+@@ -339,7 +339,6 @@
+ 	struct mtk_mac_dev *mac_dev = pad_to_mac_dev(ad);
+ 	struct mtk_mac_phy *mac_phy = &mac_dev->mac_phy;
+ 
+-	OS_NdisAllocateSpinLock(&mac_phy->lock);
+ 	OS_SEM_LOCK(&mac_phy->lock);
+ 	mac_phy->chan = 0;
+ 	mac_phy->chan2 = 0;
+@@ -2132,6 +2131,7 @@
+ 	}
+ 	os_zero_mem(handle, priv_sz);
+ 	handle->mac_dev = (struct mtk_mac_dev *) ((char *) handle + ALIGN(sizeof(*handle), 4));
++	OS_NdisAllocateSpinLock(&handle->mac_dev->mac_phy.lock);
+ 
+ 	ret = RTMPAllocAdapterBlock(handle, (void **)&ad, RTMP_DEV_INF_HWIFI);
+ 
+--- a/mt_wifi/include/os/cfg80211/cfg80211extr.h
++++ b/mt_wifi/include/os/cfg80211/cfg80211extr.h
+@@ -165,7 +165,8 @@
+ BOOLEAN CFG80211DRV_OpsScanCheckStatus(
+ 	VOID *pAdOrg, UINT8	IfType);
+ 
+-BOOLEAN CFG80211DRV_OpsScanExtraIesSet(VOID *pAdOrg);
++BOOLEAN CFG80211DRV_OpsScanExtraIesSet(VOID *pAdOrg,
++	const struct cfg80211_scan_request *request);
+ 
+ VOID CFG80211DRV_OpsScanInLinkDownAction(VOID *pAdOrg);
+ 
+--- a/mt_wifi/include/rt_os_net.h
++++ b/mt_wifi/include/rt_os_net.h
+@@ -437,8 +437,8 @@
+ #define RTMP_DRIVER_80211_SCAN_STATUS_LOCK_INIT(__pAd, __isInit)	\
+ 	RTMP_COM_IoctlHandle(__pAd, NULL, CMD_RTPRIV_IOCTL_80211_SCAN_STATUS_LOCK_INIT, 0, NULL, __isInit)
+ 
+-#define RTMP_DRIVER_80211_SCAN_EXTRA_IE_SET(__pAd)				\
+-	RTMP_COM_IoctlHandle(__pAd, NULL, CMD_RTPRIV_IOCTL_80211_EXTRA_IES_SET,  0, NULL, 0)
++#define RTMP_DRIVER_80211_SCAN_EXTRA_IE_SET(__pAd, __request)				\
++	RTMP_COM_IoctlHandle(__pAd, NULL, CMD_RTPRIV_IOCTL_80211_EXTRA_IES_SET, 0, __request, 0)
+ 
+ #define RTMP_DRIVER_80211_GEN_IE_SET(__pAd, __pData, __Len)    \
+ 	RTMP_STA_IoctlHandle(__pAd, NULL, CMD_RTPRIV_IOCTL_STA_SIOCSIWGENIE, 0, __pData, __Len, 0)
+--- a/mt_wifi/os/linux/cfg80211/cfg80211.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211.c
+@@ -328,220 +328,111 @@
+  *	 * @ie_len: length of ie in octets
+  * ========================================================================
+  */
+-static int CFG80211_OpsScan(
+-	IN struct wiphy					*pWiphy,
+-	IN struct cfg80211_scan_request *pRequest)
++static int CFG80211_OpsScan(struct wiphy *pWiphy,
++			       struct cfg80211_scan_request *pRequest)
+ {
+ 	struct _RTMP_ADAPTER *pAd = NULL;
+ 	CFG80211_CB *pCfg80211_CB;
+-	RT_CMD_STA_IOCTL_SCAN scan_cmd;
+-	CHAR staIndex, apIndex;
++	struct wireless_dev *pWdev;
++	struct net_device *pNdev;
++	struct wifi_dev *preq_wdev;
++	RT_CMD_STA_IOCTL_SCAN scan_cmd = {0};
++	INT32 *pChanList;
++	UINT32 idx, ch_cnt = 0;
+ 	UCHAR ssid[32] = {0};
+-	struct net_device *pNdev = NULL;
+-	struct wireless_dev *pWdev = NULL;
+-	/*request dev infos*/
+-	struct wifi_dev *preq_wdev = NULL;
+-
+-	MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_NOTICE, "80211> ==>\n");
+-
+-	if (pRequest == NULL) {
+-		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-		"pRequest is NULL!!\n");
+-		return -EOPNOTSUPP;
+-	}
++	int ret;
+ 
+-	if (pRequest->ssids)
+-		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_INFO,
+-			"80211> ==>ssid:%s, pRequest->bssid:%pM\n",
+-			pRequest->ssids->ssid, pRequest->bssid);
++	if (!pRequest || !pRequest->n_channels)
++		return -EINVAL;
+ 
+ 	MAC80211_PAD_GET(pAd, pWiphy);
+ 	pCfg80211_CB = pAd->pCfg80211_CB;
+-
+ 	pWdev = pRequest->wdev;
+-	if (pWdev == NULL) {
+-		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-		"pWdev is NULL!!\n");
+-		return -EOPNOTSUPP;
+-	}
++	if (!pCfg80211_CB || !pWdev || !pWdev->netdev)
++		return -ENODEV;
+ 
+ 	pNdev = pWdev->netdev;
+-	if (pNdev == NULL) {
+-		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-		"pNdev is NULL!!\n");
+-		return -EOPNOTSUPP;
+-	}
+-	apIndex = CFG80211_FindMbssApIdxByNetDevice(pAd, pNdev);
+-	staIndex = CFG80211_FindStaIdxByNetDevice(pAd, pNdev);
+-	if (pNdev->ieee80211_ptr->iftype == NL80211_IFTYPE_STATION) {
+-		if (staIndex != WDEV_NOT_FOUND) {
+-			MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_INFO,
+-				"Scan Request for Apcli i/f proceed for scanning\n");
+-		} else {
+-			MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-				"Invaliad APCLI index i/f end scan\n");
+-			pCfg80211_CB->pCfg80211_ScanReq = pRequest; /* used in scan end */
+-			CFG80211OS_ScanEnd(pAd, TRUE);
+-			return 0;
+-		}
+-	} else if (pNdev->ieee80211_ptr->iftype == NL80211_IFTYPE_AP) {
+-		if (apIndex != WDEV_NOT_FOUND) {
+-			MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_INFO,
+-				"Scan Request for AP i/f proceed for scanning\n");
+-		} else {
+-			MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-				"Invaliad Ap index, i/f end Scan.\n");
+-			pCfg80211_CB->pCfg80211_ScanReq = pRequest; /* used in scan end */
+-			CFG80211OS_ScanEnd(pAd, TRUE);
+-			return 0;
+-		}
+-	} else {
+-		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-			"Invaliad interface type, i/f end Scan, interface type=%d.\n",
+-			pNdev->ieee80211_ptr->iftype);
+-		pCfg80211_CB->pCfg80211_ScanReq = pRequest; /* used in scan end */
+-		CFG80211OS_ScanEnd(pAd, TRUE);
+-		return 0;
+-	}
++	if (pWdev->iftype == NL80211_IFTYPE_STATION) {
++		int sta_idx = CFG80211_FindStaIdxByNetDevice(pAd, pNdev);
+ 
+-	preq_wdev = RTMP_OS_NETDEV_GET_WDEV(pNdev);
+-	if (preq_wdev == NULL) {
+-		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-		"preq_wdev is NULL!!\n");
++		if (sta_idx == WDEV_NOT_FOUND)
++			return -ENODEV;
++		scan_cmd.StaIndex = sta_idx;
++	} else if (pWdev->iftype == NL80211_IFTYPE_AP) {
++		int ap_idx = CFG80211_FindMbssApIdxByNetDevice(pAd, pNdev);
++
++		if (ap_idx == WDEV_NOT_FOUND)
++			return -ENODEV;
++		scan_cmd.ApIndex = ap_idx;
++	} else {
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+-	MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_INFO,
+-		"========================================================================\n");
+-	MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_INFO,
+-		"80211> ==> %s(%d)\n", pNdev->name, pNdev->ieee80211_ptr->iftype);
+-	/* YF_TODO: record the scan_req per netdevice */
+-	pCfg80211_CB->pCfg80211_ScanReq = pRequest; /* used in scan end */
+-
+-	/* Iftype Check
+-	if (pNdev->ieee80211_ptr->iftype != NL80211_IFTYPE_STATION) {
+-		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-			"80211> DeviceType Not Support Scan ==> %d\n",
+-			pNdev->ieee80211_ptr->iftype);
+-		CFG80211OS_ScanEnd(pAd, TRUE);
+-		return -EOPNOTSUPP;
+-	} */
+-
+-	/* Driver ICOTL Sanity Check */
+-	if (RTMP_DRIVER_IOCTL_SANITY_CHECK(pAd, NULL) != NDIS_STATUS_SUCCESS) {
+-		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR, "80211> Network is down!\n");
+-		CFG80211OS_ScanEnd(pAd, TRUE);
++	preq_wdev = RTMP_OS_NETDEV_GET_WDEV(pNdev);
++	if (!preq_wdev || RTMP_DRIVER_IOCTL_SANITY_CHECK(pAd, NULL) != NDIS_STATUS_SUCCESS)
+ 		return -ENETDOWN;
+-	}
+-
+-	/*do dfs cac check for 5G band*/
+ #ifdef MT_DFS_SUPPORT
+-	if (wlan_config_get_ch_band(preq_wdev) == CMD_CH_BAND_5G) {
+-		struct DOT11_H *pDot11h = &pAd->Dot11_H;
+-
+-		if (pDot11h && (pDot11h->ChannelMode == CHAN_SILENCE_MODE)) {
+-			MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-			"still in silence mode, can not trigger scan\n");
+-			CFG80211OS_ScanEnd(pAd, TRUE);
+-			return -EBUSY;
+-		}
+-	}
++	if (wlan_config_get_ch_band(preq_wdev) == CMD_CH_BAND_5G &&
++	    pAd->Dot11_H.ChannelMode == CHAN_SILENCE_MODE)
++		return -EBUSY;
+ #endif
+-
+-	if (!TakeChannelOpChargeByBand(pAd, 0, CH_OP_OWNER_SCAN, FALSE)) {
+-		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-		"TakeChannelOpCharge fail for SCAN!!\n");
+-		CFG80211OS_ScanEnd(pAd, TRUE);
++	if (!TakeChannelOpChargeByBand(pAd, 0, CH_OP_OWNER_SCAN, FALSE))
+ 		return -EBUSY;
+-	}
+ 
+-	if (RTMP_DRIVER_80211_SCAN(pAd, pNdev->ieee80211_ptr->iftype) != NDIS_STATUS_SUCCESS) {
+-		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-			"\n\n\n\n\n80211> BUSY - SCANNING\n\n\n\n\n");
+-		CFG80211OS_ScanEnd(pAd, TRUE);
+-		ReleaseChannelOpChargeByBand(pAd, 0, CH_OP_OWNER_SCAN);
+-		return -EBUSY;
+-	}
+-
+-	if (pRequest->ie_len != 0) {
+-		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_INFO,
+-			"80211> ExtraIEs Not Null in ProbeRequest from upper layer...\n");
+-		/* YF@20120321: Using Cfg80211_CB carry on pAd struct to overwirte the pWpsProbeReqIe. */
+-		RTMP_DRIVER_80211_SCAN_EXTRA_IE_SET(pAd);
+-	} else
+-		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_INFO,
+-			"80211> ExtraIEs Null in ProbeRequest from upper layer...\n");
+-	MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_DEBUG,
+-		"80211> Num %d of SSID from upper layer...\n",	pRequest->n_ssids);
+-
+-	/* Set Channel List for this Scan Action */
+-	MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_DEBUG,
+-		"80211> [%d] Channels In ProbeRequest.\n",  pRequest->n_channels);
+-
+-	if (pRequest->n_channels > 0) {
+-		INT32 *pChanList;
+-		UINT32  idx, ch_cnt = 0;
+-		UINT8 band;
+-
+-		os_alloc_mem(NULL, (UCHAR **)&pChanList, sizeof(UINT32) * pRequest->n_channels);
+-
+-		if (pChanList == NULL) {
+-			MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-				"Alloc memory fail\n");
+-			CFG80211OS_ScanEnd(pAd, TRUE);
+-			ReleaseChannelOpChargeByBand(pAd, 0, CH_OP_OWNER_SCAN);
+-			return -ENOMEM;
+-		}
+-		os_zero_mem((PVOID) pChanList, sizeof(UINT32) * (pRequest->n_channels));
+-		for (idx = 0; idx < pRequest->n_channels; idx++) {
+-			band = pRequest->channels[idx]->band;
+-			if ((WMODE_CAP_2G(preq_wdev->PhyMode) && band == NL80211_BAND_2GHZ) ||
+-				(WMODE_CAP_5G(preq_wdev->PhyMode) && band == NL80211_BAND_5GHZ) ||
+-				(WMODE_CAP_6G(preq_wdev->PhyMode) && band == NL80211_BAND_6GHZ)) {
+-				pChanList[ch_cnt++] =
+-					ieee80211_frequency_to_channel(pRequest->channels[idx]->center_freq);
+-				MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_DEBUG,
+-					"%d,", pChanList[ch_cnt-1]);
+-			}
+-		}
+-
+-		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_DEBUG, "\n");
+-		RTMP_DRIVER_80211_SCAN_CHANNEL_LIST_SET(pAd, pChanList, ch_cnt);
+-
+-		if (pChanList)
+-			os_free_mem(pChanList);
+-	} else {
+-		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_ERROR,
+-				"no channel list for SCAN!!\n");
+-		CFG80211OS_ScanEnd(pAd, TRUE);
+-		ReleaseChannelOpChargeByBand(pAd, 0, CH_OP_OWNER_SCAN);
+-		return -EINVAL;
+-	}
+-
+-	memset(&scan_cmd, 0, sizeof(RT_CMD_STA_IOCTL_SCAN));
+-	memset(ssid, 0, sizeof(ssid));
++	if (RTMP_DRIVER_80211_SCAN(pAd, pWdev->iftype) != NDIS_STATUS_SUCCESS) {
++		ret = -EBUSY;
++		goto release_channel;
++	}
++
++	os_alloc_mem(NULL, (UCHAR **)&pChanList, sizeof(*pChanList) * pRequest->n_channels);
++	if (!pChanList) {
++		ret = -ENOMEM;
++		goto clear_scan;
++	}
++	for (idx = 0; idx < pRequest->n_channels; idx++) {
++		struct ieee80211_channel *chan = pRequest->channels[idx];
++
++		if ((WMODE_CAP_2G(preq_wdev->PhyMode) && chan->band == NL80211_BAND_2GHZ) ||
++		    (WMODE_CAP_5G(preq_wdev->PhyMode) && chan->band == NL80211_BAND_5GHZ) ||
++		    (WMODE_CAP_6G(preq_wdev->PhyMode) && chan->band == NL80211_BAND_6GHZ))
++			pChanList[ch_cnt++] = ieee80211_frequency_to_channel(chan->center_freq);
++	}
++
++	ret = -EINVAL;
++	if (ch_cnt && ch_cnt <= U8_MAX)
++		ret = RTMP_DRIVER_80211_SCAN_CHANNEL_LIST_SET(pAd, pChanList, ch_cnt) ==
++			NDIS_STATUS_SUCCESS ? 0 : -ENOMEM;
++	os_free_mem(pChanList);
++	if (ret)
++		goto clear_scan;
+ 
++	if (pRequest->ie_len)
++		RTMP_DRIVER_80211_SCAN_EXTRA_IE_SET(pAd, pRequest);
+ 	if (pRequest->n_ssids && pRequest->ssids) {
+ 		scan_cmd.SsidLen = pRequest->ssids->ssid_len;
+-		if ((scan_cmd.SsidLen > 0) && (scan_cmd.SsidLen <= sizeof(ssid)))
++		if (scan_cmd.SsidLen > 0 && scan_cmd.SsidLen <= sizeof(ssid))
+ 			memcpy(ssid, pRequest->ssids->ssid, scan_cmd.SsidLen);
+ 		scan_cmd.pSsid = ssid;
+ 	}
+-
+ 	scan_cmd.duration = pRequest->duration;
+ 	scan_cmd.ScanType = SCAN_ACTIVE;
+-	if (pNdev->ieee80211_ptr->iftype == NL80211_IFTYPE_STATION) {
+-		scan_cmd.StaIndex = staIndex;
++
++	/* A rejected request stays with cfg80211 and must not be completed by the driver. */
++	NdisAcquireSpinLock(&pCfg80211_CB->scan_notify_lock);
++	pCfg80211_CB->pCfg80211_ScanReq = pRequest;
++	NdisReleaseSpinLock(&pCfg80211_CB->scan_notify_lock);
++
++	if (pWdev->iftype == NL80211_IFTYPE_STATION)
+ 		RTMP_DRIVER_80211_APCLI_SCAN(pAd, &scan_cmd);
+-		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_DEBUG,
+-			"Into RTMP_DRIVER_80211_APCLI_SCAN\n");
+-	} else {
+-		scan_cmd.ApIndex = apIndex;
+-		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_DEBUG,
+-			"Into RTMP_DRIVER_80211_AP_SCAN\n");
++	else
+ 		RTMP_DRIVER_80211_AP_SCAN(pAd, &scan_cmd);
+-	}
+ 	return 0;
++
++clear_scan:
++	pAd->cfg80211_ctrl.FlgCfg80211Scanning = FALSE;
++release_channel:
++	ReleaseChannelOpChargeByBand(pAd, 0, CH_OP_OWNER_SCAN);
++	return ret;
+ }
+ 
+ static void CFG80211_OpsAbortScan(struct wiphy *pWiphy, struct wireless_dev *wdev)
+@@ -1311,11 +1202,9 @@
+ 	struct _RTMP_ADAPTER *pAd;
+ 	struct mtk_mac_dev *mac_dev = NULL;
+ 	struct mtk_mac_phy *mac_phy = NULL;
+-	CFG80211_BAND BandInfo;
+ 	int ret = 0;
+ 
+ 	MAC80211_PAD_GET(pAd, pWiphy);
+-	RTMP_DRIVER_80211_BANDINFO_GET(pAd, &BandInfo);
+ 
+ 	sband = pWiphy->bands[NL80211_BAND_2GHZ];
+ 	if (sband && idx >= sband->n_channels) {
+@@ -1340,9 +1229,9 @@
+ 
+ 	memset(survey, 0, sizeof(*survey));
+ 	mac_dev = hc_get_mac_dev(pAd);
+-	mac_phy = &mac_dev->mac_phy;
+-	if (!mac_phy)
++	if (!mac_dev)
+ 		return -ENETDOWN;
++	mac_phy = &mac_dev->mac_phy;
+ 
+ 	OS_SEM_LOCK(&mac_phy->lock);
+ 	if (!mac_phy->state) {
+@@ -2745,6 +2634,9 @@
+ 	struct wifi_dev *pWdev = NULL;
+ 	int ret = 0;
+ 	UCHAR rate_idx = 0;
++#ifdef DOT11_EHT_BE
++	BOOLEAN reconfig_initialized;
++#endif
+ 
+ 	MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_AP, DBG_LVL_NOTICE, "80211> ==>\n");
+ 
+@@ -2764,6 +2656,9 @@
+ 		ret = -EINVAL;
+ 		goto end;
+ 	}
++	if (!settings->beacon.head || settings->beacon.head_len <
++	    offsetof(struct ieee80211_mgmt, u.beacon.variable))
++		return -EINVAL;
+ 
+ 	pWdev = &pAd->ApCfg.MBSSID[apidx].wdev;
+ 	NdisZeroMemory(&bcn, sizeof(bcn));
+@@ -2772,10 +2667,6 @@
+ 	bcn.apidx = apidx;
+ 	bcn.pNetDev = netdev;
+ 
+-#ifdef DOT11_EHT_BE
+-	MBSS_Reconfig_Init(pAd, &pAd->ApCfg.MBSSID[apidx]);
+-#endif
+-
+ #if KERNEL_VERSION(5, 1, 0) <= LINUX_VERSION_CODE
+ 	if (settings->flags & AP_SETTINGS_DOT11VMBSSID_SUPPORT) {
+ 		/* Currently should be only for AX Cert. Case */
+@@ -2907,6 +2798,7 @@
+ 		if (p80211CB == NULL) {
+ 			MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_AP, DBG_LVL_ERROR,
+ 				"80211> p80211CB == NULL!\n");
++			ret = -ENODEV;
+ 			goto end;
+ 		}
+ 
+@@ -3000,7 +2892,18 @@
+ 	}
+ #endif
+ 
+-	CFG80211DRV_OpsBeaconAdd(pAd, &bcn, &cfg);
++#ifdef DOT11_EHT_BE
++	reconfig_initialized = pAd->ApCfg.MBSSID[apidx].reconfig_state_init;
++	MBSS_Reconfig_Init(pAd, &pAd->ApCfg.MBSSID[apidx]);
++#endif
++	if (!CFG80211DRV_OpsBeaconAdd(pAd, &bcn, &cfg)) {
++#ifdef DOT11_EHT_BE
++		if (!reconfig_initialized)
++			MBSS_Reconfig_Deinit(pAd, &pAd->ApCfg.MBSSID[apidx]);
++#endif
++		ret = -EIO;
++		goto end;
++	}
+ #ifdef DOT11_EHT_BE
+ 	/* sync ML Probe.rsp Per-STA Profile buffer */
+ 	bss_mngr_mld_sync_ml_probe_rsp(pWdev);
+@@ -3015,42 +2918,25 @@
+ 	return ret;
+ }
+ 
+-VOID CFG80211_UpdateAssocRespExtraIe(
+-	VOID *pAdOrg,
+-	UINT32 apidx,
+-	UCHAR *assocresp_ies,
+-	UINT32 assocresp_ies_len)
+-{
+-	UINT32 len = 0;
+-	PEID_STRUCT eid_ptr = (PEID_STRUCT)assocresp_ies;
+-	PRTMP_ADAPTER pAd = (PRTMP_ADAPTER)pAdOrg;
+-	PUCHAR pAssocRespBuf = (PUCHAR)pAd->ApCfg.MBSSID[apidx].AssocRespExtraIe;
+-
+-	MTWF_DBG(NULL, DBG_CAT_MLME, CATMLME_ASSOC, DBG_LVL_INFO, "80211> ==>\n");
+-	MTWF_DBG(NULL, DBG_CAT_MLME, CATMLME_ASSOC, DBG_LVL_INFO,
+-		"IE len = %d\n", assocresp_ies_len);
+-	if (assocresp_ies_len > sizeof(pAd->ApCfg.MBSSID[apidx].AssocRespExtraIe)) {
+-		MTWF_DBG(NULL, DBG_CAT_MLME, CATMLME_ASSOC, DBG_LVL_INFO,
+-			"AssocResp buf size not enough\n");
++static void CFG80211_UpdateAssocRespExtraIe(
++	BSS_STRUCT *mbss, const u8 *ies, size_t ies_len)
++{
++	const struct element *elem;
++	size_t len = 0;
++
++	if (ies_len > sizeof(mbss->AssocRespExtraIe))
+ 		return;
+-	}
+ 
+-	while (((UCHAR *)eid_ptr + eid_ptr->Len + 1) < (assocresp_ies + assocresp_ies_len)) {
+-		switch (eid_ptr->Eid) {
+-		case IE_EXT_CAPABILITY:
+-			break;
+-		default:
+-			NdisCopyMemory(pAssocRespBuf+len, (UCHAR *)eid_ptr, (eid_ptr->Len + 2));
+-			len += eid_ptr->Len + 2;
+-			break;
+-		}
+-		eid_ptr = (PEID_STRUCT)((UCHAR *)eid_ptr + 2 + eid_ptr->Len);
+-		if (((UCHAR *)eid_ptr >= (assocresp_ies + assocresp_ies_len))
+-			|| ((UCHAR *)(eid_ptr+2) > (assocresp_ies + assocresp_ies_len)))
+-			break;
++	for_each_element(elem, ies, ies_len) {
++		size_t elem_len = sizeof(*elem) + elem->datalen;
++
++		if (elem->id == WLAN_EID_EXT_CAPABILITY)
++			continue;
++		NdisCopyMemory(mbss->AssocRespExtraIe + len, elem, elem_len);
++		len += elem_len;
+ 	}
+ 
+-	pAd->ApCfg.MBSSID[apidx].AssocRespExtraIeLen = len;
++	mbss->AssocRespExtraIeLen = len;
+ }
+ 
+ static int CFG80211_OpsChangeBeacon(
+@@ -3084,8 +2970,10 @@
+ 		goto end;
+ 	}
+ 	pWdev = &pAd->ApCfg.MBSSID[apidx].wdev;
++	if (pWdev->if_dev != netdev || !netdev->ieee80211_ptr)
++		return -ENODEV;
+ 
+-	if (info->head_len > 0) {
++	if (info->head && info->head_len >= offsetof(struct ieee80211_mgmt, u.beacon.variable)) {
+ 		os_alloc_mem(NULL, &beacon_head_buf, info->head_len);
+ 		if (beacon_head_buf == NULL) {
+ 			MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_AP, DBG_LVL_ERROR,
+@@ -3117,19 +3005,17 @@
+ 	bcn.beacon_tail_len = info->tail_len;
+ 	bcn.beacon_head = beacon_head_buf;
+ 	bcn.beacon_tail = beacon_tail_buf;
++	bcn.apidx = apidx;
++	bcn.pNetDev = netdev;
+ 
+-	if (bcn.beacon_head) {
+-		bcn.apidx = get_apidx_by_addr(pAd, bcn.beacon_head+10);
+-		MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_AP, DBG_LVL_INFO,
+-			"apidx %d\n", bcn.apidx);
+-
+-		/* Update assoc resp extra ie */
+-		if (info->assocresp_ies_len && info->assocresp_ies)
+-			CFG80211_UpdateAssocRespExtraIe(pAd, bcn.apidx, (UCHAR *)info->assocresp_ies, info->assocresp_ies_len);
++	if (!CFG80211DRV_OpsBeaconSet(pAd, &bcn, NULL)) {
++		ret = -EIO;
++		goto end;
+ 	}
+ 
+-	/* update beacon ies */
+-	CFG80211DRV_OpsBeaconSet(pAd, &bcn, NULL);
++	if (info->assocresp_ies)
++		CFG80211_UpdateAssocRespExtraIe(&pAd->ApCfg.MBSSID[apidx],
++			info->assocresp_ies, info->assocresp_ies_len);
+ #ifdef DOT11_EHT_BE
+ 	/* sync ML Probe.rsp Per-STA Profile buffer */
+ 	bss_mngr_mld_sync_ml_probe_rsp(pWdev);
+@@ -3264,7 +3150,6 @@
+ 				      struct cfg80211_chan_def *chandef)
+ {
+ 	struct _RTMP_ADAPTER *pAd = NULL;
+-	CFG80211_BAND BandInfo = {0};
+ 	struct mtk_mac_dev *mac_dev = NULL;
+ 	struct mtk_mac_phy *mac_phy = NULL;
+ 
+@@ -3276,12 +3161,11 @@
+ 
+ 	/*pad infos*/
+ 	MAC80211_PAD_GET(pAd, wiphy);
+-	RTMP_DRIVER_80211_BANDINFO_GET(pAd, &BandInfo);
+ 
+ 	mac_dev = hc_get_mac_dev(pAd);
+-	mac_phy = &mac_dev->mac_phy;
+-	if (!mac_phy)
++	if (!mac_dev)
+ 		return -ENETDOWN;
++	mac_phy = &mac_dev->mac_phy;
+ 
+ 	OS_SEM_LOCK(&mac_phy->lock);
+ 	if (!mac_phy->state) {
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_ap.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_ap.c
+@@ -705,7 +705,7 @@
+ #if defined(HOSTAPD_HS_R2_SUPPORT) || defined(CONFIG_PROXY_ARP)
+ 	ext_cap_ie = cfg80211_find_ie(IE_EXT_CAPABILITY, pBeacon->beacon_tail, pBeacon->beacon_tail_len);
+ 	if (ext_cap_ie != NULL) {
+-		EXT_CAP_INFO_ELEMENT ext_cap;
++		EXT_CAP_INFO_ELEMENT ext_cap = {0};
+ 		EID_STRUCT *eid = (EID_STRUCT *)ext_cap_ie;
+ 		if (eid->Len < sizeof(EXT_CAP_INFO_ELEMENT))
+ 			NdisMoveMemory(&ext_cap, &eid->Octet[0], eid->Len);
+@@ -778,7 +778,7 @@
+ 			pMbss->bHideSsid = FALSE;
+ 	}
+ #ifdef DISABLE_HOSTAPD_BEACON
+-	else {
++	else if (ssid_ie) {
+ 		UCHAR ssid_len = *(ssid_ie+1);
+ 
+ 		if (ssid_len > MAX_LEN_OF_SSID) {
+@@ -1330,8 +1330,9 @@
+ 		return FALSE;
+ 	}
+ 
+-	CFG80211DRV_UpdateApSettingFromBeacon(
+-		pAd, pBeacon->apidx, pBeacon, pBcnCfg, &bss_info_change);
++	if (!CFG80211DRV_UpdateApSettingFromBeacon(
++		pAd, apidx, pBeacon, pBcnCfg, &bss_info_change))
++		return FALSE;
+ 	APSecInit(pAd, wdev);
+ 
+ 
+@@ -1497,7 +1498,8 @@
+ #ifndef DISABLE_HOSTAPD_BEACON
+     pAd->cfg80211_ctrl.beaconIsSetFromHostapd = TRUE; /* set here to prevent MakeBeacon do further modifications about BCN */
+ #endif
+-	CFG80211DRV_UpdateApSettingFromBeacon(pAd, apidx, pBeacon, pBcnCfg, &bss_info_change);
++	if (!CFG80211DRV_UpdateApSettingFromBeacon(pAd, apidx, pBeacon, pBcnCfg, &bss_info_change))
++		return FALSE;
+ 
+ 	APSecInit(pAd, wdev);
+ 	bcn_buf->pWdev = wdev;
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_scan.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_scan.c
+@@ -214,17 +214,13 @@
+ #endif /* APCLI_CFG80211_SUPPORT */
+ 
+ BOOLEAN CFG80211DRV_OpsScanExtraIesSet(
+-	VOID						*pAdOrg)
++	VOID *pAdOrg, const struct cfg80211_scan_request *request)
+ {
+ #ifdef CONFIG_STA_SUPPORT
+ 	PRTMP_ADAPTER pAd = (PRTMP_ADAPTER)pAdOrg;
+-	CFG80211_CB *pCfg80211_CB = pAd->pCfg80211_CB;
+-	UINT ie_len = 0;
++	UINT ie_len = request ? request->ie_len : 0;
+ 	PCFG80211_CTRL cfg80211_ctrl = &pAd->cfg80211_ctrl;
+ 
+-	if (pCfg80211_CB->pCfg80211_ScanReq)
+-		ie_len = pCfg80211_CB->pCfg80211_ScanReq->ie_len;
+-
+ 	MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_DEBUG,
+ 		"80211> ==> %d\n", ie_len);
+ 
+@@ -241,7 +237,7 @@
+ 	os_alloc_mem(pAd, (UCHAR **) &(cfg80211_ctrl->pExtraIe), ie_len);
+ 
+ 	if (cfg80211_ctrl->pExtraIe) {
+-		NdisCopyMemory(cfg80211_ctrl->pExtraIe, pCfg80211_CB->pCfg80211_ScanReq->ie, ie_len);
++		NdisCopyMemory(cfg80211_ctrl->pExtraIe, request->ie, ie_len);
+ 		cfg80211_ctrl->ExtraIeLen = ie_len;
+ 		hex_dump("CFG8021_SCAN_EXTRAIE", cfg80211_ctrl->pExtraIe, cfg80211_ctrl->ExtraIeLen);
+ 	} else {
+--- a/mt_wifi/os/linux/cfg80211/cfg80211drv.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211drv.c
+@@ -184,7 +184,7 @@
+ 		break;
+ 
+ 	case CMD_RTPRIV_IOCTL_80211_EXTRA_IES_SET:
+-		CFG80211DRV_OpsScanExtraIesSet(pAd);
++		CFG80211DRV_OpsScanExtraIesSet(pAd, pData);
+ 		break;
+ 
+ 	/* CFG_TODO */
