@@ -336,6 +336,25 @@ function l1dat_parser.load_l1_profile(path)
         end
     end
 
+    -- Preserve UCI radio names when returning from the new manager to WEXT.
+    local ok, uci = pcall(require, "uci")
+    if ok then
+        local cursor = uci.cursor()
+        local physical = devs[dridx]
+        local names, ambiguous, mapped = {}, {}, {}
+        cursor:foreach("wireless", "wifi-device", function(section)
+            local dev = section.type == "mtwifi" and physical[section.devname or section[".name"]]
+            if dev then
+                if names[dev] and names[dev] ~= section[".name"] then ambiguous[dev] = true end
+                names[dev] = section[".name"]
+            end
+        end)
+        cursor:close()
+        for name, dev in pairs(physical) do
+            mapped[not ambiguous[dev] and names[dev] or name] = dev
+        end
+        devs[dridx] = setmetatable(mapped, { __index = physical })
+    end
     fd:close()
     return devs
 end

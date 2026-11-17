@@ -12,10 +12,13 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=mtwifi-scripts
 PKG_LICENSE:=GPL-2.0+
 PKG_VERSION:=2.0
-PKG_RELEASE:=10
+PKG_RELEASE:=11
 
 PKG_MAINTAINER:=ChuCi Nan <nanchuci023@gmail.com>
-PKG_CONFIG_DEPENDS:=CONFIG_WIFI_SCRIPTS_UCODE CONFIG_WIFI_SCRIPTS_WPS_BUTTON_DISABLED
+PKG_CONFIG_DEPENDS:=CONFIG_WIFI_SCRIPTS_UCODE CONFIG_WIFI_SCRIPTS_WPS_BUTTON_DISABLED \
+	CONFIG_MTK_WIFI7_OSAL_SUPPORT CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT \
+	CONFIG_MTK_WIFI7_CFG80211_SUPPORT CONFIG_MTK_WIFI7_IWCOMMAND_CFG80211_SUPPORT \
+	CONFIG_MTK_WIFI7_CFG80211_FULL_OPS_SUPPORT CONFIG_MTK_WIFI7_HOSTAPD_MBSS_SUPPORT
 PKG_FILE_DEPENDS:=../mtwifi-cfg/files/mtwifi-cfg/mtwifi_mlo \
 	../mtwifi-cfg/files/mtwifi-cfg/mtwifi_defs.lua \
 	../mtwifi-cfg/files/mtwifi-cfg/mtwifi-mlo-recover
@@ -27,11 +30,13 @@ define Package/mtwifi-scripts
   CATEGORY:=MTK Properties
   SUBMENU:=Applications
   TITLE:=mtwifi configure scripts for mt799x (ucode)
-  DEPENDS:=+wifi-dats +netifd +iwinfo +iw +mwctl +hostapd-utils +wpa-cli wpad-openssl \
+  DEPENDS:=+wifi-dats +netifd +iwinfo +iw +mwctl +hostapd-utils +wpa-cli wpad-openssl +@WIFI_SCRIPTS_UCODE \
 	+ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus \
 	+ucode-mod-nl80211 +ucode-mod-rtnl +ucode-mod-digest \
 	+lua-cjson +libuci-lua +luci-lib-nixio \
-	@MTK_WIFI7_CFG80211_SUPPORT @MTK_WIFI_OSAL_CFG80211_SUPPORT
+	@MTK_WIFI7_CFG80211_SUPPORT @MTK_WIFI7_IWCOMMAND_CFG80211_SUPPORT \
+	@MTK_WIFI7_CFG80211_FULL_OPS_SUPPORT @MTK_WIFI7_HOSTAPD_MBSS_SUPPORT \
+	@(!MTK_WIFI7_OSAL_SUPPORT||MTK_WIFI_OSAL_CFG80211_SUPPORT)
   CONFLICTS:=wifi-scripts mtwifi-cfg
   PKGARCH:=all
 endef
@@ -53,6 +58,10 @@ define Build/Configure
 endef
 
 define Build/Compile
+	$(foreach option,WIFI_SCRIPTS_UCODE MTK_WIFI7_CFG80211_SUPPORT \
+		MTK_WIFI7_IWCOMMAND_CFG80211_SUPPORT MTK_WIFI7_CFG80211_FULL_OPS_SUPPORT \
+		MTK_WIFI7_HOSTAPD_MBSS_SUPPORT,\
+		$(if $(filter y,$(CONFIG_$(option))),,$(error mtwifi-scripts requires $(option)=y)))
 endef
 
 define Package/mtwifi-scripts/install

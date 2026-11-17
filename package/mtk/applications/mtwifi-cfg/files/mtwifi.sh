@@ -66,7 +66,14 @@ detect_mtwifi() {
 					set wireless.default_${dev}.encryption=${encryption}
 EOF
 				uci -q commit wireless
-			}
+			} || return 1
+			if [ "$(uci -q get "wireless.${dev}.type")" = mtwifi ]; then
+				ifname="$(l1util get "$dev" main_ifname)"
+				if [ -n "$ifname" ] && [ "$(uci -q get "wireless.${dev}.phy")" != "$ifname" ]; then
+					uci -q set "wireless.${dev}.phy=$ifname" || return 1
+					uci -q commit wireless || return 1
+				fi
+			fi
 		done
 	fi
 }

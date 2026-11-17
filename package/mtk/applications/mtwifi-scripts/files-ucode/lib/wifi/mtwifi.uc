@@ -20,8 +20,8 @@
  *
  * 板级能力由通用 wifi-detect.uc 探测，本脚本只补全 UCI 设备元数据。
  *
- * 已存在的 wifi-device 段（不论段名是不是 radioN，只要 type=mtwifi 且
- * 指向同一个 devname）不会被改动，重复执行是幂等的。
+ * 已存在的设备只迁移 L1/PHY 元数据并补齐缺失项，保留接口配置。
+ * 重复执行是幂等的。
  */
 
 import * as fs from 'fs';
@@ -83,10 +83,6 @@ function band_of(dev) {
 	return l1dat.device_band(dev);
 };
 
-/*
- * 生成 ifname 后缀递增：ra0 + 0 → ra0；ra0 + 1 → ra1。
- * PDF 没有规定多 BSS 的命名，但物理名必须唯一且由 L1 根名派生。
- */
 function existing_devices(config) {
 	let by_devname = {};
 	let names = {};

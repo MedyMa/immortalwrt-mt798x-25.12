@@ -384,18 +384,41 @@ function rebuild_devices(ctx, up, wait) {
 	die(up ? 'WIRELESS_START_TIMEOUT' : 'WIRELESS_STOP_TIMEOUT');
 };
 
-function reload_vendor_module(ctx) {
+function vendor_module_order() {
+	let allowed = { mt_wifi: true, mtk_hwifi: true, connac_if: true,
+		mtk_pci: true, mtk_wed: true, mt7990: true, mt7991: true,
+		mt7992: true, mt7993: true, mtk_warp: true, mtk_warp_proxy: true,
+		debugger_wifi: true };
+	let visited = {};
+	let order = [];
+	function visit(name) {
+		if (!allowed[name]) die('WIRELESS_DRIVER_BUSY');
+		if (visited[name]) return;
+		visited[name] = true;
+		for (let path in fs.glob(`/sys/module/${name}/holders/*`))
+			visit(fs.basename(path));
+		push(order, name);
+	};
+	visit('mt_wifi');
+	return order;
+};
+
+function reload_vendor_module(ctx, recover) {
+	ctx.module_order ??= vendor_module_order();
+	ctx.root_changed ??= !!ctx.module_changed;
 	for (let name in keys(l1dat.load_cached()?.[l1dat.IF_RINDEX] ?? {}))
 		if (exists(`/sys/class/net/${name}`) &&
 		    system(`ip link set dev ${shell_quote(name)} down`))
 			die('WIRELESS_LINK_STOP_FAILED');
-	if (exists('/sys/module/mt_wifi')) {
-		if (length(fs.glob('/sys/module/mt_wifi/holders/*')) || system('/sbin/rmmod mt_wifi'))
-			die('WIRELESS_DRIVER_BUSY');
-	}
-	ctx.module_changed = true;
-	if (system('/sbin/modprobe mt_wifi'))
-		die('WIRELESS_DRIVER_START_FAILED');
+	if (!recover || ctx.root_changed)
+		for (let name in ctx.module_order) {
+			if (!exists(`/sys/module/${name}`)) continue;
+			if (system(`/sbin/rmmod ${name}`)) die('WIRELESS_DRIVER_BUSY');
+			ctx.module_changed = true;
+			if (name == 'mt_wifi') ctx.root_changed = true;
+		}
+	for (let name in reverse([...ctx.module_order]))
+		if (system(`/sbin/modprobe ${name}`)) die('WIRELESS_DRIVER_START_FAILED');
 };
 
 function with_config_lock(callback, idle) {
@@ -414,7 +437,7 @@ function restore_rebuild(ctx) {
 		with_config_lock(() => {
 			for (let file in ctx.files)
 				if (!atomic_write(file.path, file.previous)) die('PROFILE_RESTORE_FAILED');
-			if (ctx.module_changed) reload_vendor_module(ctx);
+			if (ctx.module_changed) reload_vendor_module(ctx, true);
 			if (!atomic_write(REBUILD_RESTORE, sprintf('%J\n', {
 				source: rebuild_source(), radios: ctx.records,
 				config: rebuild_inventory(ctx.records),
@@ -498,8 +521,11 @@ function rebuild_run() {
 			}
 			if (!atomic_write(REINSTALL_LOCK, '1')) die('REBUILD_METADATA_FAILED');
 			rebuild_status('reloading');
+			ctx.module_order = vendor_module_order();
 			/* Persist the recovery requirement before entering module teardown. */
-			if (!atomic_write(REBUILD_TRANSACTION, sprintf('%J\n', { ...ctx, module_changed: true })))
+			if (!atomic_write(REBUILD_TRANSACTION, sprintf('%J\n', {
+				...ctx, module_changed: true, root_changed: true,
+			})))
 				die('REBUILD_METADATA_FAILED');
 			reload_vendor_module(ctx);
 			if (queue.source != rebuild_source()) die('WIRELESS_CONFIG_CHANGED');

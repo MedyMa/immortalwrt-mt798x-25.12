@@ -18,6 +18,7 @@
 local cjson = require "cjson"
 local inspect = require "inspect"
 local nixio = require "nixio"
+local fs = require "nixio.fs"
 local l1parser = require "l1dat_parser"
 local datconf = require "datconf"
 local utils = require "mtwifi_utils"
@@ -400,28 +401,80 @@ function mtwifi_down(devname, cfg)
     return reset_vifs
 end
 
-function mtwifi_reinstall()
-    nixio.syslog("info", "mtwifi-cfg: unload mtwifi module...")
+local function command_ok(command)
+    local result = os.execute(command)
+    return result == 0 or result == true
+end
 
-    --os.execute("rmmod mt_whnat")
-    --os.execute("rmmod mtfwd")
-    os.execute("rmmod mtk_warp_proxy")
-    os.execute("rmmod mtk_warp")
-    --os.execute("rmmod mt7915_mt_wifi")
-    os.execute("rmmod mt_wifi")
+local function vendor_module_order()
+    local allowed = { mt_wifi = true, mtk_hwifi = true, connac_if = true,
+        mtk_pci = true, mtk_wed = true, mt7990 = true, mt7991 = true,
+        mt7992 = true, mt7993 = true, mtk_warp = true, mtk_warp_proxy = true,
+        debugger_wifi = true }
+    local order, visited = {}, {}
+    local function visit(name)
+        if not allowed[name] then error("wireless module has an unrelated consumer") end
+        if visited[name] then return end
+        visited[name] = true
+        local entries = fs.dir("/sys/module/" .. name .. "/holders")
+        if entries then
+            for holder in entries do
+                if holder ~= "." and holder ~= ".." then visit(holder) end
+            end
+        end
+        order[#order + 1] = name
+    end
+    visit("mt_wifi")
+    return order
+end
 
-    utils.sleep(2)
+function mtwifi_reinstall(restore, order)
+    local root_changed = false
+    local function failed()
+        if restore and not restore() then
+            nixio.syslog("err", "mtwifi-cfg: profile recovery failed")
+        end
+        if root_changed then
+            for _, name in ipairs(order) do
+                if utils.exists("/sys/module/" .. name) and not command_ok("rmmod " .. name) then break end
+            end
+        end
+        for index = #order, 1, -1 do
+            if not command_ok("modprobe " .. order[index]) then
+                nixio.syslog("err", "mtwifi-cfg: driver recovery failed")
+                break
+            end
+        end
+        return false
+    end
+    for _, name in ipairs(order) do
+        if utils.exists("/sys/module/" .. name) then
+            if not command_ok("rmmod " .. name) then return failed() end
+            if name == "mt_wifi" then root_changed = true end
+        end
+    end
+    for index = #order, 1, -1 do
+        if not command_ok("modprobe " .. order[index]) then return failed() end
+    end
+    return true
+end
 
-    nixio.syslog("info", "mtwifi-cfg: reload mtwifi module...")
-
-    os.execute("modprobe mt_wifi")
-    --os.execute("modprobe mt7915_mt_wifi")
-    os.execute("modprobe mtk_warp")
-    os.execute("modprobe mtk_warp_proxy")
-    --os.execute("modprobe mtfwd")
-    --os.execute("modprobe mt_whnat")
-
-    utils.sleep(1)
+local function restart_other_radios(current)
+    local cursor = uci.cursor()
+    cursor:foreach("wireless", "wifi-device", function(section)
+        local name = section[".name"]
+        if name ~= current and section.type == "mtwifi" and l1dat.devname_ridx[name] and
+            tostring(section.disabled) ~= "1" and name:match("^[%w_]+$") then
+            local request = cjson.encode({ device = name })
+            local quoted = "'" .. request:gsub("'", "'\\''") .. "'"
+            local command = "(ubus call network.wireless down " .. quoted ..
+                "; ubus call network.wireless up " .. quoted .. ") </dev/null >/dev/null 2>&1 &"
+            if not command_ok(command) then
+                nixio.syslog("err", "mtwifi-cfg: could not restart sibling radio")
+            end
+        end
+    end)
+    cursor:close()
 end
 
 function __exec_iwpriv_cmd(ifname, key, val)
@@ -597,8 +650,6 @@ local function validate_mld_groups(cfg)
     local current_dev = l1dat.devname_ridx[current_device]
     local current_profile = current_dev and load_profile(current_dev.profile_path) or {}
     local interfaces = cfg.interfaces or {}
-    local vif_num = 0
-    for _ in pairs(interfaces) do vif_num = vif_num + 1 end
     local config = cfg.config or {}
     local htmode = config.htmode or cursor:get("wireless", current_device, "htmode")
     local disabled_value = config.disabled
@@ -610,8 +661,7 @@ local function validate_mld_groups(cfg)
 
     -- The writer walks netifd's numeric interface keys and increments the DAT
     -- slot only for APs. Resolve an omitted option from that exact profile slot.
-    for index = 0, vif_num - 1 do
-        local item = interfaces[tostring(index)] or interfaces[index]
+    for _, item in ipairs(ordered_vifs(cfg)) do
         local iface = item and (item.config or item)
         if iface and iface.mode == "ap" then
             apidx = apidx + 1
@@ -701,7 +751,7 @@ function mtwifi_cfg_setup(argv)
     local devname = cfg.device
     local dev = l1dat.devname_ridx[devname]
 
-    if not dev then return end
+    if not dev then return false end
 
     local whnat = whnat_group(dev)
 
@@ -724,6 +774,20 @@ function mtwifi_cfg_setup(argv)
         return false
     end
     local dats_orig = load_profile(profile)
+    local previous_file = io.open(profile, "r")
+    if not previous_file then return false end
+    local previous_text = previous_file:read("*a")
+    previous_file:close()
+    local function restore_profile()
+        local temporary = profile .. ".mtwifi-restore"
+        local file = io.open(temporary, "w")
+        if not file then return false end
+        local ok = file:write(previous_text) and file:flush()
+        file:close()
+        ok = ok and fs.chmod(temporary, 384) and os.rename(temporary, profile)
+        if not ok then os.remove(temporary) end
+        return not not ok
+    end
     set_optional_dev_dat(dats, "Vht1024QamSupport", cfg.config.vht_1024)
     set_optional_dev_dat(dats, "TxBurst", cfg.config.tx_burst)
     local is_5g = cfg.config.band == "5g"
@@ -734,18 +798,19 @@ function mtwifi_cfg_setup(argv)
     local vif_num, bssid_num, apcli_num = vif_count(cfg)
 
     if vif_num == 0 then
-        nixio.syslog("err", "mtwifi-cfg: not valid vif found!")
-        return
+        mtwifi_down(devname)
+        return true
     end
     if bssid_num > defs.max_mbssid then
         nixio.syslog("err", "mtwifi-cfg: too many vifs!")
-        return
+        return false
     end
     if apcli_num > 1 then
         nixio.syslog("err", "mtwifi-cfg: only support one apcli vif!")
+        return false
     end
 
-    dats.BssidNum = 4
+    dats.BssidNum = math.max(4, bssid_num, tonumber(dats_orig.BssidNum) or 0)
 
     -- HeLdpc is parsed as one semicolon-delimited value per BSSID. Only
     -- replace the profile when the radio option is explicitly configured.
@@ -762,7 +827,7 @@ function mtwifi_cfg_setup(argv)
     -- setup wireless mode
     if type(cfg.config.htmode) ~= type("") then
         nixio.syslog("err", "mtwifi-cfg: invalid htmode!")
-        return
+        return false
     end
 
     local WirelessMode
@@ -792,13 +857,13 @@ function mtwifi_cfg_setup(argv)
 
     if not WirelessMode then
         nixio.syslog("err", "mtwifi-cfg: invalid wireless mode!")
-        return
+        return false
     end
 
     local bandwidth_ok, bandwidth_err = bandwidth.apply(cfg.config, dats)
     if not bandwidth_ok then
         nixio.syslog("err", "mtwifi-cfg: " .. bandwidth_err .. "!")
-        return
+        return false
     end
 
     -- setup apcli
@@ -980,10 +1045,10 @@ function mtwifi_cfg_setup(argv)
                 effective_group = tonumber(utils.token_get(dats.MldGroup, apidx, "0"))
             end
             if effective_group == 0 then
-                if idx == 0 then
+                if apidx == 1 then
                     dats.MacAddress = v.config.macaddr or (dats.MacAddress_Default or "")
                 else
-                    set_idx_dat(dats, apidx, "MacAddress", v.config.macaddr or (dats.MacAddress_Default or ""))
+                    set_idx_dat(dats, apidx - 1, "MacAddress", v.config.macaddr or (dats.MacAddress_Default or ""))
                 end
             end
             set_dat(dats, apidx, "WmmCapable", v.config.wmm)
@@ -1076,8 +1141,6 @@ function mtwifi_cfg_setup(argv)
     end
     local cfg_diff = diff_cfg(dats_orig, dats)
 
-    if not save_profile(dats, profile) then return false end
-
     for _,v in pairs(defs.reinstall_cfgs) do
         local changed = cfg_diff[v] ~= nil
         -- Collapsing a template's all-disabled WDS tokens (0;0 -> 0) does
@@ -1089,71 +1152,70 @@ function mtwifi_cfg_setup(argv)
         -- WiFi7 reads WHNAT from init_path at probe and supports a native
         -- runtime setter; unloading the legacy module stack cannot apply it.
         if changed and not (whnat and v == "WHNAT") then
-            if utils.exists("/sys/module/mt_wifi") == false then
+            if utils.exists("/sys/module/mt_wifi/refcnt") == false then
                 nixio.syslog("err", "mtwifi-cfg: mtwifi module is build-in, please reboot the device!")
-                return
+                return false
             end
             reinstall_wifidrv = true
         end
     end
 
-    if string.find(profile, "dbdc") then
-        if reinstall_wifidrv then
-            for k, _ in pairs(l1dat.devname_ridx) do
-                mtwifi_down(k)
+    local module_order
+    if reinstall_wifidrv then
+        local ok
+        ok, module_order = pcall(vendor_module_order)
+        if not ok then
+            nixio.syslog("err", "mtwifi-cfg: wireless driver has an unrelated consumer")
+            return false
+        end
+    end
+    if not save_profile(dats, profile) then return false end
+    local is_dbdc = string.find(profile, "dbdc") ~= nil
+    if reinstall_wifidrv then
+        for name in pairs(l1dat.devname_ridx) do mtwifi_down(name) end
+        if not mtwifi_reinstall(restore_profile, module_order) then
+            restart_other_radios(devname)
+            return false
+        end
+        mtwifi_up(devname, cfg, nil, is_dbdc)
+        restart_other_radios(devname)
+    elseif is_dbdc then
+        local restore_vifs = {}
+        local restart_other_dbdc_dev = false
+        if next(cfg_diff) ~= nil then
+            restart_other_dbdc_dev = true
+        end
+
+        if restart_other_dbdc_dev then
+            for k, j in pairs(l1dat.devname_ridx) do
+                if j.INDEX == dev.INDEX and j.mainidx == dev.mainidx then
+                    local ret = mtwifi_down(k, cfg)
+                    for _, v in ipairs(ret) do
+                        table.insert(restore_vifs, v)
+                    end
+                end
+            end
+            if #restore_vifs > 0 then
+                nixio.syslog("info", "mtwifi-cfg: dbdc restore_vifs: "..inspect.inspect(restore_vifs))
             end
 
-            mtwifi_reinstall()
-
-            for k, _ in pairs(l1dat.devname_ridx) do
-                if k == devname then
-                    mtwifi_up(k, cfg, nil, true)
-                else
-                    os.execute("/sbin/wifi up " .. k) -- TODO: may cause deadlock
+            for k, j in pairs(l1dat.devname_ridx) do
+                if j.INDEX == dev.INDEX and j.mainidx == dev.mainidx then
+                    mtwifi_up(k, cfg, restore_vifs, true)
                 end
             end
         else
-            local restore_vifs = {}
-            local restart_other_dbdc_dev = false
-            if next(cfg_diff) ~= nil then
-                restart_other_dbdc_dev = true
-            end
-
-            if restart_other_dbdc_dev then
-                for k, j in pairs(l1dat.devname_ridx) do
-                    if j.INDEX == dev.INDEX and j.mainidx == dev.mainidx then
-                        local ret = mtwifi_down(k, cfg)
-                        for _, v in ipairs(ret) do
-                            table.insert(restore_vifs, v)
-                        end
-                    end
-                end
-                if #restore_vifs > 0 then
-                    nixio.syslog("info", "mtwifi-cfg: dbdc restore_vifs: "..inspect.inspect(restore_vifs))
-                end
-
-                for k, j in pairs(l1dat.devname_ridx) do
-                    if j.INDEX == dev.INDEX and j.mainidx == dev.mainidx then
-                        mtwifi_up(k, cfg, restore_vifs, true)
-                    end
-                end
-            else
-                mtwifi_down(devname)
-                mtwifi_up(devname, cfg, nil, true)
-            end
+            mtwifi_down(devname)
+            mtwifi_up(devname, cfg, nil, true)
         end
     else
         mtwifi_down(devname)
-
-        if reinstall_wifidrv then
-            mtwifi_reinstall()
-        end
-
         mtwifi_up(devname, cfg)
     end
 
     mtwifi_cfg_iwpriv_hook(cfg)
     if whnat and not whnat_apply(whnat, whnat_enabled) then return false end
+    return true
 end
 
 function mtwifi_cfg_down(devname)
