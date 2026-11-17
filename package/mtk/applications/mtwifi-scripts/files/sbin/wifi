@@ -82,6 +82,10 @@ DEVICES=
 DRIVERS=
 include /lib/wifi
 
+if [ -f /lib/wifi/mtwifi.uc ] && ! list_contains DRIVERS mtwifi; then
+	append DRIVERS mtwifi
+fi
+
 case "$1" in
 	down) wifi_updown "disable" "$2";;
 	detect) wifi_detect_notice ;;
