@@ -470,7 +470,7 @@ export function rollback(plan, restart) {
  */
 export function teardown(apcli_prefix) {
 	if (!apcli_prefix)
-		return;
+		return true;
 
 	/* 合并 wpa_supplicant 已知的 + 内核里存在的 apcli 接口 */
 	let targets = {};
@@ -492,21 +492,24 @@ export function teardown(apcli_prefix) {
 		targets[ifname] = true;
 	}
 
+	let ok = true;
 	/* 遍历 object 的键，ucode 里 for...in 对 object 给键名 */
 	for (let ifname in targets) {
 		log(`teardown: cleaning ${ifname}`);
 
 		scan_action_stop(ifname);
 
-		if (index(iface_list(), ifname) >= 0)
-			detach(ifname);
-
-		remove_sta_iface(ifname);
+		if ((index(iface_list(), ifname) >= 0 && !detach(ifname)) ||
+		    !remove_sta_iface(ifname)) {
+			ok = false;
+			continue;
+		}
 
 		fs.unlink(`/var/run/wpa-supplicant-${ifname}.conf`);
 		fs.unlink(`/var/run/scan_state-${ifname}`);
 		fs.unlink(`${WPA_CTRL_DIR}/wpa_supplicant-${ifname}.conf`);
 	}
+	return ok;
 };
 
 export { iface_cli, global_cli, iface_list };

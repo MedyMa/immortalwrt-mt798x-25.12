@@ -915,8 +915,8 @@ export function teardown(phy, radio) {
 	let file = conf_path(phy, suffix_of(radio));
 	let ifnames = conf_ifnames(file);
 	wps_er_stop(ifnames);
-	detach(ifnames);
 	/* Keep the last known configuration available for setup rollback. */
+	return detach(ifnames);
 };
 
 export { generate_device, iface_auth_algs, conf_ifnames };

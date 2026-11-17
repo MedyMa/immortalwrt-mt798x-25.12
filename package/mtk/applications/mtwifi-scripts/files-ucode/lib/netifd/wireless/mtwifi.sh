@@ -376,6 +376,8 @@ function rebuild_devices(ctx, up, wait) {
 		let ready = true;
 		for (let name in up ? keys(ctx.want_up) : ctx.devices) {
 			let device = status[name];
+			if (device?.teardown_failed)
+				die('WIRELESS_STOP_FAILED');
 			ready &&= !!device && !device.pending && (up ? !!device.up : !device.up);
 		}
 		if (ready) return;
@@ -404,6 +406,12 @@ function vendor_module_order() {
 };
 
 function reload_vendor_module(ctx, recover) {
+	let status = global.ubus.call('network.wireless', 'status');
+	if (type(status) != 'object') die('WIRELESS_STATUS_UNAVAILABLE');
+	for (let _, device in status)
+		if (device.config?.type == 'mtwifi' &&
+		    (device.up || device.pending || device.teardown_failed))
+			die('WIRELESS_DRIVER_BUSY');
 	ctx.module_order ??= vendor_module_order();
 	ctx.root_changed ??= !!ctx.module_changed;
 	for (let name in keys(l1dat.load_cached()?.[l1dat.IF_RINDEX] ?? {}))
@@ -682,8 +690,8 @@ function setup() {
 	}
 	if (!length(keys(payload.interfaces ?? {}))) {
 		let phy = phy_of_ifname(dev.main_ifname) ?? payload.data?.phy;
-		mt_supplicant.teardown(dev.apcli_ifname);
-		if (phy) mt_hostapd.teardown(phy, payload.config?.radio);
+		if (!mt_supplicant.teardown(dev.apcli_ifname)) die('SUPPLICANT_STOP_FAILED');
+		if (phy && !mt_hostapd.teardown(phy, payload.config?.radio)) die('HOSTAPD_STOP_FAILED');
 		if (restored) netifd.restore_config(original);
 		if (!ifname.remove_wps_map(dev, IFACE_WPS_FILE) ||
 		    !atomic_write(`/var/run/mtwifi-${devname}.configured`, sprintf('%J\n', {
@@ -820,10 +828,9 @@ function teardown() {
 
 	log(`teardown ${ARGV[2]} (devname ${devname}, phy ${phy})`);
 
-	mt_supplicant.teardown(dev?.apcli_ifname);
+	if (!mt_supplicant.teardown(dev?.apcli_ifname)) die('SUPPLICANT_STOP_FAILED');
 
-	if (phy)
-		mt_hostapd.teardown(phy, radio);
+	if (phy && !mt_hostapd.teardown(phy, radio)) die('HOSTAPD_STOP_FAILED');
 
 	cfg.driver_down(devname, payload);
 

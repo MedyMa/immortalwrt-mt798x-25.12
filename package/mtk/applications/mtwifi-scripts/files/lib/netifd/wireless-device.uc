@@ -160,16 +160,24 @@ function wdev_setup_cb(wdev)
 	wdev.teardown();
 }
 
-function wdev_teardown_cb(wdev)
+function wdev_teardown_cb(wdev, status)
 {
 	for (let section, data in wdev.handler_data) {
 		if (data.ifname)
 			handle_link(data.ifname, data, false);
 	}
 
+	if (wdev.data.config.type == "mtwifi" && status) {
+		netifd.log(netifd.L_NOTICE, `wireless: ${wdev.name}: teardown failed; retaining cleanup state\n`);
+		wdev.state = "up";
+		wdev.teardown_failed = true;
+		wdev.retry_setup_failed = true;
+		return;
+	}
+	delete wdev.teardown_failed;
 	wdev.handler_data = {};
 	wdev.state = "down";
-	if (wdev.runtime_data)
+	if (wdev.runtime_data || (wdev.data.config.type == "mtwifi" && wdev.config_change))
 		wdev_config_init(wdev);
 
 	if (wdev.delete) {
@@ -180,7 +188,7 @@ function wdev_teardown_cb(wdev)
 	wdev.setup();
 }
 
-function run_handler_cb(wdev, cb)
+function run_handler_cb(wdev, cb, status)
 {
 	if (wdev != wdev_cur.wdev)
 		return;
@@ -192,13 +200,13 @@ function run_handler_cb(wdev, cb)
 	wdev_script_task = null;
 	wdev_cur = null;
 	handler_timer.set(1);
-	cb(wdev);
+	cb(wdev, status ?? 0);
 }
 
 function run_handler_timeout(wdev, cb)
 {
 	wdev_script_task.cancel();
-	run_handler_cb(wdev, cb);
+	run_handler_cb(wdev, cb, 1);
 }
 
 function handler_sort_fn(a, b)
@@ -227,14 +235,14 @@ function __run_next_handler()
 	wdev.dbg("run " + op);
 	wdev.handler_config.data = wdev.handler_data[wdev.name] ?? {};
 	wdev_script_task = netifd.process({
-		cb: () => run_handler_cb(wdev, cb),
+		cb: (status) => run_handler_cb(wdev, cb, status),
 		dir: netifd.wireless.path,
 		argv: [ './' + wdev.script, wdev.data.config.type, op, wdev.name, "" + wdev.handler_config ],
 		log_prefix: wdev.name,
 	});
 
 	if (!wdev_script_task)
-		return run_handler_cb(wdev, cb);
+		return run_handler_cb(wdev, cb, 1);
 
 	wdev_script_timeout = uloop.timer(DEFAULT_SCRIPT_TIMEOUT,
 		() => run_handler_timeout(wdev, cb)
@@ -309,6 +317,9 @@ function setup()
 	if (!this.autostart || this.retry_setup_failed)
 		return;
 
+	if (this.teardown_failed)
+		return this.teardown();
+
 	wdev_proc_reset(this);
 	delete this.config_change;
 	this.state = "setup";
@@ -323,6 +334,7 @@ function teardown()
 	if (this.state == "teardown" || this.state == "down")
 		return;
 
+	delete this.teardown_failed;
 	wdev_proc_reset(this);
 	this.state = "teardown";
 	run_handler(this, "teardown", wdev_teardown_cb);
@@ -406,6 +418,9 @@ function start()
 
 	wdev_reset(this);
 
+	if (this.teardown_failed)
+		return this.teardown();
+
 	if (this.state != "down")
 		return;
 
@@ -446,6 +461,9 @@ function check()
 {
 	if (!wdev_update_disabled_vifs(this))
 		return;
+
+	if (this.teardown_failed)
+		return this.teardown();
 
 	wdev_config_init(this);
 	this.setup();
@@ -616,7 +634,8 @@ function status()
 	}
 	return {
 		up: this.state == "up",
-		pending: this.state == "setup" || this.state == "teardown",
+		pending: this.state == "setup" || this.state == "teardown" || !!this.teardown_failed,
+		teardown_failed: !!this.teardown_failed,
 		autostart: this.autostart,
 		disabled: !!runtime.config.disabled,
 		retry_setup_failed: !!this.retry_setup_failed,

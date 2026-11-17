@@ -269,7 +269,10 @@ let main_obj = {
 			if (!req.args.iface)
 				return libubus.STATUS_INVALID_ARGUMENT;
 
-			wpas.remove_iface(req.args.iface);
+			if (!wpas.interfaces?.[req.args.iface])
+				return 0;
+			if (wpas.remove_iface(req.args.iface) < 0 || wpas.interfaces?.[req.args.iface])
+				return libubus.STATUS_UNKNOWN_ERROR;
 			return 0;
 		}
 	},
