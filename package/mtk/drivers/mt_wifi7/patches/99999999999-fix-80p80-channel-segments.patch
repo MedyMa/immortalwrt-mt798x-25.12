@@ -75,7 +75,18 @@
  		}
  	} else if (MTK_NL80211_CHAN_WIDTH_160 == pchan_info->ChanType) {
  		/*bw and ht check*/
-@@ -1439,8 +1449,13 @@
+@@ -1370,6 +1380,10 @@
+ 	 */
+ 	/* init */
+ 	pChan = (CMD_RTPRIV_IOCTL_80211_CHAN *)pData;
++	if (pChan->pWdev && pChan->pWdev->netdev)
++		wdev = RTMP_OS_NETDEV_GET_WDEV(pChan->pWdev->netdev);
++	if (!wdev)
++		return FALSE;
+ 	ChanId = pChan->ChanId;
+ 	IfType = pChan->IfType;
+ 	ChannelType = pChan->ChanType;
+@@ -1439,8 +1453,13 @@
  		break;
  	}
  
@@ -89,7 +100,13 @@
  			wdev->channel = ChanId;
  			wlan_config_set_ht_bw(wdev, ht_bw);
  			wlan_config_set_vht_bw(wdev, vht_bw);
-@@ -1456,7 +1471,12 @@
+@@ -1452,11 +1471,17 @@
+ 
+ 		for (i = 0; i < WDEV_NUM_MAX; i++) {
+ 			tdev = pAd->wdev_list[i];
+-			if (tdev) {
++			if (tdev && HcGetBandByWdev(tdev) == HcGetBandByWdev(wdev) &&
++			    wlan_config_get_ch_band(tdev) == wlan_config_get_ch_band(wdev)) {
  				struct wlan_config *cfg = (struct wlan_config *)tdev->wpf_cfg;
  
  				if (cfg) {
@@ -103,6 +120,16 @@
  					if (cfg->ht_conf.ht_bw != ht_bw) {
  						wlan_config_set_ht_bw(tdev, ht_bw);
  						cfg->ht_conf.ext_cha = ext_cha;
+@@ -1487,7 +1512,8 @@
+ 
+ 			for (i = 0; i < WDEV_NUM_MAX; i++) {
+ 				tdev = pAd->wdev_list[i];
+-				if (tdev)
++				if (tdev && HcGetBandByWdev(tdev) == HcGetBandByWdev(wdev) &&
++				    wlan_config_get_ch_band(tdev) == wlan_config_get_ch_band(wdev))
+ 					SetCommonHtVht(pAd, tdev);
+ 			}
+ 		}
 --- a/mt_wifi/os/linux/cfg80211/cfg80211_util.c
 +++ b/mt_wifi/os/linux/cfg80211/cfg80211_util.c
 @@ -235,6 +235,9 @@
@@ -181,7 +208,15 @@
  	if (pAd->CommonCfg.wifi_cert
  		&& pAd->ApCfg.AutoChannelAlg == 0) {
  		/* set channel callback has been replaced by chandef of cfg80211_ap_settings */
-@@ -2897,6 +2915,8 @@
+@@ -2882,6 +2900,7 @@
+ 
+ 		/* init */
+ 		memset(&ChanInfo, 0, sizeof(ChanInfo));
++		ChanInfo.pWdev = netdev->ieee80211_ptr;
+ 
+ 		p80211CB = pAd->pCfg80211_CB;
+ 
+@@ -2897,6 +2916,8 @@
  			settings->chandef.chan->center_freq);
  		ChanInfo.CenterChanId = ieee80211_frequency_to_channel(
  			settings->chandef.center_freq1);
@@ -190,7 +225,19 @@
  		MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_AP, DBG_LVL_NOTICE,
  			"80211> Channel = %d, CenterChanId = %d\n",
  			ChanInfo.ChanId, ChanInfo.CenterChanId);
-@@ -3285,6 +3305,17 @@
+@@ -2952,7 +2973,10 @@
+ 		ChanInfo.MonFilterFlag = p80211CB->MonFilterFlag;
+ 
+ 		/* set channel */
+-		RTMP_DRIVER_80211_CHAN_SET(pAd, &ChanInfo);
++		if (RTMP_DRIVER_80211_CHAN_SET(pAd, &ChanInfo) != NDIS_STATUS_SUCCESS) {
++			ret = -EINVAL;
++			goto end;
++		}
+ 	}
+ 
+ 	/*ht green filed*/
+@@ -3285,6 +3309,17 @@
  	chandef->width = phy_bw_2_nl_bw(mac_phy->bw);
  	chandef->center_freq1 = ieee80211_channel_to_frequency(mac_phy->cen_chan, chandef->chan->band);
  	chandef->center_freq2 = 0;

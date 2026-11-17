@@ -7,6 +7,7 @@ local wireless_modes = {
 }
 
 local function center80(band, channel)
+    if type(channel) == "string" and not channel:match("^%d+$") then return nil end
     channel = tonumber(channel)
     if not channel then return nil end
     if band == "6g" and channel >= 1 and channel <= 221 and channel % 4 == 1 then
