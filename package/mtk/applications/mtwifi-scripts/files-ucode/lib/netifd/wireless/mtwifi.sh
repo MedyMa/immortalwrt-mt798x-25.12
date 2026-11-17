@@ -29,7 +29,7 @@ import { find_phy } from 'wifi.utils';
 import * as l1dat from 'mtwifi.l1dat';
 import * as cfg from 'mtwifi.cfg';
 import { validate_capabilities } from 'mtwifi.caps';
-import { validate_profile } from 'mtwifi.validate';
+import { validate_profile, normalize_legacy_device } from 'mtwifi.validate';
 import * as ifname from 'mtwifi.ifname';
 import * as mt_hostapd from 'mtwifi.hostapd';
 import * as mt_supplicant from 'mtwifi.supplicant';
@@ -672,6 +672,7 @@ function setup() {
 	}
 
 	/* Validate before creating files, changing interfaces or sending commands. */
+	normalize_legacy_device(payload.config, dev);
 	let country = payload.config?.country;
 	sanitize_device(payload.config);
 	validate_device(payload.config);

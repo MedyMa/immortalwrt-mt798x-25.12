@@ -2,6 +2,24 @@
 'use strict';
 import { valid_ifname } from 'mtwifi.common';
 import * as uci from 'uci';
+import { device_band } from 'mtwifi.l1dat';
+
+export function normalize_legacy_device(config, dev) {
+	let defaults = {
+		'2g': { htmode: 'EHT40', channel: 'auto' },
+		'5g': { htmode: 'EHT160', channel: '36' },
+		'6g': { htmode: 'EHT320', channel: '37' },
+	};
+	let band = device_band(dev);
+	let missing_band = config.band == null || config.band == '';
+	let legacy = missing_band && config.phy == dev?.main_ifname;
+	if (missing_band && band) config.band = band;
+	if (!defaults[config.band]) return;
+	if (config.htmode == null || config.htmode == '' || (legacy && config.htmode == 'NOHT'))
+		config.htmode = defaults[config.band].htmode;
+	if (config.channel == null || config.channel == '')
+		config.channel = defaults[config.band].channel;
+};
 
 function limits(config, ranges) {
 	for (let key, range in ranges) {

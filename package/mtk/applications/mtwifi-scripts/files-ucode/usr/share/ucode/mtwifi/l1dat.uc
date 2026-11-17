@@ -31,6 +31,17 @@ export const MAX_NUM_MESH = 1;
 export const MAX_NUM_EXTIF = 16;
 export const MAX_NUM_DBDC_BAND = 2;
 
+export function device_band(dev) {
+	let band = lc(trim(dev?.band ?? ''));
+	if (band == '2.4g') band = '2g';
+	if (band in [ '2g', '5g', '6g' ]) return band;
+	let name = dev?.main_ifname ?? '';
+	if (substr(name, 0, 3) == 'rax') return '6g';
+	if (substr(name, 0, 3) == 'rai') return '5g';
+	if (substr(name, 0, 2) == 'ra') return '2g';
+	return null;
+};
+
 /* 与 l1dat_parser.lua 的 l1cfg_options 保持一致 */
 const l1cfg_options = {
 	ext_ifname: '',

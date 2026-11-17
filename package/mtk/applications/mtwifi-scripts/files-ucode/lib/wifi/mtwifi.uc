@@ -18,9 +18,7 @@
  *   - 每个段带 type=mtwifi、phy=、band=、channel=、htmode=、country=
  *   - 额外写入 MTK 私有的 devname=（L1 profile 里的 INDEX_mainidx[_subidx]）
  *
- * 同时按官方 wifi-detect.uc 的风格补全 /etc/board.json 的 wlan 条目
- * （只补缺失的，不覆盖已存在的；官方 wifi-detect.uc 每次 wifi config
- * 都会重写 wlan.phy* 条目，所以这里写的只是兜底）。
+ * 板级能力由通用 wifi-detect.uc 探测，本脚本只补全 UCI 设备元数据。
  *
  * 已存在的 wifi-device 段（不论段名是不是 radioN，只要 type=mtwifi 且
  * 指向同一个 devname）不会被改动，重复执行是幂等的。
@@ -30,6 +28,7 @@ import * as fs from 'fs';
 import * as uci from 'uci';
 import * as l1dat from 'mtwifi.l1dat';
 import { trim, log, shell_quote } from 'mtwifi.common';
+import { normalize_legacy_device } from 'mtwifi.validate';
 
 const BOARD_FILE = '/etc/board.json';
 const L1_DAT_PATH = l1dat.L1_DAT_PATH;
@@ -81,15 +80,7 @@ function phy_path(phy) {
 };
 
 function band_of(dev) {
-	if (dev.band != null && length(trim(dev.band)))
-		return lc(trim(dev.band));
-
-	let base = dev.main_ifname ?? dev.ext_ifname ?? '';
-	if (substr(base, 0, 3) == 'rax') return '6g';
-	if (substr(base, 0, 3) == 'rai') return '5g';
-	if (substr(base, 0, 2) == 'ra')  return '2g';
-
-	return (dev.subidx ?? 1) == 1 ? '2g' : '5g';
+	return l1dat.device_band(dev);
 };
 
 /*
@@ -140,10 +131,14 @@ function main() {
 		let phy = phy_of_ifname(dev.main_ifname);
 		let name = existing.by_devname[devname];
 		if (name) {
-			/* Upgrade metadata only. SSID, keys, encryption, channel and width stay intact. */
+			let normalized = { ...config[name] };
+			normalize_legacy_device(normalized, dev);
+			for (let key in [ 'band', 'htmode', 'channel' ])
+				if (normalized[key] != null && normalized[key] != config[name][key])
+					set(name, key, normalized[key]);
 			if (!config[name].devname)
 				set(name, 'devname', devname);
-			if (phy && !config[name].phy)
+			if (phy && (!config[name].phy || config[name].phy == dev.main_ifname))
 				set(name, 'phy', phy);
 			let path = phy ? phy_path(phy) : null;
 			if (path && !config[name].path)

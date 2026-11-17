@@ -2,11 +2,23 @@
 'use strict';
 import { readfile, writefile, realpath, glob, basename, unlink, open, rename } from "fs";
 import { is_equal } from "/usr/share/hostap/common.uc";
-let nl = require("nl80211");
+import * as l1dat from 'mtwifi.l1dat';
+import * as nl from 'nl80211';
 
+let lock = open('/var/run/wifi-detect.lock', 'a', 0600);
+if (!lock || !lock.lock('x'))
+	exit(1);
 let board_file = "/etc/board.json";
 let prev_board_data = json(readfile(board_file));
 let board_data = json(readfile(board_file));
+let vendor_bands = {};
+let l1 = l1dat.load_cached();
+for (let name in l1 ? l1dat.list(l1) : []) {
+	let dev = l1[l1dat.DEV_RINDEX][name];
+	let phy = trim(readfile(`/sys/class/net/${dev.main_ifname}/phy80211/name`) ?? '');
+	let band = l1dat.device_band(dev);
+	if (phy && band) vendor_bands[phy] = uc(band);
+}
 
 function phy_idx(name) {
 	return +rtrim(readfile(`/sys/class/ieee80211/${name}/index`));
@@ -135,6 +147,9 @@ function wiphy_detect() {
 				band_name = "2G";
 			else
 				continue;
+			/* SDK PHYs may advertise all adapter bands before EEPROM initialization. */
+			if (vendor_bands[name] && vendor_bands[name] != band_name)
+				continue;
 			bands[band_name] = band_info;
 			if (band.ht_capa > 0)
 				band_info.ht = true;
@@ -260,3 +275,4 @@ if (!is_equal(prev_board_data, board_data)) {
 	f.close();
 	rename(new_file, board_file);
 }
+lock.close();
