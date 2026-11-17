@@ -673,6 +673,7 @@ export function prepare_dat(devname, payload) {
 	}
 
 	let bw = bwres[1];
+	let split = payload.config.htmode in [ 'VHT80_80', 'HE80_80' ];
 	let extension = match(payload.config.htmode, /40([+-])$/);
 	if (extension) dats.HT_EXTCHA = extension[1] == '+' ? 1 : 0;
 
@@ -709,6 +710,14 @@ export function prepare_dat(devname, payload) {
 			dats.EHT_ApBw = 4;
 		else if (is_ax_mode(payload))
 			dats.EHT_ApBw = 3;
+	}
+	let secondary = [];
+	for (let i = 0; i < +dats.BssidNum; i++)
+		push(secondary, split ? '' + payload.config.channel2 : '0');
+	dats.VHT_Sec80_Channel = join(';', secondary);
+	if (split) {
+		dats.VHT_BW = 3;
+		dats.EHT_ApBw = 0;
 	}
 
 	/* setup apcli */

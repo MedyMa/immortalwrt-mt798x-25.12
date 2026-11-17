@@ -124,6 +124,26 @@ function feature_defaults(data) {
 	}
 };
 
+export function center80(band, channel) {
+	if (!match('' + channel, /^[0-9]+$/)) return null;
+	channel = +channel;
+	if (band == '6g' && channel >= 1 && channel <= 221 && channel % 4 == 1)
+		return 7 + 16 * int((channel - 1) / 16);
+	if (band == '5g')
+		for (let center in [ 42, 58, 106, 122, 138, 155, 171 ])
+			if (channel >= center - 6 && channel <= center + 6 && (channel - center + 6) % 4 == 0)
+				return center;
+	return null;
+};
+
+export function segments80(config) {
+	let first = center80(config.band, config.channel);
+	let second = center80(config.band, config.channel2);
+	if (first == null || second == null || (first - second <= 16 && second - first <= 16))
+		die('INVALID_80P80_CHANNELS');
+	return [ first, second ];
+};
+
 export function validate_profile(data, previous) {
 	check_text(data);
 	let config = data.config;
@@ -131,8 +151,10 @@ export function validate_profile(data, previous) {
 		beacon_int: [20, 999], eht_bw320_offset: [0, 1] });
 	if (!(config.band in [ '2g', '5g', '6g' ]))
 		die('INVALID_BAND');
-	let bw = match(config.htmode ?? '', /^(HT|VHT|HE|EHT)(20|40|80|160|320)([+-]|-[12])?$/);
+	let bw = match(config.htmode ?? '', /^(HT|VHT|HE|EHT)(20|40|80_80|80|160|320)([+-]|-[12])?$/);
+	let split = bw?.[2] == '80_80';
 	if ((!bw && config.htmode != 'NOHT') ||
+	    (split && (!(bw[1] in [ 'VHT', 'HE' ]) || config.band == '2g' || bw[3])) ||
 	    (config.htmode == 'NOHT' && config.band == '6g') ||
 	    (bw?.[1] == 'VHT' && config.band != '5g') ||
 	    (bw?.[1] == 'HT' && +bw?.[2] > 40) ||
@@ -143,6 +165,7 @@ export function validate_profile(data, previous) {
 	    (config.band == '6g' && !(bw?.[1] in [ 'HE', 'EHT' ])) ||
 	    (+bw?.[2] == 320 && bw?.[1] != 'EHT'))
 		die('INVALID_BANDWIDTH');
+	if (split) segments80(config);
 	let required = { n: 1, ac: 2, ax: 3, be: 4 }[config.require_mode];
 	let selected = { HT: 1, VHT: 2, HE: 3, EHT: 4 }[bw?.[1]] ?? 0;
 	if (required != null && (required > selected || (config.require_mode == 'ac' && config.band != '5g')))

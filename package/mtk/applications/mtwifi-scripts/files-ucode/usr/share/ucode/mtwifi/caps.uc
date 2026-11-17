@@ -105,6 +105,7 @@ export function he_mac_cap(caps, byte, mask) {
 
 export function validate_capabilities(data) {
 	let needs_vlan = false;
+	let split = data.config.htmode in [ 'VHT80_80', 'HE80_80' ];
 	for (let _, iface in data.interfaces ?? {}) {
 		let c = iface.config;
 		needs_vlan ||= +c.dynamic_vlan > 0 || !!c.per_sta_vif ||
@@ -112,8 +113,13 @@ export function validate_capabilities(data) {
 		for (let _, sta in iface.stas ?? {})
 			needs_vlan ||= +sta.config?.vid > 0;
 	}
-	if (needs_vlan && !device_capabilities({ ...data.config, phy: data.phy }).features.ap_vlan)
+	if (!needs_vlan && !split) return;
+	let caps = device_capabilities({ ...data.config, phy: data.phy });
+	if (needs_vlan && !caps.features.ap_vlan)
 		die('AP_VLAN_NOT_SUPPORTED');
+	if (split && ((data.config.band == '5g' && (caps.vht_capa & 0xc) != 8) ||
+	    (data.config.htmode == 'HE80_80' && !(caps.he_phy_cap[0] & 0x10))))
+		die('80P80_NOT_SUPPORTED');
 };
 
 export { WLAN_CIPHER_SUITE_GCMP_256 };

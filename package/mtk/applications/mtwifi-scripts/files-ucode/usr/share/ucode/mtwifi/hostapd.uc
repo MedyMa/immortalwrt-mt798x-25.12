@@ -31,6 +31,7 @@ import {
 import * as ap from 'wifi.ap';
 import * as netifd from 'wifi.netifd';
 import { device_capabilities } from 'mtwifi.caps';
+import { segments80 } from 'mtwifi.validate';
 import { log, trim, readfile, daemon_config_write, capture_files, commit_files, rollback_files, exists, shell_quote, sleep } from 'mtwifi.common';
 
 const HOSTAPD = '/usr/sbin/hostapd';
@@ -317,8 +318,8 @@ function device_htmode_append(config, caps) {
 			config.ieee80211n = 1;
 			config.ht_capab = '';
 		}
-		if (htmode in [ 'HT40', 'VHT40', 'VHT80', 'VHT160',
-				'HE40', 'HE80', 'HE160', 'EHT40', 'EHT80', 'EHT160' ]) {
+		if (htmode in [ 'HT40', 'VHT40', 'VHT80', 'VHT80_80', 'VHT160',
+				'HE40', 'HE80', 'HE80_80', 'HE160', 'EHT40', 'EHT80', 'EHT160' ]) {
 			config.ieee80211n = 1;
 			if (extension) {
 				config.ht_capab = '[HT40' + extension[2] + ']';
@@ -371,6 +372,7 @@ function device_htmode_append(config, caps) {
 	config.ieee80211ac = 1;
 	config.vht_oper_centr_freq_seg0_idx = 0;
 	config.vht_oper_chwidth = 0;
+	config.vht_oper_centr_freq_seg1_idx = 0;
 
 	switch (htmode) {
 	case 'VHT20':
@@ -412,6 +414,13 @@ function device_htmode_append(config, caps) {
 			}
 		config.vht_oper_chwidth = 2;
 		break;
+	case 'VHT80_80':
+	case 'HE80_80':
+		let centers = segments80(config);
+		config.vht_oper_centr_freq_seg0_idx = centers[0];
+		config.vht_oper_centr_freq_seg1_idx = centers[1];
+		config.vht_oper_chwidth = 3;
+		break;
 
 	default:
 		config.ieee80211ac = 0;
@@ -448,6 +457,9 @@ function device_htmode_append(config, caps) {
 			case 'EHT80':
 			case 'EHT160':
 				config.op_class = 132 + config.eht_oper_chwidth;
+				break;
+			case 'HE80_80':
+				config.op_class = 135;
 				break;
 			}
 
@@ -533,7 +545,8 @@ function device_htmode_append(config, caps) {
 			config.vht_capab += '[VHT-LINK-ADAPT-2]';
 
 		append_vars(config, [
-			'ieee80211ac', 'vht_oper_chwidth', 'vht_oper_centr_freq_seg0_idx', 'vht_capab'
+			'ieee80211ac', 'vht_oper_chwidth', 'vht_oper_centr_freq_seg0_idx',
+			'vht_oper_centr_freq_seg1_idx', 'vht_capab'
 		]);
 	}
 
@@ -546,6 +559,7 @@ function device_htmode_append(config, caps) {
 		if (config.hw_mode == 'a') {
 			config.he_oper_chwidth ??= config.vht_oper_chwidth;
 			config.he_oper_centr_freq_seg0_idx ??= config.vht_oper_centr_freq_seg0_idx;
+			config.he_oper_centr_freq_seg1_idx ??= config.vht_oper_centr_freq_seg1_idx;
 		}
 
 		if (config.he_bss_color_enabled) {
@@ -580,7 +594,7 @@ function device_htmode_append(config, caps) {
 			config.he_ldpc = false;
 
 		append_vars(config, [
-			'ieee80211ax', 'he_oper_chwidth', 'he_oper_centr_freq_seg0_idx',
+			'ieee80211ax', 'he_oper_chwidth', 'he_oper_centr_freq_seg0_idx', 'he_oper_centr_freq_seg1_idx',
 			'he_su_beamformer', 'he_su_beamformee', 'he_mu_beamformer',
 			'he_twt_required', 'he_twt_responder', 'he_ldpc',
 			'he_default_pe_duration', 'he_rts_threshold', 'he_mu_edca_qos_info_param_count',

@@ -103,6 +103,12 @@
 			"description": "Specifies the wireless channel. “auto” defaults to the lowest available channel, or utilizes the ACS algorithm depending on hardware/driver support",
 			"type": "string"
 		},
+		"channel2": {
+			"description": "A primary 20 MHz channel in the second, non-adjacent 80 MHz segment for 80+80 MHz operation",
+			"type": "number",
+			"minimum": 1,
+			"maximum": 221
+		},
 		"channels": {
 			"type": "alias",
 			"default": "chanlist"
@@ -375,8 +381,8 @@
 			"type": "string",
 			"enum": [
 				"NOHT", "HT20", "HT40-", "HT40+", "HT40",
-				"VHT20", "VHT40", "VHT40-", "VHT40+", "VHT80", "VHT160",
-				"HE20", "HE40", "HE40-", "HE40+", "HE80", "HE160",
+				"VHT20", "VHT40", "VHT40-", "VHT40+", "VHT80", "VHT80_80", "VHT160",
+				"HE20", "HE40", "HE40-", "HE40+", "HE80", "HE80_80", "HE160",
 				"EHT20", "EHT40", "EHT40-", "EHT40+", "EHT80", "EHT160", "EHT320", "EHT320-1", "EHT320-2" ]
 		},
 		"hwmode": {

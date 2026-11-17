@@ -1296,15 +1296,15 @@ function getMtkFallbackWifiHtModes(band) {
 	case '5g':
 		add(
 			'HT20', 'HT40',
-			'VHT20', 'VHT40', 'VHT80', 'VHT160',
-			'HE20', 'HE40', 'HE80', 'HE160',
+			'VHT20', 'VHT40', 'VHT80', 'VHT80_80', 'VHT160',
+			'HE20', 'HE40', 'HE80', 'HE80_80', 'HE160',
 			'EHT20', 'EHT40', 'EHT80', 'EHT160'
 		);
 		break;
 
 	case '6g':
 		add(
-			'HE20', 'HE40', 'HE80', 'HE160',
+			'HE20', 'HE40', 'HE80', 'HE80_80', 'HE160',
 			'EHT20', 'EHT40', 'EHT80', 'EHT160', 'EHT320'
 		);
 		break;
@@ -1342,14 +1342,44 @@ function add_dep_eht_radio_feature(o) {
 	});
 }
 
-function validate_mtwifi_frequency(section_id, value) {
+function mtwifi_center80(band, channel) {
+	if (!/^[1-9][0-9]*$/.test(String(channel || ''))) return null;
+	channel = +channel;
+	if (band == '6g' && channel <= 221 && channel % 4 == 1)
+		return 7 + 16 * Math.floor((channel - 1) / 16);
+	if (band == '5g') {
+		var centers = [42, 58, 106, 122, 138, 155, 171];
+		for (var i = 0; i < centers.length; i++)
+			if (channel >= centers[i] - 6 && channel <= centers[i] + 6 && (channel - centers[i] + 6) % 4 == 0)
+				return centers[i];
+	}
+	return null;
+}
+
+function mtwifi_segment_available(channels, band, channel) {
+	var center = mtwifi_center80(band, channel), values = channels && channels[band];
+	if (center == null) return false;
+	if (!values) return true;
+	for (var part = center - 6; part <= center + 6; part += 4) {
+		var available = false;
+		for (var i = 0; i < values.length; i += 3)
+			if (+values[i] == part && (values[i+2] === true || values[i+2]?.available === true))
+				available = true;
+		if (!available) return false;
+	}
+	return true;
+}
+
+function validate_mtwifi_frequency(section_id, value, channels) {
 	if (uci.get('wireless', section_id, 'type') != 'mtwifi')
 		return true;
 	if (!Array.isArray(value) || !value[0] || ['2g', '5g', '6g'].indexOf(value[1]) < 0 ||
 	    !(value[2] == 'auto' || /^[1-9][0-9]*$/.test(String(value[2] || ''))))
 		return _('Wireless band or channel information is unavailable. Refresh before saving.');
-	var band = value[1], mode = String(value[0]).match(/^(HT|VHT|HE|EHT)(20|40|80|160|320)([+-]|-[12])?$/);
+	var band = value[1], mode = String(value[0]).match(/^(HT|VHT|HE|EHT)(20|40|80_80|80|160|320)([+-]|-[12])?$/);
+	var split = mode && mode[2] == '80_80';
 	var valid = value[0] == 'NOHT' ? band != '6g' : mode &&
+		!(split && (['VHT', 'HE'].indexOf(mode[1]) < 0 || band == '2g' || mode[3])) &&
 		!(mode[1] == 'VHT' && band != '5g') && !(mode[1] == 'HT' && +mode[2] > 40) &&
 		!(band == '2g' && +mode[2] > 40) && !(band != '6g' && +mode[2] > 160) &&
 		!(band == '6g' && ['HE', 'EHT'].indexOf(mode[1]) < 0) &&
@@ -1357,6 +1387,12 @@ function validate_mtwifi_frequency(section_id, value) {
 		(!mode[3] || (+mode[2] == 40 && ['+', '-'].indexOf(mode[3]) >= 0));
 	if (!valid || (value[2] != 'auto' && +value[2] > (band == '2g' ? 14 : band == '5g' ? 196 : 233)))
 		return _('Invalid wireless band, mode or bandwidth.');
+	if (split) {
+		var first = mtwifi_center80(band, value[2]), second = mtwifi_center80(band, value[3]);
+		if (first == null || second == null || Math.abs(first - second) <= 16 ||
+		    !mtwifi_segment_available(channels, band, value[2]) || !mtwifi_segment_available(channels, band, value[3]))
+			return _('Select two permitted, non-adjacent 80 MHz channel segments.');
+	}
 	return true;
 }
 
@@ -1447,12 +1483,14 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				'ac': [
 					'VHT160', '160 MHz', htmodelist.VHT160,
 					'VHT80', '80 MHz', htmodelist.VHT80,
+					'VHT80_80', '80+80 MHz', htmodelist.VHT80_80,
 					'VHT40', '40 MHz', htmodelist.VHT40,
 					'VHT20', '20 MHz', htmodelist.VHT20
 				],
 				'ax': [
 					'HE160', '160 MHz', htmodelist.HE160,
 					'HE80', '80 MHz', htmodelist.HE80,
+					'HE80_80', '80+80 MHz', htmodelist.HE80_80,
 					'HE40', '40 MHz', htmodelist.HE40,
 					'HE20', '20 MHz', htmodelist.HE20
 				],
@@ -1552,12 +1590,48 @@ var CBIWifiFrequencyValue = form.Value.extend({
 
 		this.map.checkDepends();
 	},
+	onWifiChannelChange: function(elem) {
+		this.toggleWifiSecondary(elem);
+		if (this.checkWifiChannelRestriction) this.checkWifiChannelRestriction(elem);
+		this.map.checkDepends();
+	},
+
+	toggleWifiSecondary: function(elem) {
+		var secondary = elem.querySelector('.channel2');
+		var split = this.mtwifi && /^(VHT|HE)80_80$/.test(elem.querySelector('.htmode').value);
+		var previous = secondary.value, band = elem.querySelector('.band').value;
+		var first = mtwifi_center80(band, elem.querySelector('.channel').value);
+		var values = ['', _('Select secondary channel'), true];
+		var channels = this.channels[band] || [];
+		if (split && first != null) {
+			for (var i = 0; i < channels.length; i += 3) {
+				var center = mtwifi_center80(band, channels[i]);
+				if (center != null && Math.abs(first - center) > 16 && mtwifi_segment_available(this.channels, band, channels[i]))
+					values.push(channels[i], channels[i+1], channels[i+2]);
+			}
+		}
+		this.setValues(secondary, values);
+		secondary.value = previous;
+		secondary.parentNode.style.display = split ? '' : 'none';
+	},
 
 	toggleWifiChannel: function(elem) {
 		var band = elem.querySelector('.band');
 		var chan = elem.querySelector('.channel');
 
-		this.setValues(chan, this.channels[band.value]);
+		var values = this.channels[band.value], previous = chan.value;
+		var split = this.mtwifi && /^(VHT|HE)80_80$/.test(elem.querySelector('.htmode').value);
+		if (split) {
+			var filtered = [];
+			for (var i = 0; values && i < values.length; i += 3)
+				if (mtwifi_segment_available(this.channels, band.value, values[i]))
+					filtered.push(values[i], values[i+1], values[i+2]);
+			values = filtered;
+		}
+		this.setValues(chan, values);
+		if (this.mtwifi && previous) chan.value = previous;
+		this.toggleWifiSecondary(elem);
+		this.map.checkDepends();
 	},
 
 	setInitialValues: function(section_id, elem) {
@@ -1599,8 +1673,11 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		this.toggleWifiBand(elem);
 
 		bwdt.value = htval;
+		this.toggleWifiChannel(elem);
 		chan.value = chval == '0' ? 'auto' : (chval || (chan.options[0] ? chan.options[0].value : 'auto'));
 
+		this.toggleWifiSecondary(elem);
+		elem.querySelector('.channel2').value = uci.get('wireless', section_id, 'channel2') || '';
 		return elem;
 	},
 
@@ -1631,6 +1708,15 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				E('select', {
 					'class': 'channel',
 					'style': 'width:auto',
+					'change': L.bind(this.onWifiChannelChange, this, elem),
+					'disabled': (this.disabled != null) ? this.disabled : this.map.readonly
+				})
+			]),
+			E('label', { 'style': 'float:left; margin-right:3px' }, [
+				_('Secondary 80 MHz channel'), E('br'),
+				E('select', {
+					'class': 'channel2',
+					'style': 'width:auto',
 					'change': L.bind(this.map.checkDepends, this.map),
 					'disabled': (this.disabled != null) ? this.disabled : this.map.readonly
 				})
@@ -1640,7 +1726,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				E('select', {
 					'class': 'htmode',
 					'style': 'width:auto',
-					'change': L.bind(this.map.checkDepends, this.map),
+					'change': L.bind(this.toggleWifiChannel, this, elem),
 					'disabled': (this.disabled != null) ? this.disabled : this.map.readonly
 				})
 			]),
@@ -1651,11 +1737,13 @@ var CBIWifiFrequencyValue = form.Value.extend({
 	},
 
 	cfgvalue: function(section_id) {
-		return [
+		var values = [
 		    uci.get('wireless', section_id, 'htmode'),
 		    uci.get('wireless', section_id, 'hwmode') || uci.get('wireless', section_id, 'band'),
 		    uci.get('wireless', section_id, 'channel')
 		];
+		if (this.mtwifi) values.push(uci.get('wireless', section_id, 'channel2') || '');
+		return values;
 	},
 
 	formvalue: function(section_id) {
@@ -1663,18 +1751,26 @@ var CBIWifiFrequencyValue = form.Value.extend({
 
 		var mode = node.querySelector('.mode'), width = node.querySelector('.htmode').value;
 		if (this.mtwifi && mode.selectedIndex >= 0 && mode.value == '') width = 'NOHT';
-		return [width, node.querySelector('.band').value, node.querySelector('.channel').value];
+		var values = [width, node.querySelector('.band').value, node.querySelector('.channel').value];
+		if (this.mtwifi) values.push(node.querySelector('.channel2').value);
+		return values;
 	},
 
-	validate: validate_mtwifi_frequency,
+	validate: function(section_id, value) {
+		return validate_mtwifi_frequency(section_id, value, this.channels);
+	},
 
 	write: function(section_id, value) {
 		if (uci.get('wireless', section_id, 'type') == 'mtwifi') {
-			var valid = validate_mtwifi_frequency(section_id, value);
+			var valid = validate_mtwifi_frequency(section_id, value, this.channels);
 			if (valid !== true) throw new Error(valid);
 			uci.set('wireless', section_id, 'htmode', value[0]);
 			uci.set('wireless', section_id, 'band', value[1]);
 			uci.set('wireless', section_id, 'channel', value[2]);
+			if (/^(VHT|HE)80_80$/.test(value[0]))
+				uci.set('wireless', section_id, 'channel2', value[3]);
+			else
+				uci.unset('wireless', section_id, 'channel2');
 			uci.unset('wireless', section_id, 'hwmode');
 			return;
 		}

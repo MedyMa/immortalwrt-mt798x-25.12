@@ -1,0 +1,210 @@
+--- a/mt_wifi/profiles/cmm_profile.c
++++ b/mt_wifi/profiles/cmm_profile.c
+@@ -1629,9 +1629,9 @@
+ 	}
+ 
+ 	/* VHT Secondary80 */
+-	if (RTMPGetKeyParameter("VHT_Sec80_Channel", tmpbuf, PER_BSS_SIZE_2(pAd), buf, TRUE)) {
++	if (RTMPGetKeyParameter("VHT_Sec80_Channel", tmpbuf, PER_BSS_SIZE_4(pAd), buf, TRUE)) {
+ 		for (i = 0, macptr = rstrtok(tmpbuf, ";"); macptr; macptr = rstrtok(NULL, ";"), i++) {
+-			Value = os_str_tol(tmpbuf, 0, 10);
++			Value = os_str_tol(macptr, 0, 10);
+ 
+ 			wdev = get_curr_wdev(pAd, i);
+ 			if (wdev) {
+--- a/mt_wifi/include/rtmp_cmd.h
++++ b/mt_wifi/include/rtmp_cmd.h
+@@ -480,6 +480,7 @@
+ #if (KERNEL_VERSION(3, 6, 0) <= LINUX_VERSION_CODE)
+ 	PWIRELESS_DEV pWdev;
+ #endif /* LINUX_VERSION_CODE: 3.6.0 */
++	UINT8 CenterChanId2;
+ } CMD_RTPRIV_IOCTL_80211_CHAN;
+ 
+ #define RT_CMD_80211_FILTER_FCSFAIL		0x01
+--- a/mt_wifi/common/cmm_info.c
++++ b/mt_wifi/common/cmm_info.c
+@@ -10261,8 +10261,9 @@
+ 	POS_COOKIE pObj = (POS_COOKIE) pAd->OS_Cookie;
+ 	struct wifi_dev *wdev = get_wdev_by_ioctl_idx_and_iftype(pAd, pObj->ioctl_if, pObj->ioctl_if_type);
+ 	struct _RTMP_CHIP_CAP *cap = hc_get_chip_cap(pAd->hdev_ctrl);
+-	/* Sanity : VHT_BW_8080 only for MT7915 chips,  */
+-	if (IS_PHY_CAPS(cap->phy_caps, fPHY_CAP_BW160C_STD))
++	/* Contiguous 160 MHz support does not exclude 80+80 MHz. */
++	if (IS_PHY_CAPS(cap->phy_caps, fPHY_CAP_BW160C_STD) &&
++	    !IS_PHY_CAPS(cap->phy_caps, fPHY_CAP_BW160NC))
+ 		vht_bw_max_cap = VHT_BW_160;
+ 
+ 	if (!wdev)
+--- a/mt_wifi/os/linux/cfg80211/cfg80211drv.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211drv.c
+@@ -1224,23 +1224,33 @@
+ 		}
+ 
+ 	} else if (MTK_NL80211_CHAN_WIDTH_80P80 == pchan_info->ChanType) {
++		struct _RTMP_CHIP_CAP *cap = hc_get_chip_cap(pAd->hdev_ctrl);
++
++		if (!IS_PHY_CAPS(cap->phy_caps, fPHY_CAP_BW160NC) || WMODE_CAP_BE(wdev->PhyMode) ||
++		    !pchan_info->CenterChanId2 ||
++		    abs((int)pchan_info->CenterChanId - pchan_info->CenterChanId2) <= 16)
++			return FALSE;
++		wlan_config_set_vht_bw(wdev, VHT_BW_8080);
++		wlan_config_set_he_bw(wdev, HE_BW_8080);
++		wlan_config_set_cen_ch_2(wdev, pchan_info->CenterChanId2);
+ 		/*bw and vht check*/
+ 		bw = wlan_operate_get_vht_bw(wdev);
+ 		if (VHT_BW_8080 == (enum vht_config_bw)bw && 0 == pAd->CommonCfg.HT_Disable) {
+ 			MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_CHN, DBG_LVL_INFO,
+ 				"bw 8080 is already set.\n");
++			if (wlan_operate_set_cen_ch_2(wdev, pchan_info->CenterChanId2) != WLAN_OPER_OK)
++				return FALSE;
+ 			goto set_channel;
+ 		}
+-		CFG8021DRV_AP_PHYINIT(pAd, wdev, pchan_info->ChanId);
++		wlan_config_set_ht_bw(wdev, HT_BW_40);
+ 		/*set bw*/
+ 		if (WLAN_OPER_OK == wlan_operate_set_vht_bw(wdev, VHT_BW_8080)) {
+ 			pAd->CommonCfg.HT_Disable = 0;/*HT disable*/
+-			wlan_config_set_he_bw(wdev, HE_BW_8080);
+ 			ret = TRUE;
+ 		} else {
+ 			MTWF_DBG(pAd, DBG_CAT_CFG, CATCFG_CMD, DBG_LVL_ERROR,
+ 				"ERROR! wlan_operate_set_ht_bw 8080 FAIL\n");
+-			ret = FALSE;
++			return FALSE;
+ 		}
+ 	} else if (MTK_NL80211_CHAN_WIDTH_160 == pchan_info->ChanType) {
+ 		/*bw and ht check*/
+@@ -1439,8 +1449,13 @@
+ 		break;
+ 	}
+ 
++	if (ChannelType == RT_CMD_80211_CHANTYPE_VHT80P80 &&
++	    (!pChan->CenterChanId2 || abs((int)pChan->CenterChanId - pChan->CenterChanId2) <= 16))
++		return FALSE;
++
+ 	if (b_ch_change) {
+ 		if (IfType != RT_CMD_80211_IFTYPE_MONITOR) {
++			wlan_config_set_cen_ch_2(wdev, ChannelType == RT_CMD_80211_CHANTYPE_VHT80P80 ? pChan->CenterChanId2 : 0);
+ 			wdev->channel = ChanId;
+ 			wlan_config_set_ht_bw(wdev, ht_bw);
+ 			wlan_config_set_vht_bw(wdev, vht_bw);
+@@ -1456,7 +1471,12 @@
+ 				struct wlan_config *cfg = (struct wlan_config *)tdev->wpf_cfg;
+ 
+ 				if (cfg) {
+-
++					UCHAR center2 = ChannelType == RT_CMD_80211_CHANTYPE_VHT80P80 ? pChan->CenterChanId2 : 0;
++
++					if (cfg->phy_conf.cen_ch_2 != center2) {
++						wlan_config_set_cen_ch_2(tdev, center2);
++						b_bw_change = TRUE;
++					}
+ 					if (cfg->ht_conf.ht_bw != ht_bw) {
+ 						wlan_config_set_ht_bw(tdev, ht_bw);
+ 						cfg->ht_conf.ext_cha = ext_cha;
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_util.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_util.c
+@@ -235,6 +235,9 @@
+ 			he_cap_elem->phy_cap_info[0] =
+ 				IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G |
+ 				IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
++			if (IS_PHY_CAPS(phy_caps, fPHY_CAP_BW160NC))
++				he_cap_elem->phy_cap_info[0] |=
++					IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G;
+ 		}
+ 		he_cap_elem->phy_cap_info[1] =
+ 				IEEE80211_HE_PHY_CAP1_DEVICE_CLASS_A |
+@@ -283,9 +286,11 @@
+ 
+ 		if (band_idx != IEEE80211_BAND_2GHZ) {
+ 			he_mcs_nss_supp->rx_mcs_160 = he_mcs_nss_supp->rx_mcs_80;
+-			he_mcs_nss_supp->rx_mcs_80p80 = cpu_to_le16(0xffff);
++			he_mcs_nss_supp->rx_mcs_80p80 = IS_PHY_CAPS(phy_caps, fPHY_CAP_BW160NC) ?
++				he_mcs_nss_supp->rx_mcs_80 : cpu_to_le16(0xffff);
+ 			he_mcs_nss_supp->tx_mcs_160 = he_mcs_nss_supp->tx_mcs_80;
+-			he_mcs_nss_supp->tx_mcs_80p80 = cpu_to_le16(0xffff);
++			he_mcs_nss_supp->tx_mcs_80p80 = IS_PHY_CAPS(phy_caps, fPHY_CAP_BW160NC) ?
++				he_mcs_nss_supp->tx_mcs_80 : cpu_to_le16(0xffff);
+ 		}
+ 		/*
+ 		 * Set default PPE thresholds, with PPET16 set to 0, PPET8 set
+@@ -566,6 +571,10 @@
+ 		return;
+ 	}
+ 	phy_caps = pDriverBandInfo->phy_caps;
++	if (band_idx == IEEE80211_BAND_5GHZ && IS_PHY_CAPS(phy_caps, fPHY_CAP_BW160NC)) {
++		band_info->vht_cap.cap &= ~IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_MASK;
++		band_info->vht_cap.cap |= IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160_80PLUS80MHZ;
++	}
+ 	nss_cap = MCS_NSS_CAP(mac_ad);
+ 	data = cb->sband_data[band_idx];
+ 	os_zero_mem(data, sizeof(cb->sband_data[band_idx]));
+--- a/mt_wifi/os/linux/cfg80211/cfg80211.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211.c
+@@ -613,6 +613,8 @@
+ 	chandef = &params->chandef;
+ 	chaninfo.ChanId = ieee80211_frequency_to_channel(chandef->chan->center_freq);
+ 	chaninfo.CenterChanId = ieee80211_frequency_to_channel(chandef->center_freq1);
++	chaninfo.CenterChanId2 = chandef->center_freq2 ?
++		ieee80211_frequency_to_channel(chandef->center_freq2) : 0;
+ 	MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_SCAN, DBG_LVL_NOTICE,
+ 		"[%s](%d): Channel = %d, CenterChanId = %d\n",
+ 		__func__, __LINE__, chaninfo.ChanId, chaninfo.CenterChanId);
+@@ -694,6 +696,8 @@
+ 	/*channel*/
+ 	chaninfo.ChanId = ieee80211_frequency_to_channel(chandef->chan->center_freq);
+ 	chaninfo.CenterChanId = ieee80211_frequency_to_channel(chandef->center_freq1);
++	chaninfo.CenterChanId2 = chandef->center_freq2 ?
++		ieee80211_frequency_to_channel(chandef->center_freq2) : 0;
+ 	MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_CHN, DBG_LVL_NOTICE,
+ 		"Channel = %d, CenterChanId = %d\n", chaninfo.ChanId, chaninfo.CenterChanId);
+ 
+@@ -2874,6 +2878,20 @@
+ 			settings->unsol_bcast_probe_resp.interval, UNSOLICIT_TXMODE_NON_HT, TRUE);
+ #endif
+ #endif
++	if (settings->chandef.width == NL80211_CHAN_WIDTH_80P80) {
++		CMD_RTPRIV_IOCTL_80211_CHAN split = {0};
++
++		split.pWdev = netdev->ieee80211_ptr;
++		split.ChanId = ieee80211_frequency_to_channel(settings->chandef.chan->center_freq);
++		split.CenterChanId = ieee80211_frequency_to_channel(settings->chandef.center_freq1);
++		split.CenterChanId2 = settings->chandef.center_freq2 ?
++			ieee80211_frequency_to_channel(settings->chandef.center_freq2) : 0;
++		split.ChanType = MTK_NL80211_CHAN_WIDTH_80P80;
++		if (RTMP_DRIVER_AP_80211_CHAN_SET(pAd, &split) != NDIS_STATUS_SUCCESS) {
++			ret = -EINVAL;
++			goto end;
++		}
++	}
+ 	if (pAd->CommonCfg.wifi_cert
+ 		&& pAd->ApCfg.AutoChannelAlg == 0) {
+ 		/* set channel callback has been replaced by chandef of cfg80211_ap_settings */
+@@ -2897,6 +2915,8 @@
+ 			settings->chandef.chan->center_freq);
+ 		ChanInfo.CenterChanId = ieee80211_frequency_to_channel(
+ 			settings->chandef.center_freq1);
++		ChanInfo.CenterChanId2 = settings->chandef.center_freq2 ?
++			ieee80211_frequency_to_channel(settings->chandef.center_freq2) : 0;
+ 		MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_AP, DBG_LVL_NOTICE,
+ 			"80211> Channel = %d, CenterChanId = %d\n",
+ 			ChanInfo.ChanId, ChanInfo.CenterChanId);
+@@ -3285,6 +3305,17 @@
+ 	chandef->width = phy_bw_2_nl_bw(mac_phy->bw);
+ 	chandef->center_freq1 = ieee80211_channel_to_frequency(mac_phy->cen_chan, chandef->chan->band);
+ 	chandef->center_freq2 = 0;
++	if (mac_phy->bw == BW_8080) {
++		struct wifi_dev *wifi_dev = wdev && wdev->netdev ?
++			RTMP_OS_NETDEV_GET_WDEV(wdev->netdev) : NULL;
++		UCHAR center2 = wifi_dev ? wlan_operate_get_cen_ch_2(wifi_dev) : 0;
++
++		if (!center2) {
++			OS_SEM_UNLOCK(&mac_phy->lock);
++			return -ENODATA;
++		}
++		chandef->center_freq2 = ieee80211_channel_to_frequency(center2, chandef->chan->band);
++	}
+ 
+ 	MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_CHN, DBG_LVL_INFO,
+ 		"chan=0x%p, width=%d, center_freq1=%d, center_freq2=%d, mac_phy->chan=%d\n",

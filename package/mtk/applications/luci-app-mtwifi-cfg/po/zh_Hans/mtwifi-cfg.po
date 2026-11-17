@@ -429,3 +429,12 @@ msgstr "无线频段或信道信息不可用，请刷新后再保存。"
 
 msgid "Invalid wireless band, mode or bandwidth."
 msgstr "无线频段、模式或频宽无效。"
+
+msgid "Secondary 80 MHz channel"
+msgstr "第二段 80 MHz 信道"
+
+msgid "Select secondary channel"
+msgstr "请选择第二段信道"
+
+msgid "Select two permitted, non-adjacent 80 MHz channel segments."
+msgstr "请选择两个合法且互不相邻的 80 MHz 信道段。"

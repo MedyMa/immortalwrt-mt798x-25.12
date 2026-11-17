@@ -14,7 +14,7 @@ MTWIFI_MAX_APCLI_IDX=0
 MTWIFI_CFG_IFNAME_KEY="mtwifi_ifname"
 
 drv_mtwifi_init_device_config() {
-	config_add_int txpower beacon_int
+	config_add_int txpower beacon_int channel2
 	config_add_boolean mu_beamformer dbdc_main whnat vht_1024
 	config_add_string country twt eht_restricted_twt tx_burst doth tx_preamble he_ldpc dfs zw_dfs
 }
