@@ -43,6 +43,7 @@ export function device_capabilities(config) {
 		he_mac_cap: [],
 		eht_phy_cap: [],
 		features: {
+			ap_vlan: false,
 			ftm_responder: false,
 			radar_background: false,
 			cipher_gcmp256: false,
@@ -61,6 +62,7 @@ export function device_capabilities(config) {
 
 	if (!info)
 		return caps;
+	caps.features.ap_vlan = !!info.supported_iftypes?.ap_vlan;
 
 	let band = wiphy_band(info, config.band);
 
@@ -99,6 +101,19 @@ export function he_phy_cap(caps, byte, mask) {
 
 export function he_mac_cap(caps, byte, mask) {
 	return ((caps?.he_mac_cap?.[byte] ?? 0) & mask) != 0;
+};
+
+export function validate_capabilities(data) {
+	let needs_vlan = false;
+	for (let _, iface in data.interfaces ?? {}) {
+		let c = iface.config;
+		needs_vlan ||= +c.dynamic_vlan > 0 || !!c.per_sta_vif ||
+			length(keys(iface.vlans ?? {})) > 0;
+		for (let _, sta in iface.stas ?? {})
+			needs_vlan ||= +sta.config?.vid > 0;
+	}
+	if (needs_vlan && !device_capabilities({ ...data.config, phy: data.phy }).features.ap_vlan)
+		die('AP_VLAN_NOT_SUPPORTED');
 };
 
 export { WLAN_CIPHER_SUITE_GCMP_256 };

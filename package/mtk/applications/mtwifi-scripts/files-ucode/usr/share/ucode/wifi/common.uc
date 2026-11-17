@@ -13,7 +13,13 @@ let network_data = '';
 const nl80211_bands = [ '2g', '5g', '60g', '6g' ];
 
 export function wiphy_info(phy) {
-	let idx = +fs.readfile(`/sys/class/ieee80211/${phy}/index`);
+	let index = trim(fs.readfile(`/sys/class/ieee80211/${phy}/index`) ?? '');
+	let digits = match(index, /^[0-9]+$/);
+	if (!digits || digits[0] != index)
+		return null;
+	let idx = +index;
+	if (idx > 0x7fffffff)
+		return null;
 
 	return nl80211.request(nl80211.const.NL80211_CMD_GET_WIPHY, nl80211.const.NLM_F_DUMP, {
 		wiphy: idx,

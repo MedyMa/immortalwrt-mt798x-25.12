@@ -8,6 +8,7 @@ const NOTIFY_CMD_UP = 0;
 const NOTIFY_CMD_SET_DATA = 1;
 const NOTIFY_CMD_PROCESS_ADD = 2;
 const NOTIFY_CMD_SET_RETRY = 4;
+const NOTIFY_CMD_RESTORE_CONFIG = 5;
 
 const DEFAULT_RETRY = 3;
 const DEFAULT_SCRIPT_TIMEOUT = 30 * 1000;
@@ -83,6 +84,7 @@ function handle_link(dev, data, up)
 
 function wdev_config_init(wdev)
 {
+	delete wdev.runtime_data;
 	let data = wdev.data;
 	let config = data.config;
 	let interfaces = {};
@@ -167,6 +169,8 @@ function wdev_teardown_cb(wdev)
 
 	wdev.handler_data = {};
 	wdev.state = "down";
+	if (wdev.runtime_data)
+		wdev_config_init(wdev);
 
 	if (wdev.delete) {
 		delete_wdev(wdev.data.name);
@@ -528,6 +532,22 @@ function notify(req)
 		else
 			this.retry = DEFAULT_RETRY;
 		return 0;
+	case NOTIFY_CMD_RESTORE_CONFIG:
+		/* A failed MTK rebuild may restore an older interface order and bridge. */
+		if (this.state != "setup" || this.data.config.type != "mtwifi" ||
+		    length(filter(keys(this.handler_data), k => k != this.name)) ||
+		    type(data.config) != "object" ||
+		    type(data.interfaces) != "object" ||
+		    (data.config.devname ?? this.name) != (this.data.config.devname ?? this.name))
+			return ubus.STATUS_INVALID_ARGUMENT;
+		this.handler_config = data;
+		this.runtime_data = { config: data.config, vif: [] };
+		for (let _, iface in data.interfaces)
+			push(this.runtime_data.vif, { ...iface,
+				vlan: map(keys(iface.vlans ?? {}), k => iface.vlans[k]),
+				sta: map(keys(iface.stas ?? {}), k => iface.stas[k]),
+			});
+		return 0;
 	default:
 		return ubus.STATUS_INVALID_ARGUMENT;
 	}
@@ -583,8 +603,9 @@ function get_status_stations(wdev, vif)
 
 function status()
 {
+	let runtime = this.runtime_data ?? this.data;
 	let interfaces = [];
-	for (let vif in this.data.vif) {
+	for (let vif in runtime.vif) {
 		let vlans = get_status_vlans(this, vif);
 		let stations = get_status_stations(this, vif);
 		let data = get_status_data(this, vif);
@@ -597,9 +618,9 @@ function status()
 		up: this.state == "up",
 		pending: this.state == "setup" || this.state == "teardown",
 		autostart: this.autostart,
-		disabled: !!this.data.config.disabled,
+		disabled: !!runtime.config.disabled,
 		retry_setup_failed: !!this.retry_setup_failed,
-		config: this.data.config,
+		config: runtime.config,
 		interfaces
 	};
 }

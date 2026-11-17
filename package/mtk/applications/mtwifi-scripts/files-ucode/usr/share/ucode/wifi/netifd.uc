@@ -8,6 +8,7 @@ const CMD_SET_DATA = 1;
 const CMD_PROCESS_ADD = 2;
 const CMD_PROCESS_KILL_ALL = 3;
 const CMD_SET_RETRY = 4;
+const CMD_RESTORE_CONFIG = 5;
 
 let pending_notifications;
 
@@ -39,6 +40,14 @@ export function notify(command, params, data) {
 
 export function set_up() {
 	notify(CMD_UP);
+};
+
+export function restore_config(payload) {
+	global.ubus.call('network.wireless', 'notify', {
+		command: CMD_RESTORE_CONFIG, device: global.radio, data: payload,
+	});
+	if (global.ubus.error() != null)
+		die('WIRELESS_CONFIG_RESTORE_FAILED');
 };
 
 export function set_data(data) {

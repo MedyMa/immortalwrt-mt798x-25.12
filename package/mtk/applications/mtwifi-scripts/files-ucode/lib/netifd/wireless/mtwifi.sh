@@ -28,6 +28,7 @@ import { find_phy } from 'wifi.utils';
 
 import * as l1dat from 'mtwifi.l1dat';
 import * as cfg from 'mtwifi.cfg';
+import { validate_capabilities } from 'mtwifi.caps';
 import { validate_profile } from 'mtwifi.validate';
 import * as ifname from 'mtwifi.ifname';
 import * as mt_hostapd from 'mtwifi.hostapd';
@@ -38,6 +39,10 @@ global.radio = ARGV[2];
 
 const REINSTALL_LOCK = '/tmp/mtwifi_reloading.lock';
 const IFACE_WPS_FILE = '/var/run/mtwifi-iface-wps';
+const REBUILD_QUEUE = '/var/run/mtwifi-rebuild.json';
+const REBUILD_RESTORE = '/var/run/mtwifi-restore.json';
+const REBUILD_STATUS = '/var/run/mtwifi-rebuild.status';
+const REBUILD_TRANSACTION = '/var/run/mtwifi-rebuild.transaction';
 const KINDS = [ 'device', 'iface', 'vlan', 'station' ];
 const TYPE = { array: 1, string: 3, number: 5, boolean: 7 };
 
@@ -286,27 +291,293 @@ function phy_of_ifname(ifname) {
 };
 
 function resolve_phy(config, dev) {
-	let phy = find_phy(config, true);
-
 	let expected = phy_of_ifname(dev?.main_ifname);
-	if (phy && expected && phy != expected)
-		die('PHY_PROFILE_MISMATCH');
-	if (phy)
-		return phy;
-
-	phy = expected;
-
-	if (!phy) {
-		log(`cannot resolve phy for ${dev?.main_ifname ?? 'unknown'}`);
-		return null;
+	/* PHY numbers can change after unloading; the L1 netdevice remains authoritative. */
+	if (expected) {
+		if (config.path || config.macaddr) {
+			let bound = find_phy({ ...config, phy: expected }, true);
+			if (bound && bound != expected) die('PHY_PROFILE_MISMATCH');
+		}
+		return expected;
 	}
-
+	let phy = find_phy(config, true);
+	if (!phy)
+		log(`cannot resolve phy for ${dev?.main_ifname ?? 'unknown'}`);
 	return phy;
 };
 
 /* ------------------------------------------------------------------ */
 /* setup                                                               */
 /* ------------------------------------------------------------------ */
+
+function read_json(path) {
+	try { return json(readfile(path) ?? 'null'); }
+	catch (e) { return null; }
+};
+
+function rebuild_source() {
+	return sprintf('%J', uci.cursor().get_all('wireless') ?? {});
+};
+
+function spawn_rebuild() {
+	return system('/usr/bin/ucode /lib/netifd/wireless/mtwifi.sh mtwifi rebuild >/dev/null 2>&1 &') == 0;
+};
+
+function queue_rebuild(record) {
+	let source = rebuild_source();
+	let queue = read_json(REBUILD_QUEUE);
+	if (queue?.source != source)
+		queue = { source, radios: {} };
+	queue.radios[record.radio] = record;
+	return atomic_write(REBUILD_QUEUE, sprintf('%J\n', queue)) && spawn_rebuild();
+};
+
+function rebuild_status(phase, error, recovered) {
+	atomic_write(REBUILD_STATUS, sprintf('%J\n', { phase, error, recovered }));
+};
+
+function rebuild_inventory(records) {
+	let config = {};
+	for (let radio, record in records) {
+		config[radio] = { ...record.payload.config, '.type': 'wifi-device', type: 'mtwifi' };
+		for (let index, iface in record.payload.interfaces ?? {})
+			config[iface.name ?? index] = { ...iface.config, '.type': 'wifi-iface', device: radio };
+	}
+	return config;
+};
+
+function rebuild_config_lock() {
+	for (let attempt = 0; attempt < 200; attempt++) {
+		let lock = fs.open('/var/run/mtwifi-config.lock', 'ae', 0600);
+		if (!lock || !lock.lock('x')) die('CONFIG_LOCK_FAILED');
+		let status = global.ubus.call('network.wireless', 'status');
+		let pending = type(status) != 'object';
+		for (let radio, config in uci.cursor().get_all('wireless') ?? {})
+			if (config['.type'] == 'wifi-device' && config.type == 'mtwifi')
+				pending ||= !!status?.[radio]?.pending;
+		if (!pending) return lock;
+		lock.close();
+		sleep(0.1);
+	}
+	die('WIRELESS_BUSY');
+};
+
+function rebuild_devices(ctx, up, wait) {
+	for (let name in up ? keys(ctx.want_up) : ctx.devices) {
+		global.ubus.call('network.wireless', up ? 'up' : 'down', { device: name });
+		if (global.ubus.error() != null)
+			die('WIRELESS_CONTROL_FAILED');
+	}
+	if (wait === false) return;
+	for (let attempt = 0; attempt < (up ? 180 : 200); attempt++) {
+		let status = global.ubus.call('network.wireless', 'status');
+		if (type(status) != 'object')
+			die('WIRELESS_STATUS_UNAVAILABLE');
+		let ready = true;
+		for (let name in up ? keys(ctx.want_up) : ctx.devices) {
+			let device = status[name];
+			ready &&= !!device && !device.pending && (up ? !!device.up : !device.up);
+		}
+		if (ready) return;
+		sleep(up ? 0.5 : 0.1);
+	}
+	die(up ? 'WIRELESS_START_TIMEOUT' : 'WIRELESS_STOP_TIMEOUT');
+};
+
+function reload_vendor_module(ctx) {
+	for (let name in keys(l1dat.load_cached()?.[l1dat.IF_RINDEX] ?? {}))
+		if (exists(`/sys/class/net/${name}`) &&
+		    system(`ip link set dev ${shell_quote(name)} down`))
+			die('WIRELESS_LINK_STOP_FAILED');
+	if (exists('/sys/module/mt_wifi')) {
+		if (length(fs.glob('/sys/module/mt_wifi/holders/*')) || system('/sbin/rmmod mt_wifi'))
+			die('WIRELESS_DRIVER_BUSY');
+	}
+	ctx.module_changed = true;
+	if (system('/sbin/modprobe mt_wifi'))
+		die('WIRELESS_DRIVER_START_FAILED');
+};
+
+function with_config_lock(callback, idle) {
+	let lock = idle ? rebuild_config_lock() : fs.open('/var/run/mtwifi-config.lock', 'ae', 0600);
+	if (!lock || (!idle && !lock.lock('x'))) die('CONFIG_LOCK_FAILED');
+	let result;
+	try { result = callback(); }
+	catch (e) { lock.close(); die(e); }
+	lock.close();
+	return result;
+};
+
+function restore_rebuild(ctx) {
+	try {
+		rebuild_devices(ctx, false);
+		with_config_lock(() => {
+			for (let file in ctx.files)
+				if (!atomic_write(file.path, file.previous)) die('PROFILE_RESTORE_FAILED');
+			if (ctx.module_changed) reload_vendor_module(ctx);
+			if (!atomic_write(REBUILD_RESTORE, sprintf('%J\n', {
+				source: rebuild_source(), radios: ctx.records,
+				config: rebuild_inventory(ctx.records),
+				want_up: ctx.want_up,
+			}))) die('REBUILD_METADATA_FAILED');
+			for (let path in ctx.markers) fs.unlink(path);
+			rebuild_status('recovering');
+			fs.unlink(REINSTALL_LOCK);
+		});
+		rebuild_devices(ctx, true);
+		return true;
+	} catch (e) { log(`wireless rebuild recovery failed: ${e}`); return false; }
+};
+
+function rebuild_run() {
+	let ctx = read_json(REBUILD_TRANSACTION);
+	if (exists(REBUILD_TRANSACTION) &&
+	    (type(ctx) != 'object' || type(ctx.files) != 'array' || type(ctx.records) != 'object')) {
+		rebuild_status('failed', 'REBUILD_STATE_INVALID', false);
+		return 1;
+	}
+	let queued;
+	let queue;
+	try {
+		if (ctx) {
+			let recovered = restore_rebuild(ctx);
+			rebuild_status('failed', 'INTERRUPTED_REBUILD', recovered);
+			if (recovered) fs.unlink(REBUILD_TRANSACTION);
+			return recovered ? 0 : 1;
+		}
+		sleep(0.2);
+		queue = read_json(REBUILD_QUEUE);
+		if (!queue) return 0;
+		let ready = with_config_lock(() => {
+			queued = readfile(REBUILD_QUEUE);
+			queue = queued ? json(queued) : null;
+			if (!queue) return false;
+			if (queue.source != rebuild_source()) {
+				fs.unlink(REBUILD_QUEUE);
+				die('WIRELESS_CONFIG_CHANGED');
+			}
+			ctx = { devices: [], want_up: {}, records: {}, markers: [], files: [], module_changed: false };
+			let status = global.ubus.call('network.wireless', 'status');
+			if (type(status) != 'object') die('WIRELESS_STATUS_UNAVAILABLE');
+			for (let radio, config in uci.cursor().get_all('wireless') ?? {}) {
+				if (config['.type'] != 'wifi-device' || config.type != 'mtwifi') continue;
+				push(ctx.devices, radio);
+				let path = `/var/run/mtwifi-${config.devname ?? radio}.configured`;
+				push(ctx.markers, path);
+				let record = read_json(path);
+				if (record?.payload && record?.profile) ctx.records[radio] = record;
+				if (status[radio]?.up || status[radio]?.pending || queue.radios[radio]) {
+					ctx.want_up[radio] = true;
+					if (!ctx.records[radio]) die('NO_REBUILD_SNAPSHOT');
+				}
+			}
+			if (!length(ctx.devices) || !length(keys(ctx.want_up))) die('NO_REBUILD_SNAPSHOT');
+			let profiles = {};
+			for (let devname in l1dat.list(l1dat.load_cached())) {
+				let path = l1dat.load_cached()[l1dat.DEV_RINDEX][devname].profile_path;
+				if (!path || profiles[path]) continue;
+				let previous = readfile(path);
+				if (previous == null) die('PROFILE_GENERATION_FAILED');
+				profiles[path] = true;
+				push(ctx.files, { path, previous });
+			}
+			if (!atomic_write(REBUILD_TRANSACTION, sprintf('%J\n', ctx)) ||
+			    !atomic_write(REINSTALL_LOCK, '1')) die('REBUILD_METADATA_FAILED');
+			ctx.active = true;
+			return true;
+		}, true);
+		if (!ready) return 0;
+		rebuild_status('stopping');
+		rebuild_devices(ctx, false);
+		with_config_lock(() => {
+			if (queue.source != rebuild_source()) die('WIRELESS_CONFIG_CHANGED');
+			fs.unlink(REINSTALL_LOCK);
+			for (let _, record in queue.radios) {
+				let plan = cfg.prepare_dat(record.devname, record.profile);
+				if (!plan.ok || !cfg.commit_dat(plan)) die('PROFILE_WRITE_FAILED');
+			}
+			if (!atomic_write(REINSTALL_LOCK, '1')) die('REBUILD_METADATA_FAILED');
+			rebuild_status('reloading');
+			/* Persist the recovery requirement before entering module teardown. */
+			if (!atomic_write(REBUILD_TRANSACTION, sprintf('%J\n', { ...ctx, module_changed: true })))
+				die('REBUILD_METADATA_FAILED');
+			reload_vendor_module(ctx);
+			if (queue.source != rebuild_source()) die('WIRELESS_CONFIG_CHANGED');
+			for (let path in ctx.markers) fs.unlink(path);
+			fs.unlink(REBUILD_RESTORE);
+			fs.unlink(REBUILD_QUEUE);
+			rebuild_status('starting');
+			fs.unlink(REINSTALL_LOCK);
+		});
+		rebuild_devices(ctx, true);
+		if (queue.source != rebuild_source()) die('WIRELESS_CONFIG_CHANGED');
+		fs.unlink(REBUILD_TRANSACTION);
+		rebuild_status('ready');
+		return 0;
+	} catch (e) {
+		let error = e.message ?? '' + e;
+		with_config_lock(() => {
+			if (queued != null && readfile(REBUILD_QUEUE) == queued)
+				fs.unlink(REBUILD_QUEUE);
+		});
+		let recovered = ctx?.active ? restore_rebuild(ctx) : true;
+		if (recovered) fs.unlink(REBUILD_TRANSACTION);
+		rebuild_status('failed', error, recovered);
+		return 1;
+	}
+};
+
+function prepare_retry() {
+	if (exists(REBUILD_TRANSACTION) && rebuild_run())
+		die('WIRELESS_CONFIG_RESTORE_FAILED');
+	let restored = read_json(REBUILD_RESTORE);
+	let status = global.ubus.call('network.wireless', 'status');
+	if (type(status) != 'object') die('WIRELESS_STATUS_UNAVAILABLE');
+	let ctx = { devices: [], want_up: {} };
+	for (let radio, config in uci.cursor().get_all('wireless') ?? {}) {
+		if (config['.type'] != 'wifi-device' || config.type != 'mtwifi') continue;
+		push(ctx.devices, radio);
+		if (!+config.disabled && (restored?.want_up?.[radio] || status[radio]?.autostart ||
+		    status[radio]?.up || status[radio]?.pending))
+			ctx.want_up[radio] = true;
+	}
+	rebuild_devices(ctx, false);
+	with_config_lock(() => {
+		fs.unlink(REBUILD_RESTORE);
+		fs.unlink(REBUILD_QUEUE);
+		fs.unlink(REBUILD_STATUS);
+	});
+	return ctx;
+};
+
+function rebuild(retry) {
+	let owner = fs.open('/var/run/mtwifi-rebuild.lock', 'ae', 0600);
+	if (!owner) {
+		rebuild_status('failed', 'REBUILD_METADATA_FAILED', false);
+		return 1;
+	}
+	if (!owner.lock('xn')) { owner.close(); return 0; }
+	let result = 0;
+	let restart;
+	try {
+		if (retry) restart = prepare_retry();
+		else result = rebuild_run();
+	} catch (e) {
+		log(`wireless rebuild failed: ${e}`);
+		rebuild_status('failed', e.message ?? '' + e, false);
+		result = 1;
+	}
+	fs.unlink(REINSTALL_LOCK);
+	owner.close();
+	if (restart) {
+		try { rebuild_devices(restart, true, false); }
+		catch (e) {
+			rebuild_status('failed', 'WIRELESS_CONTROL_FAILED', false);
+			result = 1;
+		}
+	}
+	return result;
+};
 
 let setup_transaction;
 
@@ -346,6 +617,26 @@ function setup() {
 		netifd.set_retry(false);
 		return 1;
 	}
+	if (exists(REBUILD_TRANSACTION)) {
+		let status = read_json(REBUILD_STATUS);
+		if (exists(REINSTALL_LOCK) || !(status?.phase in [ 'starting', 'recovering' ])) {
+			let probe = fs.open('/var/run/mtwifi-rebuild.lock', 'ae', 0600);
+			if (probe?.lock('xn')) {
+				probe.close();
+				if (status?.phase != 'failed') spawn_rebuild();
+			}
+			netifd.setup_failed(status?.phase == 'failed' ? 'DRIVER_REBUILD_FAILED' : 'DRIVER_REBUILD_PENDING');
+			return 1;
+		}
+	}
+	let restored = read_json(REBUILD_RESTORE);
+	if (restored?.source == rebuild_source() && restored.radios?.[ARGV[2]]?.payload)
+		payload = json(sprintf('%J', restored.radios[ARGV[2]].payload));
+	else {
+		restored = null;
+		fs.unlink(REBUILD_RESTORE);
+	}
+	let original = json(sprintf('%J', payload));
 
 	let l1 = l1dat.load_cached();
 
@@ -363,6 +654,22 @@ function setup() {
 		netifd.setup_failed('UNKNOWN_DEVICE');
 		return 1;
 	}
+	if (!length(keys(payload.interfaces ?? {}))) {
+		let phy = phy_of_ifname(dev.main_ifname) ?? payload.data?.phy;
+		mt_supplicant.teardown(dev.apcli_ifname);
+		if (phy) mt_hostapd.teardown(phy, payload.config?.radio);
+		if (restored) netifd.restore_config(original);
+		if (!ifname.remove_wps_map(dev, IFACE_WPS_FILE) ||
+		    !atomic_write(`/var/run/mtwifi-${devname}.configured`, sprintf('%J\n', {
+			    radio: ARGV[2], devname, payload: original, profile: payload,
+		    }))) {
+			netifd.setup_failed('METADATA_WRITE_FAILED');
+			return 1;
+		}
+		netifd.set_data({ phy, devname, radio: payload.config?.radio });
+		netifd.set_up();
+		return 0;
+	}
 
 	/* Validate before creating files, changing interfaces or sending commands. */
 	let country = payload.config?.country;
@@ -370,7 +677,7 @@ function setup() {
 	validate_device(payload.config);
 	payload.config.country ??= country;
 	ifname.assign(payload, dev);
-	validate_profile(payload);
+	validate_profile(payload, restored?.config);
 	validate_ifaces(payload);
 
 	/* 5. phy / 后缀 */
@@ -387,8 +694,10 @@ function setup() {
 	let has_sta = ifname.has_mode(payload, 'sta');
 
 	payload.phy = phy;
+	payload.config.phy = phy;
 	payload.phy_suffix = suffix;
 	payload.vif_phy_suffix = suffix;
+	validate_capabilities(payload);
 
 	/* MTK APCLI uses the AP's configured channel; do not silently strand an AP. */
 	payload.ap_start_disabled = false;
@@ -410,6 +719,8 @@ function setup() {
 		print('SUPPLICANT_UNAVAILABLE\n');
 		return 1;
 	}
+	let record = { radio: ARGV[2], devname, payload: original,
+		profile: json(sprintf('%J', payload)) };
 	let dat_plan = cfg.prepare_dat(devname, payload);
 	if (!dat_plan.ok) {
 		netifd.setup_failed('PROFILE_GENERATION_FAILED');
@@ -417,8 +728,13 @@ function setup() {
 	}
 	let marker = `/var/run/mtwifi-${devname}.configured`;
 	if (dat_plan.reinstall && exists(marker)) {
-		log('structural profile change requires a device restart; keeping the previous profile');
-		netifd.setup_failed('DRIVER_RESTART_REQUIRED');
+		let previous = read_json(marker);
+		if (!previous?.payload || !previous?.profile || restored ||
+		    !exists('/sys/module/mt_wifi/refcnt')) {
+			netifd.setup_failed('DRIVER_RESTART_REQUIRED');
+			return 1;
+		}
+		netifd.setup_failed(queue_rebuild(record) ? 'DRIVER_REBUILD_PENDING' : 'DRIVER_REBUILD_FAILED');
 		return 1;
 	}
 	let ap_plan = has_ap ? mt_hostapd.prepare(payload) : null;
@@ -437,6 +753,7 @@ function setup() {
 			path, previous: readfile(path), previous_owner: fs.stat(path),
 		})), committed: [] },
 	};
+	if (restored) netifd.restore_config(original);
 	if (!cfg.commit_dat(dat_plan))
 		return fail_setup('PROFILE_WRITE_FAILED');
 	if (ap_plan && !mt_hostapd.activate(ap_plan))
@@ -448,7 +765,8 @@ function setup() {
 	for (let k in vif_keys(payload))
 		netifd.set_vif(k, payload.interfaces[k].config.ifname);
 	setup_transaction.metadata.committed = setup_transaction.metadata.files;
-	if (!ifname.write_wps_map(payload, dev, IFACE_WPS_FILE) || !atomic_write(marker, '1'))
+	if (!ifname.write_wps_map(payload, dev, IFACE_WPS_FILE) ||
+	    !atomic_write(marker, sprintf('%J\n', record)))
 		return fail_setup('METADATA_WRITE_FAILED');
 	netifd.set_data({ phy, radio: payload.config.radio, devname, suffix });
 	netifd.set_up();
@@ -503,12 +821,14 @@ try {
 	case 'dump': ret = dump_options(); break;
 	case 'setup': ret = setup(); break;
 	case 'teardown': ret = teardown(); break;
+	case 'rebuild': ret = rebuild(); break;
+	case 'retry': ret = rebuild(true); break;
 	}
 } catch (e) {
 	log(`wireless operation failed: ${e}`);
 	if (ARGV[1] == 'setup') {
 		try { rollback_setup(); } catch (re) { log(`rollback failed: ${re}`); }
-		netifd.setup_failed('INVALID_CONFIG');
+		netifd.setup_failed(e.message == 'AP_VLAN_NOT_SUPPORTED' ? e.message : 'INVALID_CONFIG');
 	}
 }
 if (config_lock) config_lock.close();

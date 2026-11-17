@@ -19,6 +19,8 @@
 
 import * as l1dat from 'mtwifi.l1dat';
 import * as uci from 'uci';
+import * as fs from 'fs';
+import { device_capabilities } from 'mtwifi.caps';
 
 const L1_DAT_PATH = l1dat.L1_DAT_PATH;
 
@@ -30,7 +32,7 @@ if (!l1dat_devs) {
 }
 
 function usage() {
-	printf(`Usage: l1util list | dump | get <dev> <prop> | idx2if <idx> | if2zone <ifname> | if2dat <ifname> | zone2if <zone> | if2dbdcidx <ifname>\n`);
+	printf(`Usage: l1util list | whnat | capabilities | dump | get <dev> <prop> | idx2if <idx> | if2zone <ifname> | if2dat <ifname> | zone2if <zone> | if2dbdcidx <ifname>\n`);
 };
 
 function show_devs() {
@@ -50,6 +52,21 @@ function get_dev_prop(dev, prop) {
 
 const action = {
 	list: () => show_devs(),
+	capabilities: () => {
+		let radios = {};
+		for (let name, config in uci.cursor().get_all('wireless') ?? {}) {
+			if (config['.type'] != 'wifi-device' || config.type != 'mtwifi')
+				continue;
+			let dev = l1dat_devs[l1dat.DEV_RINDEX][config.devname ?? name];
+			let link = dev ? fs.readlink(`/sys/class/net/${dev.main_ifname}/phy80211`) : null;
+			let phy = link ? fs.basename(link) : config.phy;
+			radios[name] = device_capabilities({ ...config, phy }).features;
+		}
+		let state;
+		try { state = json(fs.readfile('/var/run/mtwifi-rebuild.status') ?? '{}'); }
+		catch (e) { state = {}; }
+		printf('%J\n', { radios, rebuild: state });
+	},
 	whnat: () => {
 		let owners = {};
 		let sections = uci.cursor().get_all('wireless') ?? {};

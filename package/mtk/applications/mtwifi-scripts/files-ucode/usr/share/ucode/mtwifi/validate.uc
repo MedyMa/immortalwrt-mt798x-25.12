@@ -11,8 +11,8 @@ function limits(config, ranges) {
 	}
 };
 
-function validate_mlo(data) {
-	let config = uci.cursor().get_all('wireless') ?? {};
+function validate_mlo(data, previous) {
+	let config = previous ?? uci.cursor().get_all('wireless') ?? {};
 	let affected = {};
 	for (let index, iface in data.interfaces ?? {}) {
 		let name = iface.name ?? index;
@@ -104,7 +104,7 @@ function feature_defaults(data) {
 	}
 };
 
-export function validate_profile(data) {
+export function validate_profile(data, previous) {
 	check_text(data);
 	let config = data.config;
 	limits(config, { twt: [0, 3], tx_preamble: [0, 2], txpower: [1, 100],
@@ -193,5 +193,5 @@ export function validate_profile(data) {
 	}
 	if (ap_count > 16 || sta_count > 1 || ap_count + sta_count == 0)
 		die('INVALID_VIF_COUNT');
-	validate_mlo(data);
+	validate_mlo(data, previous);
 };
