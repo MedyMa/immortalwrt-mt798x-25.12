@@ -120,6 +120,12 @@ u64 mt_ktime_get_boottime_ns(void)
 }
 EXPORT_SYMBOL(mt_ktime_get_boottime_ns);
 
+void mt_ktime_get_real_ts64(struct timespec64 *ts)
+{
+	ktime_get_real_ts64(ts);
+}
+EXPORT_SYMBOL(mt_ktime_get_real_ts64);
+
 #ifdef RT_CFG80211_SUPPORT
 int mt_cfg80211_vendor_cmd_reply(struct sk_buff *skb)
 {
@@ -224,7 +230,8 @@ EXPORT_SYMBOL(mt_devm_kzalloc);
 
 int mt_init_dummy_netdev(struct net_device *dev)
 {
-	return init_dummy_netdev(dev);
+	init_dummy_netdev(dev);
+	return 0;
 }
 EXPORT_SYMBOL(mt_init_dummy_netdev);
 
