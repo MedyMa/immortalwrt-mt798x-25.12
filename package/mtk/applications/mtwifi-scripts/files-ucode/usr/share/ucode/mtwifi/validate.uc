@@ -17,7 +17,9 @@ export function normalize_legacy_device(config, dev) {
 	if (!defaults[config.band]) return;
 	if (config.htmode == null || config.htmode == '' || (legacy && config.htmode == 'NOHT'))
 		config.htmode = defaults[config.band].htmode;
-	if (config.channel == null || config.channel == '')
+	if (config.channel === 0 || config.channel === '0')
+		config.channel = 'auto';
+	else if (config.channel == null || config.channel === '')
 		config.channel = defaults[config.band].channel;
 };
 
@@ -132,17 +134,25 @@ export function validate_profile(data, previous) {
 	let bw = match(config.htmode ?? '', /^(HT|VHT|HE|EHT)(20|40|80|160|320)([+-]|-[12])?$/);
 	if ((!bw && config.htmode != 'NOHT') ||
 	    (config.htmode == 'NOHT' && config.band == '6g') ||
+	    (bw?.[1] == 'VHT' && config.band != '5g') ||
+	    (bw?.[1] == 'HT' && +bw?.[2] > 40) ||
+	    (bw?.[3] && !(+bw[2] == 40 && bw[3] in [ '+', '-' ]) &&
+	        !(bw[1] == 'EHT' && +bw[2] == 320 && bw[3] in [ '-1', '-2' ])) ||
 	    (config.band == '2g' && +bw?.[2] > 40) ||
 	    (config.band != '6g' && +bw?.[2] > 160) ||
 	    (config.band == '6g' && !(bw?.[1] in [ 'HE', 'EHT' ])) ||
 	    (+bw?.[2] == 320 && bw?.[1] != 'EHT'))
 		die('INVALID_BANDWIDTH');
+	let required = { n: 1, ac: 2, ax: 3, be: 4 }[config.require_mode];
+	let selected = { HT: 1, VHT: 2, HE: 3, EHT: 4 }[bw?.[1]] ?? 0;
+	if (required != null && (required > selected || (config.require_mode == 'ac' && config.band != '5g')))
+		die('INVALID_REQUIRED_MODE');
 	let country = config.country_code ?? config.country;
 	if (country != null && !match(country, /^([A-Z]{2}|00)$/))
 		die('INVALID_COUNTRY');
 	let channel = config.channel;
 	if (channel != null && channel != 'auto' &&
-	    (!match('' + channel, /^[0-9]+$/) || +channel > 233))
+	    (!match('' + channel, /^[0-9]+$/) || +channel > { '2g': 14, '5g': 196, '6g': 233 }[config.band]))
 		die('INVALID_CHANNEL');
 	feature_defaults(data);
 	let ap_count = 0;

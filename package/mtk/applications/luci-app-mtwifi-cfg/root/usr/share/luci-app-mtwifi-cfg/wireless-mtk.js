@@ -1296,16 +1296,16 @@ function getMtkFallbackWifiHtModes(band) {
 	case '5g':
 		add(
 			'HT20', 'HT40',
-			'VHT20', 'VHT40', 'VHT80', 'VHT80_80', 'VHT160',
-			'HE20', 'HE40', 'HE80', 'HE80_80', 'HE160',
-			'EHT20', 'EHT40', 'EHT80', 'EHT80_80', 'EHT160'
+			'VHT20', 'VHT40', 'VHT80', 'VHT160',
+			'HE20', 'HE40', 'HE80', 'HE160',
+			'EHT20', 'EHT40', 'EHT80', 'EHT160'
 		);
 		break;
 
 	case '6g':
 		add(
-			'HE20', 'HE40', 'HE80', 'HE80_80', 'HE160',
-			'EHT20', 'EHT40', 'EHT80', 'EHT80_80', 'EHT160', 'EHT320'
+			'HE20', 'HE40', 'HE80', 'HE160',
+			'EHT20', 'EHT40', 'EHT80', 'EHT160', 'EHT320'
 		);
 		break;
 	}
@@ -1342,6 +1342,24 @@ function add_dep_eht_radio_feature(o) {
 	});
 }
 
+function validate_mtwifi_frequency(section_id, value) {
+	if (uci.get('wireless', section_id, 'type') != 'mtwifi')
+		return true;
+	if (!Array.isArray(value) || !value[0] || ['2g', '5g', '6g'].indexOf(value[1]) < 0 ||
+	    !(value[2] == 'auto' || /^[1-9][0-9]*$/.test(String(value[2] || ''))))
+		return _('Wireless band or channel information is unavailable. Refresh before saving.');
+	var band = value[1], mode = String(value[0]).match(/^(HT|VHT|HE|EHT)(20|40|80|160|320)([+-]|-[12])?$/);
+	var valid = value[0] == 'NOHT' ? band != '6g' : mode &&
+		!(mode[1] == 'VHT' && band != '5g') && !(mode[1] == 'HT' && +mode[2] > 40) &&
+		!(band == '2g' && +mode[2] > 40) && !(band != '6g' && +mode[2] > 160) &&
+		!(band == '6g' && ['HE', 'EHT'].indexOf(mode[1]) < 0) &&
+		!(+mode[2] == 320 && mode[1] != 'EHT') &&
+		(!mode[3] || (+mode[2] == 40 && ['+', '-'].indexOf(mode[3]) >= 0));
+	if (!valid || (value[2] != 'auto' && +value[2] > (band == '2g' ? 14 : band == '5g' ? 196 : 233)))
+		return _('Invalid wireless band, mode or bandwidth.');
+	return true;
+}
+
 var CBIWifiFrequencyValue = form.Value.extend({
 	callFrequencyList: rpc.declare({
 		object: 'iwinfo',
@@ -1351,6 +1369,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 	}),
 
 	load: function(section_id) {
+		this.mtwifi = uci.get('wireless', section_id, 'type') == 'mtwifi';
 		return Promise.all([
 			network.getWifiDevice(section_id),
 			this.callFrequencyList(section_id)
@@ -1383,6 +1402,13 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				);
 			}
 
+			var hasBand = {};
+			Object.keys(this.channels).forEach(function(band) {
+				hasBand[band] = this.mtwifi ? this.channels[band].some(function(value, index) {
+					return index % 3 == 0 && value != 'auto';
+				}) : this.channels[band].length > (band == '60g' ? 0 : 3);
+			}, this);
+
 			var hwmodelist = L.toArray(data[0] ? data[0].getHWModes() : null)
 				.reduce(function(o, v) { o[v] = true; return o }, {});
 
@@ -1390,9 +1416,9 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				.reduce(function(o, v) { o[v] = true; return o }, {});
 
 			var deviceBand = uci.get('wireless', section_id, 'band') ||
-				(this.channels['6g'].length > 3 ? '6g' :
-					this.channels['5g'].length > 3 ? '5g' :
-					this.channels['2g'].length > 3 ? '2g' :
+				(hasBand['6g'] ? '6g' :
+					hasBand['5g'] ? '5g' :
+					hasBand['2g'] ? '2g' :
 					this.channels['60g'].length > 0 ? '60g' : null) ||
 				/* EHT320 is exclusive to 6 GHz; derive band from htmode when
 				 * UCI band option is absent and the channel list is empty
@@ -1405,9 +1431,9 @@ var CBIWifiFrequencyValue = form.Value.extend({
 			}
 
 			this.modes = [
-				'', 'Legacy', hwmodelist.a || hwmodelist.b || hwmodelist.g,
-				'n', 'N', hwmodelist.n,
-				'ac', 'AC', hwmodelist.ac,
+				'', 'Legacy', (hwmodelist.a || hwmodelist.b || hwmodelist.g) && (!this.mtwifi || hasBand['2g'] || hasBand['5g']),
+				'n', 'N', hwmodelist.n && (!this.mtwifi || hasBand['2g'] || hasBand['5g']),
+				'ac', 'AC', hwmodelist.ac && (!this.mtwifi || hasBand['5g']),
 				'ax', 'AX', hwmodelist.ax,
 				'be', 'BE', hwmodelist.be
 			];
@@ -1421,14 +1447,12 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				'ac': [
 					'VHT160', '160 MHz', htmodelist.VHT160,
 					'VHT80', '80 MHz', htmodelist.VHT80,
-					'VHT80_80', '80+80 MHz', htmodelist.VHT80_80,
 					'VHT40', '40 MHz', htmodelist.VHT40,
 					'VHT20', '20 MHz', htmodelist.VHT20
 				],
 				'ax': [
 					'HE160', '160 MHz', htmodelist.HE160,
 					'HE80', '80 MHz', htmodelist.HE80,
-					'HE80_80', '80+80 MHz', htmodelist.HE80_80,
 					'HE40', '40 MHz', htmodelist.HE40,
 					'HE20', '20 MHz', htmodelist.HE20
 				],
@@ -1436,34 +1460,39 @@ var CBIWifiFrequencyValue = form.Value.extend({
 					'EHT320', '320 MHz', htmodelist.EHT320,
 					'EHT160', '160 MHz', htmodelist.EHT160,
 					'EHT80', '80 MHz',  htmodelist.EHT80,
-					'EHT80_80', '80+80 MHz', htmodelist.EHT80_80,
 					'EHT40', '40 MHz',  htmodelist.EHT40,
 					'EHT20', '20 MHz',  htmodelist.EHT20
 				]
 			};
 
+			var configured = String(uci.get('wireless', section_id, 'htmode') || '').match(/^(HT|VHT|HE|EHT)40[+-]$/);
+			if (this.mtwifi && configured && htmodelist[configured[1] + '40']) {
+				var key = { HT: 'n', VHT: 'ac', HE: 'ax', EHT: 'be' }[configured[1]];
+				this.htmodes[key].push(configured[0], '40 MHz (' + configured[0].slice(-1) + ')', true);
+			}
+
 			this.bands = {
 				'': [
-					'2g', '2.4 GHz', this.channels['2g'].length > 3,
-					'5g', '5 GHz', this.channels['5g'].length > 3,
+					'2g', '2.4 GHz', hasBand['2g'],
+					'5g', '5 GHz', hasBand['5g'],
 					'60g', '60 GHz', this.channels['60g'].length > 0
 				],
 				'n': [
-					'2g', '2.4 GHz', this.channels['2g'].length > 3,
-					'5g', '5 GHz', this.channels['5g'].length > 3
+					'2g', '2.4 GHz', hasBand['2g'],
+					'5g', '5 GHz', hasBand['5g']
 				],
 				'ac': [
-					'5g', '5 GHz', true
+					'5g', '5 GHz', hasBand['5g']
 				],
 				'ax': [
-					'2g', '2.4 GHz', this.channels['2g'].length > 3,
-					'5g', '5 GHz', this.channels['5g'].length > 3,
-					'6g', '6 GHz', this.channels['6g'].length > 3
+					'2g', '2.4 GHz', hasBand['2g'],
+					'5g', '5 GHz', hasBand['5g'],
+					'6g', '6 GHz', hasBand['6g']
 				],
 				'be': [
-					'2g', '2.4 GHz', this.channels['2g'].length > 3,
-					'5g', '5 GHz', this.channels['5g'].length > 3,
-					'6g', '6 GHz', this.channels['6g'].length > 3
+					'2g', '2.4 GHz', hasBand['2g'],
+					'5g', '5 GHz', hasBand['5g'],
+					'6g', '6 GHz', hasBand['6g']
 				]
 			};
 		}, this));
@@ -1488,6 +1517,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 	},
 
 	toggleWifiMode: function(elem) {
+		if (this.mtwifi) return this.toggleWifiBand(elem);
 		this.toggleWifiHTMode(elem);
 		this.toggleWifiBand(elem);
 	},
@@ -1496,7 +1526,20 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		var mode = elem.querySelector('.mode');
 		var bwdt = elem.querySelector('.htmode');
 
-		this.setValues(bwdt, this.htmodes[mode.value]);
+		var values = this.htmodes[mode.value], previous = bwdt.value;
+		if (this.mtwifi) {
+			var band = elem.querySelector('.band').value, filtered = [];
+			var maximum = band == '2g' ? 40 : band == '5g' ? 160 : band == '6g' ? 320 : 0;
+			for (var i = 0; values && i < values.length; i += 3) {
+				var width = +(String(values[i]).match(/[0-9]+/) || [20])[0];
+				if (width <= maximum && (width != 320 || (band == '6g' && mode.value == 'be')))
+					filtered.push(values[i], values[i+1], values[i+2]);
+			}
+			values = filtered;
+		}
+		this.setValues(bwdt, values);
+		if (this.mtwifi && bwdt.options && Array.prototype.some.call(bwdt.options, function(option) { return option.value == previous; }))
+			bwdt.value = previous;
 	},
 
 	toggleWifiBand: function(elem) {
@@ -1504,6 +1547,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		var band = elem.querySelector('.band');
 
 		this.setValues(band, this.bands[mode.value]);
+		if (this.mtwifi) this.toggleWifiHTMode(elem);
 		this.toggleWifiChannel(elem);
 
 		this.map.checkDepends();
@@ -1541,7 +1585,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 
 		this.toggleWifiMode(elem);
 
-		if (hwval != null) {
+		if (hwval != null && !(this.mtwifi && bandval)) {
 			this.useBandOption = false;
 
 			band.value = /a/.test(hwval) ? '5g': '2g';
@@ -1555,7 +1599,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		this.toggleWifiBand(elem);
 
 		bwdt.value = htval;
-		chan.value = chval || (chan.options[0] ? chan.options[0].value : 'auto');
+		chan.value = chval == '0' ? 'auto' : (chval || (chan.options[0] ? chan.options[0].value : 'auto'));
 
 		return elem;
 	},
@@ -1617,14 +1661,23 @@ var CBIWifiFrequencyValue = form.Value.extend({
 	formvalue: function(section_id) {
 		var node = this.map.findElement('data-field', this.cbid(section_id));
 
-		return [
-		    node.querySelector('.htmode').value,
-		    node.querySelector('.band').value,
- 			node.querySelector('.channel').value
-		];
+		var mode = node.querySelector('.mode'), width = node.querySelector('.htmode').value;
+		if (this.mtwifi && mode.selectedIndex >= 0 && mode.value == '') width = 'NOHT';
+		return [width, node.querySelector('.band').value, node.querySelector('.channel').value];
 	},
 
+	validate: validate_mtwifi_frequency,
+
 	write: function(section_id, value) {
+		if (uci.get('wireless', section_id, 'type') == 'mtwifi') {
+			var valid = validate_mtwifi_frequency(section_id, value);
+			if (valid !== true) throw new Error(valid);
+			uci.set('wireless', section_id, 'htmode', value[0]);
+			uci.set('wireless', section_id, 'band', value[1]);
+			uci.set('wireless', section_id, 'channel', value[2]);
+			uci.unset('wireless', section_id, 'hwmode');
+			return;
+		}
 		if (value[0] && value[1] && value[2])
 		{
 			uci.set('wireless', section_id, 'htmode', value[0]);

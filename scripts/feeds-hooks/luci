@@ -24,6 +24,7 @@ wireless_patches=(
     "$source_root/patches/feeds/luci/1022-luci-mtwifi-feature-defaults.patch"
     "$source_root/patches/feeds/luci/1023-luci-mtwifi-runtime-capabilities.patch"
     "$source_root/patches/feeds/luci/1024-luci-mtwifi-preserve-unavailable-frequency.patch"
+    "$source_root/patches/feeds/luci/1025-luci-mtwifi-frequency-options.patch"
 )
 apply_wireless_patch() {
     local wireless_patch=$1

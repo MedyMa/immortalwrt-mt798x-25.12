@@ -305,6 +305,8 @@ function device_eht320(config) {
 
 function device_htmode_append(config, caps) {
 	let htmode = config.htmode ?? 'NOHT';
+	let extension = match(htmode, /^(HT|VHT|HE|EHT)40([+-])$/);
+	if (extension) htmode = extension[1] + '40';
 
 	config.channel_offset = (config.band == '6g') ? 1 : 0;
 
@@ -315,24 +317,18 @@ function device_htmode_append(config, caps) {
 			config.ieee80211n = 1;
 			config.ht_capab = '';
 		}
-		if (htmode in [ 'HT40', 'HT40+', 'HT40-', 'VHT40', 'VHT80', 'VHT160',
+		if (htmode in [ 'HT40', 'VHT40', 'VHT80', 'VHT160',
 				'HE40', 'HE80', 'HE160', 'EHT40', 'EHT80', 'EHT160' ]) {
 			config.ieee80211n = 1;
-			if (!config.channel) {
+			if (extension) {
+				config.ht_capab = '[HT40' + extension[2] + ']';
+			} else if (!config.channel) {
 				config.ht_capab = '[HT40+]';
 			} else if (config.hw_mode == 'a') {
 				config.ht_capab = ((int(config.channel / 4) + config.channel_offset) % 2)
 					? '[HT40+]' : '[HT40-]';
 			} else {
-				switch (htmode) {
-				case 'HT40+':
-				case 'HT40-':
-					config.ht_capab = '[' + htmode + ']';
-					break;
-				default:
-					config.ht_capab = (config.channel < 7) ? '[HT40+]' : '[HT40-]';
-					break;
-				}
+				config.ht_capab = (config.channel < 7) ? '[HT40+]' : '[HT40-]';
 			}
 		}
 
@@ -386,7 +382,8 @@ function device_htmode_append(config, caps) {
 	case 'HE40':
 	case 'EHT40':
 		config.vht_oper_centr_freq_seg0_idx =
-			config.channel + (((int(config.channel / 4) + config.channel_offset) % 2) ? 2 : -2);
+			config.channel + (extension ? (extension[2] == '+' ? 2 : -2) :
+				(((int(config.channel / 4) + config.channel_offset) % 2) ? 2 : -2));
 		break;
 
 	case 'VHT80':
@@ -675,12 +672,11 @@ function generate_device(config, caps) {
 
 	append_vars(config, [ 'rts_threshold', 'chanlist' ]);
 
-	if (config.hw_mode in [ 'a', 'g' ] && config.require_mode in [ 'n', 'ac', 'ax', 'be' ]) {
+	if (config.require_mode in [ 'n', 'ac', 'ax', 'be' ]) {
 		let require_mode = { n: 'require_ht', ac: 'require_vht', ax: 'require_he', be: 'require_eht' };
 		let key = require_mode[config.require_mode];
 
-		if (key && (config.require_mode != 'be' || config.ieee80211be))
-			append(key, 1);
+		append(key, 1);
 
 		config.legacy_rates = false;
 	}

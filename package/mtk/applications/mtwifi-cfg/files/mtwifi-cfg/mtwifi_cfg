@@ -830,37 +830,7 @@ function mtwifi_cfg_setup(argv)
         return false
     end
 
-    local WirelessMode
-
-    if cfg.config.band == "2g" then
-        WirelessMode = 9  -- PHY_11BGN_MIXED
-        if is_ax_mode(cfg) then
-            WirelessMode = 16  -- PHY_11AX_24G
-        elseif is_be_mode(cfg) then
-            WirelessMode = 22 -- PHY_11BE_24G
-        end
-    elseif cfg.config.band == "5g" then
-        WirelessMode = 15 -- PHY_11VHT_N_MIXED
-        if is_ax_mode(cfg) then
-            WirelessMode = 17 -- PHY_11AX_5G
-        elseif is_be_mode(cfg) then
-            WirelessMode = 23 -- PHY_11BE_5G
-        end
-    elseif cfg.config.band == "6g" then
-        if is_ax_mode(cfg) then
-            WirelessMode = 18 -- PHY_11AX_6G
-        elseif is_be_mode(cfg) then
-            WirelessMode = 24 -- PHY_11BE_6G
-        end
-    end
-
-
-    if not WirelessMode then
-        nixio.syslog("err", "mtwifi-cfg: invalid wireless mode!")
-        return false
-    end
-
-    local bandwidth_ok, bandwidth_err = bandwidth.apply(cfg.config, dats)
+    local bandwidth_ok, bandwidth_err, WirelessMode = bandwidth.apply(cfg.config, dats)
     if not bandwidth_ok then
         nixio.syslog("err", "mtwifi-cfg: " .. bandwidth_err .. "!")
         return false

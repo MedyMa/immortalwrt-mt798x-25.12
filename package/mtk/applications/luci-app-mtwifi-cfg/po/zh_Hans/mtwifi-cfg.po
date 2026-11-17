@@ -118,32 +118,8 @@ msgstr "VHT 1024-QAM（5 GHz）"
 msgid "Vendor VHT extension; this is not HE or EHT 1024-QAM. Leave unset to preserve the profile setting."
 msgstr "厂商 VHT 扩展；这不是 HE 或 EHT 1024-QAM。留空可保留配置文件中的设置。"
 
-msgid "MLO Group"
-msgstr "MLO 分组"
-
 msgid "0 disables MLO; interfaces in the same group must use identical SSID and security settings. Leave unset to preserve the profile setting."
 msgstr "0 表示禁用 MLO；同组接口必须使用相同的 SSID 和安全设置。留空可保留配置文件中的设置。"
-
-msgid "Use profile setting"
-msgstr "使用配置文件设置"
-
-msgid "HE LDPC (all AP BSSIDs)"
-msgstr "HE LDPC（所有 AP BSSID）"
-
-msgid "Applies one HeLdpc value to the radio’s AP BSSIDs. Leave unset to preserve the profile tokens."
-msgstr "将同一 HeLdpc 值应用于此射频的所有 AP BSSID。留空可保留配置文件中的各项设置。"
-
-msgid "MLO group must be between 0 and 16"
-msgstr "MLO 分组必须介于 0 和 16 之间"
-
-msgid "MLO group %s requires matching SSID and security settings"
-msgstr "MLO 分组 %s 中的接口必须使用相同的 SSID 和安全设置"
-
-msgid "VHT 1024-QAM (5 GHz)"
-msgstr "VHT 1024-QAM（5 GHz）"
-
-msgid "Vendor VHT extension; this is not HE or EHT 1024-QAM. Leave unset to preserve the profile setting."
-msgstr "厂商 VHT 扩展；这不是 HE 或 EHT 1024-QAM。留空可保留配置文件中的设置。"
 
 msgid "MAC Address"
 msgstr "MAC 地址"
@@ -447,3 +423,9 @@ msgstr "无线配置已变化，请刷新页面后再清理旧版 MLO 配置。"
 
 msgid "Only legacy MLO flags are cleared. Wireless names, passwords and network bindings are preserved."
 msgstr "此操作仅关闭旧版 MLO 标志，保留现有无线名称、密码和网络绑定。"
+
+msgid "Wireless band or channel information is unavailable. Refresh before saving."
+msgstr "无线频段或信道信息不可用，请刷新后再保存。"
+
+msgid "Invalid wireless band, mode or bandwidth."
+msgstr "无线频段、模式或频宽无效。"

@@ -630,33 +630,32 @@ export function prepare_dat(devname, payload) {
 	}
 
 	let band = payload.config.band;
-	let require_mode = payload.config.require_mode;
 	let wmode;
 
 	if (band == '2g') {
-		if (is_be_mode(payload) || require_mode == 'be')
+		if (is_be_mode(payload))
 			wmode = 22;	/* PHY_11BE_24G */
-		else if (is_ax_mode(payload) || require_mode == 'ax')
+		else if (is_ax_mode(payload))
 			wmode = 16;	/* PHY_11AX_24G */
-		else if (is_n_mode(payload) || require_mode == 'n')
+		else if (is_n_mode(payload))
 			wmode = 9;	/* PHY_11BGN_MIXED */
 		else
-			wmode = 4;	/* PHY_11G */
+			wmode = payload.config.hw_mode == '11b' ? 1 : 0;	/* B only or B/G */
 	} else if (band == '5g') {
-		if (is_be_mode(payload) || require_mode == 'be')
+		if (is_be_mode(payload))
 			wmode = 23;	/* PHY_11BE_5G */
-		else if (is_ax_mode(payload) || require_mode == 'ax')
+		else if (is_ax_mode(payload))
 			wmode = 17;	/* PHY_11AX_5G */
-		else if (is_ac_mode(payload) || require_mode == 'ac')
+		else if (is_ac_mode(payload))
 			wmode = 14;	/* PHY_11VHT_N_A_MIXED */
-		else if (is_n_mode(payload) || require_mode == 'n')
+		else if (is_n_mode(payload))
 			wmode = 8;	/* PHY_11AN_MIXED */
 		else
 			wmode = 2;	/* PHY_11A */
 	} else if (band == '6g') {
-		if (is_be_mode(payload) || require_mode == 'be')
+		if (is_be_mode(payload))
 			wmode = 24;	/* PHY_11BE_6G */
-		else if (is_ax_mode(payload) || require_mode == 'ax')
+		else if (is_ax_mode(payload))
 			wmode = 18;	/* PHY_11AX_6G */
 	}
 
@@ -674,6 +673,8 @@ export function prepare_dat(devname, payload) {
 	}
 
 	let bw = bwres[1];
+	let extension = match(payload.config.htmode, /40([+-])$/);
+	if (extension) dats.HT_EXTCHA = extension[1] == '+' ? 1 : 0;
 
 	dats.HT_BW = 0;
 	dats.VHT_BW = 0;
