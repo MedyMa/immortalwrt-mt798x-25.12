@@ -7,7 +7,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=mt_hwifi
-PKG_RELEASE:=9
+PKG_RELEASE:=10
 WIFI_DRIVER_NAME:=mt_hwifi
 P4REV:=
 PKG_VERSION:=24.10.20261104
@@ -455,8 +455,8 @@ endif
 
 define Build/Compile
 	$(if $(CONFIG_MTK_WIFI7_CFG80211_SUPPORT),\
-		$(if $(filter 1,$(words $(BACKPORT_VERSION))),true,\
-			$(error HWIFI requires one matching mac80211 backport version; found $(BACKPORT_VERSION))))
+		[ "$(words $(BACKPORT_VERSION))" -eq 1 ] || { \
+			echo "HWIFI requires one matching mac80211 backport version; found $(BACKPORT_VERSION)" >&2; exit 1; })
 	$(Build/Compile/mt7990)
 	$(Build/Compile/mt7992)
 	$(MAKE) $(PKG_JOBS) -C "$(LINUX_DIR)" V=1 \

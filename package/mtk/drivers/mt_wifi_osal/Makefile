@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=mt_wifi_osal
-PKG_RELEASE:=8
+PKG_RELEASE:=9
 PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_NAME)/wifi_osal
 PKG_SOURCE:=mt_wifi_osal-a53418.tar.xz
 PKG_SOURCE_URL:=https://raw.githubusercontent.com/MedyMa/immortalwrt-mt798x-25.12/main/dl
@@ -58,8 +58,8 @@ endef
 
 define Build/Compile
 	$(if $(CONFIG_MTK_WIFI_OSAL_CFG80211_SUPPORT),\
-		$(if $(filter 1,$(words $(BACKPORT_VERSION))),true,\
-			$(error OSAL requires one matching mac80211 backport version; found $(BACKPORT_VERSION))))
+		[ "$(words $(BACKPORT_VERSION))" -eq 1 ] || { \
+			echo "OSAL requires one matching mac80211 backport version; found $(BACKPORT_VERSION)" >&2; exit 1; })
 	+$(KERNEL_MAKE) $(PKG_JOBS) \
 		M="$(PKG_BUILD_DIR)" \
 		NOSTDINC_FLAGS="$(NOSTDINC_FLAGS)" \
