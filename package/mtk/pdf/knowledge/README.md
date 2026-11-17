@@ -2,8 +2,6 @@
 
 每篇分析给出文档物理页、机制/参数、当前源映射、实际用途和版本边界。原 PDF 和 721 页文本保留全部原始内容，以下是解释与应用判断，不能替代硬件/固件验证。
 
-原件固定取自 [benboguan/immortalwrt-mt799x@38666f1d](https://github.com/benboguan/immortalwrt-mt799x/tree/38666f1d78047eb78036fa4d2b7b96880cefcaa3/package/mtk/pdf)。[统一索引](index.json) 记录文档 ID、原 URL、页数、校验值、分析路径，以及 `source_cache` 中的参考归档与保留的构建输入；[逐页文本](pages.jsonl) 按物理页检索，37 页 OCR 补充须对照原图确认。原件中的版权和条款保持原样，不另行授予软件许可证。
-
 | 文档 ID | 分析 | 页数 | 对本项目的主要帮助 |
 | --- | --- | --- | --- |
 | dfs | [DFS/ZW-DFS](01-dfs.md) | 11 | CAC/专用接收资源、MLO setup link 和日志状态 |
