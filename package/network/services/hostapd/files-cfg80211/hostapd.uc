@@ -976,8 +976,10 @@ let main_obj = {
 			if (!req.args.iface)
 				return libubus.STATUS_INVALID_ARGUMENT;
 
+			if (!hostapd.bss?.[req.args.iface])
+				return 0;
 			hostapd.remove_iface(req.args.iface);
-			return 0;
+			return hostapd.bss?.[req.args.iface] ? libubus.STATUS_UNKNOWN_ERROR : 0;
 		})
 	},
 	bss_info: {

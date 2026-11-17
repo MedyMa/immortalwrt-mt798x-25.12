@@ -863,11 +863,14 @@ function attach(plan) {
 };
 
 function detach(ifnames) {
-	if (!length(ifnames))
-		return true;
-	global.ubus.call('hostapd', 'config_remove', { iface: ifnames[0] });
-	/* A successful ubus status-only reply has no payload. */
-	return global.ubus.error() == null;
+	/* MTK removes one BSS per call; keep the primary until its siblings are gone. */
+	for (let ifname in reverse([ ...(ifnames ?? []) ])) {
+		global.ubus.call('hostapd', 'config_remove', { iface: ifname });
+		/* A successful ubus status-only reply has no payload. */
+		if (global.ubus.error() != null)
+			return false;
+	}
+	return true;
 };
 
 export function activate(plan) {
