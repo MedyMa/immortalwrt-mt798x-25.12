@@ -45,6 +45,77 @@ Subject: wifi7: unwind cfg80211 registration and retire caller-owned network dev
  			/* Clear it as NULL to prevent latter access error. */
  			WDS_ENTRY_CLEAR_FLAG(pAd->WdsTab.WdsEntry[index].flag);
  			wdev->if_dev = NULL;
+--- a/mt_wifi/common/cmm_cfg.c
++++ b/mt_wifi/common/cmm_cfg.c
+@@ -1590,7 +1590,7 @@
+ 
+ 		MTWF_DBG(pAd, DBG_CAT_INIT, CATINIT_INTF, DBG_LVL_NOTICE,
+ 			 "-> CMD_RTPRIV_IOCTL_VIRTUAL_INF_INIT\n");
+-		pInfConf->virtual_if_init_handler(pInfConf->operation_dev_p);
++		Status = pInfConf->virtual_if_init_handler(pInfConf->operation_dev_p);
+ 	}
+ 	break;
+ 
+--- a/mt_wifi/common/rtmp_init_inf.c
++++ b/mt_wifi/common/rtmp_init_inf.c
+@@ -175,7 +175,7 @@
+ 	if (status != NDIS_STATUS_SUCCESS) {
+ 		MTWF_DBG(pAd, DBG_CAT_INIT, CATINIT_INTF, DBG_LVL_ERROR,
+ 			"TpcReqTabInit failed, Status[=0x%08x]\n", status);
+-		goto err2;
++		goto err_measure;
+ 	}
+ 
+ #ifdef DOT11_HE_AX
+@@ -189,19 +189,29 @@
+ 	status = qm_init_perband(pAd);
+ 
+ 	if (status)
+-		goto err2;
++		goto err_tables;
+ 
+ 	/* TM init */
+ 	status = tm_init(pAd);
+ 
+ 	if (status)
+-		goto err2;
++		goto err_tables;
+ 
+ #ifdef ERR_RECOVERY
+ 	pAd->ErrRecoveryCtl.ad = pAd;
+ #endif /* ERR_RECOVERY */
+ 
+ 	return TRUE;
++err_tables:
++#ifdef DOT11_HE_AX
++	bss_color_table_deinit(pAd);
++#ifdef WIFI_TWT_SUPPORT
++	twt_ctrl_exit(pAd);
++#endif
++#endif
++	TpcReqTabExit(pAd);
++err_measure:
++	MeasureReqTabExit(pAd);
+ err2:
+ 	rtmp_cfg_exit(pAd);
+ err1:
+@@ -450,7 +460,7 @@
+ 
+ 	/*for software system initialize*/
+ 	if (rtmp_sys_init(pAd, pHostName) != TRUE)
+-		goto err2;
++		goto err0;
+ 
+ 	Status = hw_start(pAd);
+ 
+@@ -613,6 +623,7 @@
+ 	MlmeHalt(pAd);
+ err2:
+ 	rtmp_sys_exit(pAd);
++err0:
+ 	RTMP_SET_FLAG(pAd, fRTMP_ADAPTER_INIT_FAIL);
+ 	MTWF_DBG(pAd, DBG_CAT_INIT, CATINIT_INTF, DBG_LVL_ERROR, "!!! fail !!!\n");
+ 	return FALSE;
 --- a/mt_wifi/common/sniffer_radiotap.c
 +++ b/mt_wifi/common/sniffer_radiotap.c
 @@ -1191,7 +1191,7 @@
