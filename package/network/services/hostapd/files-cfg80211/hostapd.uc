@@ -970,16 +970,20 @@ let main_obj = {
 	},
 	config_remove: {
 		args: {
-			iface: ""
+			iface: "",
+			report: false,
 		},
 		call: ex_wrap(function(req) {
 			if (!req.args.iface)
 				return libubus.STATUS_INVALID_ARGUMENT;
 
-			if (!hostapd.bss?.[req.args.iface])
-				return 0;
-			hostapd.remove_iface(req.args.iface);
-			return hostapd.bss?.[req.args.iface] ? libubus.STATUS_UNKNOWN_ERROR : 0;
+			let removed = !!hostapd.bss?.[req.args.iface];
+			if (removed) {
+				hostapd.remove_iface(req.args.iface);
+				if (hostapd.bss?.[req.args.iface])
+					return libubus.STATUS_UNKNOWN_ERROR;
+			}
+			return req.args.report ? { removed } : 0;
 		})
 	},
 	bss_info: {

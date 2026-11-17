@@ -1,0 +1,106 @@
+Serialize radio-open band refreshes with cfg80211 readers. Reset counts
+when a band is removed and handle missing channel storage.
+
+--- a/mt_wifi/os/linux/cfg80211/cfg80211.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211.c
+@@ -3113,8 +3113,11 @@
+ 	enum nl80211_band band_idx;
+ 	struct cfg80211_chan_def *chandef;
+ 	struct ieee80211_supported_band *pBand;
++	struct ieee80211_channel *channels;
+ 
+ 	pCfg80211_CB = pAd->pCfg80211_CB;
++	if (!pCfg80211_CB || !pCfg80211_CB->pCfg80211_Wdev)
++		return NULL;
+ 
+ #if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 1, 0) <= CFG_CFG80211_VERSION)
+ 	chandef = wdev_chandef(pCfg80211_CB->pCfg80211_Wdev, 0);
+@@ -3129,12 +3132,15 @@
+ 
+ 	band_idx = CFG80211_Get_BandId(pAd);
+ 	pBand = &pCfg80211_CB->Cfg80211_bands[band_idx];
++	channels = READ_ONCE(pBand->channels);
++	if (!channels)
++		return NULL;
+ 	ChanFreq = ieee80211_channel_to_frequency(chan_id, band_idx);
+-	ChanNum = pCfg80211_CB->Cfg80211_bands[band_idx].n_channels;
++	ChanNum = READ_ONCE(pBand->n_channels);
+ 
+ 	for (IdChan = 0; IdChan < ChanNum; IdChan++) {
+-		if (pBand->channels[IdChan].center_freq == ChanFreq)
+-			return &pBand->channels[IdChan];
++		if (channels[IdChan].center_freq == ChanFreq)
++			return &channels[IdChan];
+ 	}
+ 
+ 	MTWF_DBG(NULL, DBG_CAT_CFG, CATCFG_DBGLOG, DBG_LVL_ERROR,
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_util.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_util.c
+@@ -910,6 +910,8 @@
+ 		pWiphy->bands[IEEE80211_BAND_2GHZ] = pBand;
+ 	} else {
+ 		pWiphy->bands[IEEE80211_BAND_2GHZ] = NULL;
++		pBand->n_channels = 0;
++		pBand->n_bitrates = 0;
+ 		pBand->channels = NULL;
+ 		pBand->bitrates = NULL;
+ 		pBand->n_iftype_data = 0;
+@@ -1016,6 +1018,8 @@
+ 		pWiphy->bands[IEEE80211_BAND_5GHZ] = pBand;
+ 	} else {
+ 		pWiphy->bands[IEEE80211_BAND_5GHZ] = NULL;
++		pBand->n_channels = 0;
++		pBand->n_bitrates = 0;
+ 		pBand->channels = NULL;
+ 		pBand->bitrates = NULL;
+ 		pBand->n_iftype_data = 0;
+@@ -1035,6 +1039,8 @@
+ 		pWiphy->bands[IEEE80211_BAND_6GHZ] = pBand;
+ 	} else {
+ 		pWiphy->bands[IEEE80211_BAND_6GHZ] = NULL;
++		pBand->n_channels = 0;
++		pBand->n_bitrates = 0;
+ 		pBand->channels = NULL;
+ 		pBand->bitrates = NULL;
+ 		pBand->n_iftype_data = 0;
+--- a/mt_wifi/os/linux/cfg80211/cfg80211drv.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211drv.c
+@@ -3453,10 +3453,16 @@
+ {
+ 	PRTMP_ADAPTER pAd = (PRTMP_ADAPTER)pAdCB;
+ 	struct wifi_dev *curr_wdev = (struct wifi_dev *)wdev;
++	CFG80211_CB *pCfg80211_CB = CFG80211CB;
++	struct wiphy *wiphy;
+ 	CFG80211_BAND BandInfo;
+-#ifdef CFG80211_FULL_OPS_SUPPORT
+-	CFG80211_CB *pCfg80211_CB = CFG80211CB;
+-#endif
++	BOOLEAN ret;
++
++	if (!pCfg80211_CB || !pCfg80211_CB->pCfg80211_Wdev)
++		return FALSE;
++	wiphy = pCfg80211_CB->pCfg80211_Wdev->wiphy;
++	if (!wiphy)
++		return FALSE;
+ 
+ 	MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_CMM, DBG_LVL_INFO,
+ 		"80211> re-init bands...\n");
+@@ -3464,13 +3470,16 @@
+ 	os_zero_mem(&BandInfo, sizeof(BandInfo));
+ 
+ 	CFG80211_BANDINFO_FILL(pAd, curr_wdev, &BandInfo);
++	wiphy_lock(wiphy);
+ #ifdef CFG80211_FULL_OPS_SUPPORT
+ 	if (pAd->CommonCfg.DfsParameter.bDedicatedZeroWaitSupport == TRUE &&
+ 		pAd->CommonCfg.DfsParameter.bDedicatedZeroWaitDefault == TRUE)
+-		wiphy_ext_feature_set(pCfg80211_CB->pCfg80211_Wdev->wiphy,
++		wiphy_ext_feature_set(wiphy,
+ 			NL80211_EXT_FEATURE_RADAR_BACKGROUND);
+ #endif
+-	return CFG80211OS_SupBandReInit(pAd, CFG80211CB, &BandInfo);
++	ret = CFG80211OS_SupBandReInit(pAd, pCfg80211_CB, &BandInfo);
++	wiphy_unlock(wiphy);
++	return ret;
+ } /* End of CFG80211_SupBandReInit */
+ 
+ #ifdef CONFIG_STA_SUPPORT

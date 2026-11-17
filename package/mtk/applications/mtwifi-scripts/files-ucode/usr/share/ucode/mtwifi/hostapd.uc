@@ -872,13 +872,16 @@ function attach(plan) {
 	return true;
 };
 
-function detach(ifnames) {
+function detach(ifnames, plan) {
 	/* MTK removes one BSS per call; keep the primary until its siblings are gone. */
 	for (let ifname in reverse([ ...(ifnames ?? []) ])) {
-		global.ubus.call('hostapd', 'config_remove', { iface: ifname });
-		/* A successful ubus status-only reply has no payload. */
+		let args = { iface: ifname };
+		if (plan) args.report = true;
+		let reply = global.ubus.call('hostapd', 'config_remove', args);
 		if (global.ubus.error() != null)
 			return false;
+		if (plan && reply?.removed)
+			plan.previous_removed = true;
 	}
 	return true;
 };
@@ -888,9 +891,10 @@ export function activate(plan) {
 		return plan.ok;
 	if (!commit_files(plan))
 		return false;
-	plan.detached = true;
-	if (!detach(conf_ifnames_text(plan.previous)))
+	plan.previous_ifnames = conf_ifnames_text(plan.previous);
+	if (!detach(plan.previous_ifnames, plan))
 		return false;
+	plan.attach_attempted = true;
 	if (!attach(plan)) {
 		log(`hostapd rejected configuration for ${plan.phy}`);
 		return false;
@@ -900,7 +904,9 @@ export function activate(plan) {
 
 /* Stop new BSSs before restoring .dat, then restore every AP file before attach. */
 export function stop(plan) {
-	return !plan?.detached || detach(plan.ifnames);
+	if (plan?.attach_attempted)
+		return detach(plan.ifnames);
+	return !plan?.previous_removed || detach(plan.previous_ifnames);
 };
 
 export function rollback(plan, restart) {
@@ -908,11 +914,12 @@ export function rollback(plan, restart) {
 		return true;
 	if (!rollback_files(plan))
 		return false;
-	if (restart != false && plan.detached && length(conf_ifnames_text(plan.previous))) {
+	if (restart != false && plan.previous_removed) {
 		if (!attach(plan))
 			return false;
 	}
-	plan.detached = false;
+	plan.attach_attempted = false;
+	plan.previous_removed = false;
 	return true;
 };
 

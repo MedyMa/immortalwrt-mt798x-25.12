@@ -688,14 +688,17 @@ function setup() {
 		netifd.setup_failed('UNKNOWN_DEVICE');
 		return 1;
 	}
+	let marker = `/var/run/mtwifi-${devname}.configured`;
+	let previous = read_json(marker);
+	let profile_applied = previous?.profile_applied ?? (length(keys(previous?.profile?.interfaces ?? {})) > 0);
 	if (!length(keys(payload.interfaces ?? {}))) {
 		let phy = phy_of_ifname(dev.main_ifname) ?? payload.data?.phy;
 		if (!mt_supplicant.teardown(dev.apcli_ifname)) die('SUPPLICANT_STOP_FAILED');
 		if (phy && !mt_hostapd.teardown(phy, payload.config?.radio)) die('HOSTAPD_STOP_FAILED');
 		if (restored) netifd.restore_config(original);
 		if (!ifname.remove_wps_map(dev, IFACE_WPS_FILE) ||
-		    !atomic_write(`/var/run/mtwifi-${devname}.configured`, sprintf('%J\n', {
-			    radio: ARGV[2], devname, payload: original, profile: payload,
+		    !atomic_write(marker, sprintf('%J\n', {
+			    radio: ARGV[2], devname, payload: original, profile: payload, profile_applied,
 		    }))) {
 			netifd.setup_failed('METADATA_WRITE_FAILED');
 			return 1;
@@ -755,15 +758,13 @@ function setup() {
 		return 1;
 	}
 	let record = { radio: ARGV[2], devname, payload: original,
-		profile: json(sprintf('%J', payload)) };
+		profile: json(sprintf('%J', payload)), profile_applied: true };
 	let dat_plan = cfg.prepare_dat(devname, payload);
 	if (!dat_plan.ok) {
 		netifd.setup_failed('PROFILE_GENERATION_FAILED');
 		return 1;
 	}
-	let marker = `/var/run/mtwifi-${devname}.configured`;
-	if (dat_plan.reinstall && exists(marker)) {
-		let previous = read_json(marker);
+	if (dat_plan.reinstall && (profile_applied || (exists(marker) && (!previous?.payload || !previous?.profile)))) {
 		if (!previous?.payload || !previous?.profile || restored ||
 		    !exists('/sys/module/mt_wifi/refcnt')) {
 			netifd.setup_failed('DRIVER_RESTART_REQUIRED');

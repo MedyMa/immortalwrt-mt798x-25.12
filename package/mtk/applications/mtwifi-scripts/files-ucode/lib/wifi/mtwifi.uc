@@ -13,15 +13,8 @@
  *
  *     ucode /lib/wifi/mtwifi.uc | uci -q batch
  *
- * 命名与官方 wifi-scripts/lib/wifi/mac80211.uc 保持一致：
- *   - wifi-device 段为 radio0/radio1/...
- *   - 每个段带 type=mtwifi、phy=、band=、channel=、htmode=、country=
- *   - 额外写入 MTK 私有的 devname=（L1 profile 里的 INDEX_mainidx[_subidx]）
- *
  * 板级能力由通用 wifi-detect.uc 探测，本脚本只补全 UCI 设备元数据。
- *
- * 已存在的设备只迁移 L1/PHY 元数据并补齐缺失项，保留接口配置。
- * 重复执行是幂等的。
+ * 新设备用 L1 名称，已存在的段保留名称和接口引用。
  */
 
 import * as fs from 'fs';
@@ -85,25 +78,14 @@ function band_of(dev) {
 
 function existing_devices(config) {
 	let by_devname = {};
-	let names = {};
 
 	for (let name, section in config) {
-		if (section['.type'] != 'wifi-device')
+		if (section['.type'] != 'wifi-device' || section.type != 'mtwifi')
 			continue;
-
-		names[name] = true;
-
-		/*
-		 * 新配置用 devname 选项；旧配置（段名就是 devname）通过
-		 * “段名出现在 L1 profile 里”来识别。
-		 */
-		if (section.devname)
-			by_devname[section.devname] = name;
-		else if (section.type == 'mtwifi')
-			by_devname[name] = name;
+		by_devname[section.devname || name] = name;
 	}
 
-	return { by_devname, names };
+	return by_devname;
 };
 
 function main() {
@@ -125,7 +107,7 @@ function main() {
 		if (!dev)
 			continue;
 		let phy = phy_of_ifname(dev.main_ifname);
-		let name = existing.by_devname[devname];
+		let name = existing[devname];
 		if (name) {
 			let normalized = { ...config[name] };
 			normalize_legacy_device(normalized, dev);
@@ -145,9 +127,12 @@ function main() {
 			log(`no cfg80211 phy for ${devname}; deferring detection`);
 			continue;
 		}
-		while (config[`radio${idx}`] || config[`default_radio${idx}`])
-			idx++;
-		name = `radio${idx}`;
+		name = devname;
+		if (config[name] || config[`default_${name}`]) {
+			while (config[`radio${idx}`] || config[`default_radio${idx}`])
+				idx++;
+			name = `radio${idx++}`;
+		}
 		let iface = `default_${name}`;
 		let band = band_of(dev);
 		let defaults = BAND_DEFAULTS[band];
@@ -156,7 +141,7 @@ function main() {
 		let path = phy_path(phy);
 		push(out, `set wireless.${name}=wifi-device`);
 		for (let key, value in { type: 'mtwifi', devname, phy, band,
-			channel: defaults.channel, htmode: defaults.htmode,
+			channel: defaults.channel, htmode: defaults.htmode, noscan: defaults.noscan,
 			dbdc_main: (dev.subidx ?? 1) == 1 ? '1' : '0',
 			disabled: '1' })
 			set(name, key, value);
@@ -172,7 +157,6 @@ function main() {
 			set(iface, key, value);
 		config[name] = {};
 		config[iface] = {};
-		idx++;
 	}
 	if (length(out)) {
 		push(out, 'commit wireless');

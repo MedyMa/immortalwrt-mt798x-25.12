@@ -26,6 +26,7 @@ wireless_patches=(
     "$source_root/patches/feeds/luci/1024-luci-mtwifi-preserve-unavailable-frequency.patch"
     "$source_root/patches/feeds/luci/1025-luci-mtwifi-frequency-options.patch"
     "$source_root/patches/feeds/luci/1026-luci-mtwifi-80p80-channel-selection.patch"
+    "$source_root/patches/feeds/luci/1027-luci-mtwifi-radio-labels.patch"
 )
 apply_wireless_patch() {
     local wireless_patch=$1
