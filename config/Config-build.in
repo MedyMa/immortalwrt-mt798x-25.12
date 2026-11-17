@@ -141,7 +141,7 @@ menu "Global build settings"
 		select KERNEL_DEBUG_INFO
 		default BUILDBOT
 		help
-		  This collects debugging symbols from the kernel and all compiled modules.
+		  This collects full, unstripped ELF files for the normal kernel and modules.
 		  Useful for release builds, so that kernel issues can be debugged offline
 		  later.
 

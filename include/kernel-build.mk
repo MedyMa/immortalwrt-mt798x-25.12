@@ -61,11 +61,11 @@ ifdef CONFIG_COLLECT_KERNEL_DEBUG
   define Kernel/CollectDebug
 	rm -rf $(KERNEL_BUILD_DIR)/debug
 	mkdir -p $(KERNEL_BUILD_DIR)/debug/modules
-	$(CP) $(LINUX_DIR)/vmlinux $(KERNEL_BUILD_DIR)/debug/
+	$(CP) $(KERNEL_BUILD_DIR)/vmlinux.debug \
+		$(KERNEL_BUILD_DIR)/debug/vmlinux
 	-$(CP) \
 		$(STAGING_DIR_ROOT)/lib/modules/$(LINUX_VERSION)/*.ko \
 		$(KERNEL_BUILD_DIR)/debug/modules/
-	$(FIND) $(KERNEL_BUILD_DIR)/debug -type f | $(XARGS) $(KERNEL_CROSS)strip --only-keep-debug
 	$(TAR) c -C $(KERNEL_BUILD_DIR) debug \
 		$(if $(SOURCE_DATE_EPOCH),--mtime="@$(SOURCE_DATE_EPOCH)") \
 		| zstd -T0 -f -o $(BIN_DIR)/kernel-debug.tar.zst

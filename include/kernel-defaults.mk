@@ -142,7 +142,7 @@ define Kernel/CompileModules/Default
 	$(CP) $(LINUX_DIR)/.config $(LINUX_DIR)/.config.modules.save
 endef
 
-OBJCOPY_STRIP = -R .reginfo -R .notes -R .note -R .comment -R .mdebug -R .note.gnu.build-id
+OBJCOPY_STRIP = -R .reginfo -R .comment -R .mdebug
 
 # AMD64 shares the location with x86
 ifeq ($(LINUX_KARCH),x86_64)
