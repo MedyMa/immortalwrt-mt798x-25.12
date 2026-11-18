@@ -17,6 +17,7 @@ const DEFAULT_SCRIPT_TIMEOUT = 30 * 1000;
 let wdev_cur;
 let wdev_handler = {};
 let deferred_handlers = 0;
+let handler_sequence = 0;
 let handler_timer;
 
 function wireless_config_done()
@@ -146,9 +147,13 @@ function wdev_config_init(wdev)
 function wdev_setup_cb(wdev)
 {
 	if (wdev.state != "setup") {
-		if (wdev.state == "up" && wdev.config_change) {
-			wdev_config_init(wdev);
-			wdev.setup();
+		if (wdev.state == "up") {
+			if (!wdev.autostart || wdev.cancel_setup)
+				wdev.teardown();
+			else if (wdev.config_change) {
+				wdev_config_init(wdev);
+				wdev.setup();
+			}
 		}
 		return;
 	}
@@ -221,20 +226,18 @@ function run_handler_timeout(job)
 
 function handler_sort_fn(a, b)
 {
-	return wdev_handler[a].time - wdev_handler[b].time
+	let first = wdev_handler[a];
+	let second = wdev_handler[b];
+	/* Finish rollback and driver cleanup before starting another band. */
+	let cleanup_first = first.op == "teardown" && first.wdev.data.config.type == "mtwifi";
+	let cleanup_second = second.op == "teardown" && second.wdev.data.config.type == "mtwifi";
+	if (cleanup_first != cleanup_second)
+		return cleanup_first ? -1 : 1;
+	return first.sequence - second.sequence;
 }
 
-function __run_next_handler_name()
+function __run_next_handler(name)
 {
-	return sort(keys(wdev_handler), handler_sort_fn)[0];
-}
-
-function __run_next_handler()
-{
-	let name = __run_next_handler_name();
-	if (!name)
-		return;
-
 	let job = wdev_cur = wdev_handler[name];
 	delete wdev_handler[name];
 
@@ -242,6 +245,10 @@ function __run_next_handler()
 	let op = job.op;
 
 	wdev.dbg("run " + op);
+	if (op == "setup" && wdev.data.config.type == "mtwifi" && wdev.config_change) {
+		wdev_config_init(wdev);
+		delete wdev.config_change;
+	}
 	wdev.handler_config.data = wdev.handler_data[wdev.name] ?? {};
 	job.task = netifd.process({
 		cb: (status) => run_handler_cb(job, status),
@@ -260,8 +267,15 @@ function __run_next_handler()
 
 function run_next_handler()
 {
-	while (!wdev_cur && length(wdev_handler) > 0)
-		__run_next_handler();
+	while (!wdev_cur) {
+		/* config_add can return while the shared MTK driver is still starting an AP. */
+		let runnable = filter(keys(wdev_handler), name =>
+			!deferred_handlers || wdev_handler[name].wdev.data.config.type != "mtwifi");
+		let name = sort(runnable, handler_sort_fn)[0];
+		if (!name)
+			break;
+		__run_next_handler(name);
+	}
 
 	if (!wdev_cur && !length(wdev_handler) && !deferred_handlers)
 		wireless_config_done();
@@ -272,7 +286,7 @@ function run_handler(wdev, op, cb)
 	wdev.dbg("queue " + op);
 	wdev_handler[wdev.name] = {
 		op, wdev, cb,
-		time: time()
+		sequence: ++handler_sequence,
 	};
 
 	run_next_handler();
@@ -467,6 +481,19 @@ function stop()
 
 	switch (this.state) {
 	case "setup":
+		if (this.data.config.type == "mtwifi" && wdev_handler[this.name]?.op == "setup") {
+			delete wdev_handler[this.name];
+			if (this.previous_procs != null) {
+				this.state = "up";
+				this.teardown();
+			} else {
+				this.state = "down";
+				if (this.delete)
+					delete_wdev(this.name);
+				handler_timer.set(1);
+			}
+			break;
+		}
 		this.cancel_setup = true;
 		break;
 	case "up":
@@ -483,7 +510,7 @@ function check()
 	if (this.teardown_failed)
 		return this.teardown();
 
-	if (this.setup_waiting)
+	if (this.setup_waiting || (this.data.config.type == "mtwifi" && wdev_cur?.wdev == this))
 		return;
 	wdev_config_init(this);
 	this.setup();
@@ -585,7 +612,7 @@ function notify(req)
 		    !job?.task || job.wdev != this || job.op != "setup")
 			return ubus.STATUS_INVALID_ARGUMENT;
 		job.timeout.cancel();
-		/* DFS CAC can last 600 seconds. Release the handler queue while waiting. */
+		/* DFS CAC can last 600 seconds. Other wireless drivers may continue. */
 		job.timeout = uloop.timer(690000, () => run_handler_timeout(job));
 		this.setup_waiting = job;
 		deferred_handlers++;
@@ -738,6 +765,6 @@ export function new(data, script, driver)
 	};
 	wdev_update_disabled_vifs(wdev);
 	wdev_config_init(wdev);
-	handler_timer = uloop.timer(1, run_next_handler);
+	handler_timer ??= uloop.timer(1, run_next_handler);
 	return proto(wdev, wdev_proto);
 };

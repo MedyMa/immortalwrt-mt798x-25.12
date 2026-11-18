@@ -358,48 +358,73 @@ function rebuild_inventory(records) {
 	return config;
 };
 
+function rebuild_wait_time(radios, up) {
+	/* Allow the 120s setup and 120s activation timeouts per band, plus margin. */
+	return { deadline: clock(true)[0] + max(1, length(radios)) * (up ? 270 : 35), cac: {} };
+};
+
+function account_cac(wait, radio, device) {
+	let activation = device?.activation;
+	if (activation?.phase != 'cac' || wait.cac[radio])
+		return;
+	wait.cac[radio] = true;
+	wait.deadline += min(600, activation.cac_seconds || 600) + 15;
+};
+
 function rebuild_config_lock() {
-	for (let attempt = 0; attempt < 200; attempt++) {
+	let config = uci.cursor().get_all('wireless') ?? {};
+	let radios = filter(keys(config), radio =>
+		config[radio]['.type'] == 'wifi-device' && config[radio].type == 'mtwifi');
+	let wait = rebuild_wait_time(radios, true);
+	while (clock(true)[0] <= wait.deadline) {
 		let lock = fs.open('/var/run/mtwifi-config.lock', 'ae', 0600);
 		if (!lock || !lock.lock('x')) die('CONFIG_LOCK_FAILED');
 		let status = global.ubus.call('network.wireless', 'status');
-		let pending = type(status) != 'object';
-		for (let radio, config in uci.cursor().get_all('wireless') ?? {})
-			if (config['.type'] == 'wifi-device' && config.type == 'mtwifi')
-				pending ||= !!status?.[radio]?.pending;
+		if (type(status) != 'object') {
+			lock.close();
+			die('WIRELESS_STATUS_UNAVAILABLE');
+		}
+		let pending = false;
+		for (let radio in radios) {
+			let device = status[radio];
+			if (device?.teardown_failed) {
+				lock.close();
+				die('WIRELESS_STOP_FAILED');
+			}
+			if (device?.pending) {
+				pending = true;
+				account_cac(wait, radio, device);
+			}
+		}
 		if (!pending) return lock;
 		lock.close();
-		sleep(0.1);
+		sleep(0.5);
 	}
 	die('WIRELESS_BUSY');
 };
 
 function rebuild_devices(ctx, up, wait) {
-	for (let name in up ? keys(ctx.want_up) : ctx.devices) {
+	let radios = up ? keys(ctx.want_up) : ctx.devices;
+	for (let name in radios) {
 		global.ubus.call('network.wireless', up ? 'up' : 'down', { device: name });
 		if (global.ubus.error() != null)
 			die('WIRELESS_CONTROL_FAILED');
 	}
 	if (wait === false) return;
-	let start = clock(true)[0];
-	let deadline = start + (up ? 90 : 20);
-	let cac = {};
-	while (clock(true)[0] <= deadline) {
+	let timing = rebuild_wait_time(radios, up);
+	while (clock(true)[0] <= timing.deadline) {
 		let status = global.ubus.call('network.wireless', 'status');
 		if (type(status) != 'object')
 			die('WIRELESS_STATUS_UNAVAILABLE');
 		let ready = true;
-		for (let name in up ? keys(ctx.want_up) : ctx.devices) {
+		for (let name in radios) {
 			let device = status[name];
 			if (device?.teardown_failed)
 				die('WIRELESS_STOP_FAILED');
 			if (up && device?.retry_setup_failed && !device.pending)
 				die(device.activation?.error ?? 'WIRELESS_START_FAILED');
-			if (up && !cac[name] && device?.activation?.phase == 'cac') {
-				cac[name] = true;
-				deadline = max(deadline, min(start + 700,
-					clock(true)[0] + min(600, device.activation.cac_seconds || 600) + 30));
-			}
+			if (up && device?.pending)
+				account_cac(timing, name, device);
 			ready &&= !!device && !device.pending && (up ? !!device.up : !device.up);
 		}
 		if (ready) return;

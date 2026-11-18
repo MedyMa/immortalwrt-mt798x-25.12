@@ -158,7 +158,8 @@ function device_log_append(config) {
 function device_country_code(config) {
 	let country = config.country_code ?? config.country;
 
-	if (!country)
+	/* Let cfg80211 manage regulation for the world setting. */
+	if (!country || country == '00')
 		return;
 
 	append('country_code', country);

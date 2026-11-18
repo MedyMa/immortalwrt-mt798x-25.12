@@ -20,6 +20,8 @@
 import * as fs from 'fs';
 import * as uci from 'uci';
 import * as l1dat from 'mtwifi.l1dat';
+import { load_profile } from 'mtwifi.dat';
+import defs from 'mtwifi.defs';
 import { trim, log, shell_quote } from 'mtwifi.common';
 import { normalize_legacy_device } from 'mtwifi.validate';
 
@@ -142,13 +144,14 @@ function main() {
 		push(out, `set wireless.${name}=wifi-device`);
 		for (let key, value in { type: 'mtwifi', devname, phy, band,
 			channel: defaults.channel, htmode: defaults.htmode, noscan: defaults.noscan,
-			dbdc_main: (dev.subidx ?? 1) == 1 ? '1' : '0',
-			disabled: '1' })
+			dbdc_main: (dev.subidx ?? 1) == 1 ? '1' : '0' })
 			set(name, key, value);
 		if (path)
 			set(name, 'path', path);
-		let country = board.wlan?.defaults?.country ?? '00';
-		set(name, 'country', match(country, /^([A-Z]{2}|00)$/) ? country : '00');
+		let country = board.wlan?.defaults?.country;
+		if (country == null && dev.profile_path)
+			country = load_profile(dev.profile_path)?.CountryCode;
+		set(name, 'country', defs.countryRegions[country ?? ''] ? country : '00');
 		push(out, `set wireless.${iface}=wifi-iface`);
 		for (let key, value in { device: name, network: 'lan',
 			ifname: dev.main_ifname, mode: 'ap', ssid: defaults.ssid,

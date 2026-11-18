@@ -61,14 +61,27 @@ wifi_detect_notice() {
 	exit 1
 }
 
+wifi_detect_mtwifi() (
+	local commands
+	flock 9 || exit 1
+	commands="$(ucode /lib/wifi/mtwifi.uc)" || exit 1
+	[ -n "$commands" ] || exit 0
+	printf '%s\n' "$commands" | uci -q batch || exit 1
+	exec 9>&-
+	# A radio may register after netifd has read the wireless configuration.
+	ubus call service event '{"type":"config.change","data":{"package":"wireless"}}' >/dev/null 2>&1 || true
+) 9>/var/run/mtwifi-detect.lock
+
 wifi_config() {
 	ucode /usr/share/hostap/wifi-detect.uc
-	[ ! -f /etc/config/wireless ] && touch /etc/config/wireless
+	[ -f /etc/config/wireless ] || touch /etc/config/wireless || return 1
 
 	# No longer hard-coding mac80211, the pure mtwifi platform can also run wifi config.
 	for driver in $DRIVERS; do (
 		if eval "type detect_$driver" 2>/dev/null >/dev/null; then
 			eval "detect_$driver" || echo "$driver: Detect failed" >&2
+		elif [ "$driver" = mtwifi ] && [ -f /lib/wifi/mtwifi.uc ]; then
+			wifi_detect_mtwifi || echo "$driver: Detect failed" >&2
 		elif [ -f "/lib/wifi/$driver.uc" ]; then
 			ucode "/lib/wifi/$driver.uc" | uci -q batch \
 				|| echo "$driver: Detect failed" >&2
