@@ -57,8 +57,9 @@ export function ratelist(rates) {
 	return join(",", map(rates, (rate) => ratestr(rate)));
 };
 
-function sta_global_mtk_options(config) {
-	append_vars(config, [ 'rsn_overriding' ]);
+function sta_global_mtk_options(config, radio) {
+	if (radio.rsn_overriding != null)
+		append_raw('rsn_overriding=' + (+radio.rsn_overriding ? 1 : 0));
 	append_raw('wps_cred_add_sae=1');
 
 	if (config.auth_type in [ 'sae', 'psk-sae', 'psk-sae-compat' ])
@@ -82,11 +83,11 @@ function setup_sta(data, config) {
 		config.ieee80211w = 2;
 	else if (config.auth_type in [ 'psk-sae', 'eap-eap2' ] && !config.ieee80211w)
 		config.ieee80211w = 1;
-	if ((wildcard(data.htmode, 'EHT*') || wildcard(data.htmode, 'HE*')) &&
-		config.rsn_override)
-		config.rsn_overriding = 1;
-	else
-		config.rsn_overriding = 0;
+	if (config.rsn_overriding != null)
+		config.rsn_overriding = +config.rsn_overriding ? 1 : 0;
+	else if (config.rsn_override != null)
+		config.rsn_overriding = (wildcard(data.htmode, 'EHT*') || wildcard(data.htmode, 'HE*')) &&
+			+config.rsn_override ? 1 : 0;
 
 	set_default(config, 'ieee80211r', 0);
 	set_default(config, 'sae_pwe', 2);
@@ -312,7 +313,7 @@ export function generate(config_list, data, interface, render_only) {
 	append_vars(interface.config, [ 'country', 'beacon_int', 'freq_list' ]);
 
 	setup_sta(data.config, interface.config);
-	sta_global_mtk_options(interface.config);
+	sta_global_mtk_options(interface.config, data.config);
 
 	let file_name = `/var/run/wpa-supplicant-${interface.config.ifname}.conf`;
 	let text = dump_network(render_only ? null : file_name);

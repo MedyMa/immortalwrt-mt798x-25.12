@@ -12,9 +12,7 @@
  * netifd/wireless/mac80211.sh 的 mac80211_hostapd_setup_base），
  * 并按 MTK 驱动的既有行为做了三处调整：
  *
- *   1. 频道为 auto 时写 hw_mode=any（MTK hostapd 有
- *      WPA_DRIVER_FLAGS_SUPPORT_HW_MODE_ANY 补丁），而非官方 ucode 的
- *      hw_mode=g/a + channel=0；
+ *   1. 自动信道在已选频段内使用驱动的 ACS 结果；
  *   2. 6G EHT320 使用 MTK hostapd 的 eht_oper_chwidth=9 +
  *      eht_bw320_offset 约定（官方 ucode 用 7）；
  *   3. BSS 段复用官方 wifi.ap.generate()，但为每个 BSS 注入
@@ -264,6 +262,14 @@ function device_rates(config) {
 
 /* MTK：6G EHT320 的 center/width 约定与官方 ucode 不同 */
 function device_eht320(config) {
+	if (!config.channel) {
+		config.op_class = 137;
+		config.vht_oper_chwidth = 2;
+		config.eht_oper_chwidth = 9;
+		config.eht_oper_centr_freq_seg0_idx = 0;
+		config.eht_bw320_offset = config.htmode == 'EHT320' ? 0 : 1;
+		return true;
+	}
 	let eht_center_seg0_map = [ [ 61, 31 ], [ 125, 95 ], [ 189, 159 ], [ 221, 191 ] ];
 	let idx = 0;
 
@@ -426,6 +432,9 @@ function device_htmode_append(config, caps) {
 		config.ieee80211ac = 0;
 		break;
 	}
+
+	if (!config.channel)
+		config.vht_oper_centr_freq_seg0_idx = 0;
 
 	/* 256-QAM */
 	if (config.vendor_vht)
@@ -679,10 +688,7 @@ function generate_device(config, caps) {
 	append_vars(config, [ 'min_tx_power' ]);
 
 	/* hw mode / channel */
-	if (auto_channel)
-		append('hw_mode', 'any');
-	else
-		append_vars(config, [ 'hw_mode', 'channel' ]);
+	append_vars(config, [ 'hw_mode', 'channel' ]);
 
 	append_vars(config, [ 'rts_threshold', 'chanlist' ]);
 

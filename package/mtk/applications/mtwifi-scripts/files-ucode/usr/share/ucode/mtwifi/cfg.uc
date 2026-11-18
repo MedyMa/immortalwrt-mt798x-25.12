@@ -1124,9 +1124,9 @@ export function prepare_dat(devname, payload) {
 			set_dat(dats, apidx, 'EncrypType', encinfo[1]);
 		}
 
-		let wps = tostr(v.config.wps_pushbutton);
+		let wps = +v.config.wps_pushbutton;
 
-		if (wps == '1') {
+		if (wps == 1) {
 			set_dat(dats, apidx, 'WscConfMode', 7);
 			set_dat(dats, apidx, 'WscConfStatus', 1);
 
@@ -1134,34 +1134,31 @@ export function prepare_dat(devname, payload) {
 
 			set_dat(dats, apidx, 'Wsc4digitPinCode', length('' + pin) <= 4 ? 1 : 0);
 			set_dat(dats, apidx, 'WscVendorPinCode', lua_or(v.config.pin, ''));
-		} else if (wps == '2') {
+		} else if (wps == 2) {
 			set_dat(dats, apidx, 'WscConfMode', 7);
 			set_dat(dats, apidx, 'WscConfStatus', 2);
+		} else {
+			set_dat(dats, apidx, 'WscConfMode', 0);
 		}
 
-		let ieee80211w = tostr(v.config.ieee80211w);
-		if (ieee80211w == '1' || authmode == 'WPA2PSKWPA3PSK' ||
-		    authmode == 'WPA2PSKWPA3PSK,WPA3PSK_EXT') {
-			set_dat(dats, apidx, 'PMFMFPC', 1);
-			set_dat(dats, apidx, 'PMFMFPR', 0);
-			set_dat(dats, apidx, 'PMFSHA256', 0);
-		} else if (ieee80211w == '2' || authmode == 'OWE' ||
-		           authmode == 'WPA3PSK,WPA3PSK_EXT' || authmode == 'WPA3PSK_EXT' ||
-		           authmode == 'WPA3PSK' || authmode == 'WPA3' ||
-			   authmode == 'WPA3-192' || authmode == 'WPA3PSK,WPA3PSK_EXT') {
-			set_dat(dats, apidx, 'PMFMFPC', 1);
-			set_dat(dats, apidx, 'PMFMFPR', 1);
-			set_dat(dats, apidx, 'PMFSHA256', authmode == 'WPA3' ? 1 : 0);
-		}
-
-		if (ieee80211w != '0') {
+		let pmf = v.config.ieee80211w;
+		if (authmode == 'OPEN' || authmode == 'SHARED')
+			pmf = 0;
+		else if (authmode in [ 'OWE', 'WPA3PSK,WPA3PSK_EXT', 'WPA3PSK_EXT', 'WPA3PSK', 'WPA3', 'WPA3-192' ])
+			pmf = 2;
+		else if (pmf == null && authmode in [ 'WPA2PSKWPA3PSK', 'WPA2PSKWPA3PSK,WPA3PSK_EXT', 'WPA3WPA2' ])
+			pmf = 1;
+		set_dat(dats, apidx, 'PMFMFPC', +pmf > 0 ? 1 : 0);
+		set_dat(dats, apidx, 'PMFMFPR', +pmf == 2 ? 1 : 0);
+		set_dat(dats, apidx, 'PMFSHA256', authmode == 'WPA3' ? 1 : 0);
+		set_dat(dats, apidx, 'OCVSupport', +pmf ? (v.config.ocv ?? 0) : 0);
+		if (+pmf) {
 			set_dat(dats, apidx, 'PMFSAQ_Time', v.config.ieee80211w_max_timeout);
 			set_dat(dats, apidx, 'PMFSAQ_ConfTime', v.config.ieee80211w_retry_timeout);
-			set_dat(dats, apidx, 'OCVSupport', v.config.ocv);
 		}
 
-		if (!(authmode == 'OPEN' || authmode == 'OWE'))
-			set_dat(dats, apidx, 'RekeyMethod', 'TIME');
+		if (authmode != 'OWE')
+			set_dat(dats, apidx, 'RekeyMethod', authmode in [ 'OPEN', 'SHARED' ] ? 'DISABLE' : 'TIME');
 
 		if (authmode == 'WPA' || authmode == 'WPA2' || authmode == 'WPA1WPA2' ||
 		    authmode == 'WPA3WPA2' || authmode == 'WPA3' || authmode == 'WPA3-192') {

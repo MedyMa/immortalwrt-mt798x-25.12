@@ -1,0 +1,528 @@
+--- a/mt_wifi/ap/ap.c
++++ b/mt_wifi/ap/ap.c
+@@ -436,11 +436,6 @@
+ 
+ #endif /* MT_DFS_SUPPORT && BACKGROUND_SCAN_SUPPORT */
+ 
+-
+-#ifdef RT_CFG80211_SUPPORT
+-	/* send acs complete event*/
+-	nl80211_send_acs_complete_event(pAd, wdev);
+-#endif
+ 
+ 	/* sync to other device */
+ 	wdev_sync_prim_ch(pAd, wdev);
+--- a/mt_wifi/include/os/cfg80211/cfg80211.h
++++ b/mt_wifi/include/os/cfg80211/cfg80211.h
+@@ -192,7 +192,6 @@
+ 	struct _RTMP_ADAPTER *pAd, ULONG priv_flags,
+ 	struct net_device *net_dev);
+ 
+-int nl80211_send_acs_complete_event(struct _RTMP_ADAPTER *pAd, struct wifi_dev *wdev);
+ struct wifi_dev *mtk_cfg80211_vndr_get_wdev_by_wireless_dev(
+ 	struct _RTMP_ADAPTER *pAd,
+ 	struct wireless_dev *wl_dev);
+--- a/mt_wifi/os/linux/cfg80211/cfg80211.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211.c
+@@ -5176,93 +5176,105 @@
+ }
+ #endif
+ 
+-int nl80211_send_acs_complete_event(struct _RTMP_ADAPTER *pAd, struct wifi_dev *wdev)
+-{
+-	struct wiphy *wiphy = pAd->pCfg80211_CB->pCfg80211_Wdev->wiphy;
+-	struct sk_buff *skb;
+-struct acs_req_params {
+-	u32 pri_frequency;
+-	u32 sec_frequency;
+-	u8 hw_mode;
+-	u8 edmg_channel;
+-	u8 seg0_center_channel;
+-	u8 seg1_center_channel;
+-	u16 ch_bw;
+-} params = {0};
+-	UCHAR band_idx = CFG80211_Get_BandId(pAd);
+-	INT len = sizeof(struct acs_req_params);
+-
+-
+-/* hostapd just need the pri_frequency, so other params are zero.
+- * hw_mode is set to MTK_ACS_MODE_IEEE80211A for upping hostapd`s interface.
++/* ndo_open runs the vendor ACS. Report its completed result only to the
++ * requesting interface, after netifd has opened it and hostapd has attached.
+  */
+-	params.pri_frequency = ieee80211_channel_to_frequency(wdev->channel, band_idx);
+-	params.hw_mode = MTK_ACS_MODE_IEEE80211A;
+-
+-	MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_ACS, DBG_LVL_NOTICE, "\n");
+-
+-	skb = cfg80211_vendor_event_alloc(wiphy, NULL, len, MTK_NL80211_VENDOR_EVENT_ACS_COMPLETE_EVENT, GFP_ATOMIC);
+-	if (!skb) {
+-		MTWF_DBG(pAd, DBG_CAT_CFG, CATCFG_DBGLOG, DBG_LVL_ERROR,
+-				"cfg80211_vendor_event_alloc fail!!\n");
+-		return -EINVAL;
+-	}
+-
+-	if (nla_put_u32(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_PRIMARY_FREQUENCY, params.pri_frequency) ||
+-	nla_put_u32(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_SECONDARY_FREQUENCY, params.sec_frequency) ||
+-	nla_put_u8(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_HW_MODE, params.hw_mode) ||
+-	nla_put_u8(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_EDMG_CHANNEL, params.edmg_channel) ||
+-	nla_put_u8(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_VHT_SEG0_CENTER_CHANNEL, params.seg0_center_channel) ||
+-	nla_put_u8(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_VHT_SEG1_CENTER_CHANNEL, params.seg1_center_channel) ||
+-	nla_put_u16(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_CHWIDTH, params.ch_bw)) {
+-		MTWF_DBG(pAd, DBG_CAT_CFG, CATCFG_DBGLOG, DBG_LVL_ERROR,
+-			"nla_put fail!!\n");
+-		kfree_skb(skb);
+-		return -EINVAL;
+-	}
+-
+-	cfg80211_vendor_event(skb, GFP_ATOMIC);
+-	return 0;
+-}
+-
+ static int mkt_cfg80211_vndr_offload_acs_handler(struct wiphy *wiphy,
+ 						 struct wireless_dev *wdev,
+ 						 const void *data, int len)
+ {
+-	ULONG *__pPriv;
+-	struct _RTMP_ADAPTER *pAd;
++	struct _RTMP_ADAPTER *ad;
+ 	struct wifi_dev *tdev;
+-
+-	__pPriv = (ULONG *)(wiphy_priv(wiphy));
+-	if (!__pPriv) {
+-		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_ACS, DBG_LVL_ERROR,
+-			"pPriv is NULL\n");
+-		return -EFAULT;
+-	}
+-
+-	if (wdev == NULL) {
+-		MTWF_DBG(NULL, DBG_CAT_CHN, CATCHN_ACS, DBG_LVL_ERROR,
+-			"wdev is NULL\n");
+-		return -EFAULT;
+-	}
+-
+-	pAd = (struct _RTMP_ADAPTER *)(*__pPriv);
+-	if (!RTMP_TEST_FLAG(pAd, fRTMP_ADAPTER_START_UP)) {
+-		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_ACS, DBG_LVL_ERROR,
+-			"pAd not start up. return!!\n");
+-		return -EFAULT;
+-	}
+-
+-	tdev = mtk_cfg80211_vndr_get_wdev_by_wireless_dev(pAd, wdev);
+-	if (tdev == NULL) {
+-		MTWF_DBG(pAd, DBG_CAT_CHN, CATCHN_ACS, DBG_LVL_ERROR,
+-			"tdev is NULL\n");
+-		return -EFAULT;
+-	}
+-
+-	nl80211_send_acs_complete_event(pAd, tdev);
++	struct freq_oper oper = {};
++	struct cfg80211_chan_def def = {};
++	enum nl80211_band band;
++	struct sk_buff *skb;
++	unsigned int freq, sec_freq = 0, width;
++	int primary_index;
++	u8 mode, seg0, seg1 = 0;
++
++	MAC80211_PAD_GET(ad, wiphy);
++	if (!wdev || !wdev->netdev || wdev->iftype != NL80211_IFTYPE_AP ||
++	    !RTMP_TEST_FLAG(ad, fRTMP_ADAPTER_START_UP))
++		return -ENETDOWN;
++	tdev = RTMP_OS_NETDEV_GET_WDEV(wdev->netdev);
++	if (!tdev || tdev->sys_handle != ad || tdev->if_dev != wdev->netdev ||
++	    hc_radio_query_by_wdev(tdev, &oper) != HC_STATUS_OK ||
++	    !oper.prim_ch || oper.prim_ch != tdev->channel || !oper.cen_ch_1)
++		return -ENODATA;
++
++	switch (wlan_config_get_ch_band(tdev)) {
++	case CMD_CH_BAND_24G:
++		band = NL80211_BAND_2GHZ;
++		mode = MTK_ACS_MODE_IEEE80211G;
++		break;
++	case CMD_CH_BAND_5G:
++		band = NL80211_BAND_5GHZ;
++		mode = MTK_ACS_MODE_IEEE80211A;
++		break;
++	case CMD_CH_BAND_6G:
++		band = NL80211_BAND_6GHZ;
++		mode = MTK_ACS_MODE_IEEE80211A;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	seg0 = oper.cen_ch_1;
++	switch (oper.bw) {
++	case BW_20: width = 20; break;
++	case BW_40: width = 40; break;
++	case BW_80: width = 80; break;
++	case BW_8080:
++		width = 80;
++		seg1 = oper.cen_ch_2;
++		if (!seg1)
++			return -EINVAL;
++		break;
++	case BW_160: width = 160; break;
++#ifdef DOT11_EHT_BE
++	case BW_320: width = 320; break;
++#endif
++	default: return -EOPNOTSUPP;
++	}
++	freq = ieee80211_channel_to_frequency(oper.prim_ch, band);
++	def.chan = ieee80211_get_channel(wiphy, freq);
++	def.width = phy_bw_2_nl_bw(oper.bw);
++	def.center_freq1 = ieee80211_channel_to_frequency(seg0, band);
++	if (seg1)
++		def.center_freq2 = ieee80211_channel_to_frequency(seg1, band);
++	if (!def.chan || (def.chan->flags & IEEE80211_CHAN_DISABLED) ||
++	    !cfg80211_chandef_valid(&def))
++		return -EINVAL;
++	if (width > 20) {
++		primary_index = ((int)freq - (int)def.center_freq1 + (int)width / 2 - 10) / 20;
++		sec_freq = primary_index & 1 ? freq - 20 : freq + 20;
++	}
++	if (width > 80) {
++		/* hostapd expects the full 160/320 MHz center in segment 1. */
++		seg1 = seg0;
++		seg0 = oper.prim_ch < seg1 ? seg1 - width / 20 : seg1 + width / 20;
++	}
++
++	skb = cfg80211_vendor_event_alloc(wiphy, wdev,
++			2 * nla_total_size(sizeof(u32)) + 3 * nla_total_size(sizeof(u8)) +
++			nla_total_size(sizeof(u16)), MTK_NL80211_VENDOR_EVENT_ACS_COMPLETE_EVENT,
++			GFP_KERNEL);
++	if (!skb)
++		return -ENOMEM;
++	if (nla_put_u32(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_PRIMARY_FREQUENCY, freq) ||
++	    nla_put_u32(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_SECONDARY_FREQUENCY, sec_freq) ||
++	    nla_put_u8(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_HW_MODE, mode) ||
++	    nla_put_u8(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_VHT_SEG0_CENTER_CHANNEL, seg0) ||
++	    nla_put_u8(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_VHT_SEG1_CENTER_CHANNEL, seg1) ||
++	    nla_put_u16(skb, MTK_NL80211_VENDOR_ATTR_EVENT_ACS_COMPLETE_CHWIDTH, width)) {
++		kfree_skb(skb);
++		return -EMSGSIZE;
++	}
++	cfg80211_vendor_event(skb, GFP_KERNEL);
+ 	return 0;
+ }
++
+ int mtk_cfg80211_vndr_statistic_handler(struct wiphy *wiphy,
+ 						 struct wireless_dev *wdev,
+ 						 const void *data, int len)
+@@ -16212,7 +16224,7 @@
+ 			.vendor_id = MTK_OUI,
+ 			.subcmd = MTK_NL80211_VENDOR_SUBCMD_OFFLOAD_ACS,
+ 		},
+-		.flags = WIPHY_VENDOR_CMD_NEED_NETDEV,
++		.flags = WIPHY_VENDOR_CMD_NEED_NETDEV | WIPHY_VENDOR_CMD_NEED_RUNNING,
+ 		.doit = mkt_cfg80211_vndr_offload_acs_handler,
+ #if KERNEL_VERSION(5, 4, 0) <= LINUX_VERSION_CODE
+ 		.policy = SUBCMD_OFFLOAD_ACS_POLICY,
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_ap.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_ap.c
+@@ -305,6 +305,48 @@
+ 	}
+ }
+ 
++/* The legacy security parser expects a group suite and both counted
++ * suite lists. Validate the whole element before changing BSS state.
++ */
++static bool cfg80211_ap_valid_security_ie(const u8 *ie, bool vendor, bool wpa1)
++{
++	const u8 *pos = ie + 2, *end = pos + ie[1];
++	unsigned int i, count;
++
++	if (vendor) {
++		if (end - pos < 4)
++			return false;
++		pos += 4;
++	}
++	if (end - pos < 6 || get_unaligned_le16(pos) != 1)
++		return false;
++	pos += 6;
++	for (i = 0; i < 2; i++) {
++		if (end - pos < 2)
++			return false;
++		count = get_unaligned_le16(pos);
++		pos += 2;
++		if (!count || count > (end - pos) / 4)
++			return false;
++		pos += count * 4;
++	}
++	if (pos == end)
++		return true;
++	if (end - pos < 2)
++		return false;
++	pos += 2; /* capabilities */
++	if (wpa1 || pos == end)
++		return pos == end;
++	if (end - pos < 2)
++		return false;
++	count = get_unaligned_le16(pos);
++	pos += 2;
++	if (count > (end - pos) / LEN_PMKID)
++		return false;
++	pos += count * LEN_PMKID;
++	return pos == end || end - pos == LEN_OUI_SUITE;
++}
++
+ static INT CFG80211DRV_UpdateApSettingFromBeacon(
+ 	PRTMP_ADAPTER pAd,
+ 	UINT mbss_idx,
+@@ -377,7 +419,6 @@
+ #ifdef HOSTAPD_11K_SUPPORT
+ 	const UCHAR CFG_RRM_OP_EID = WLAN_EID_RRM_ENABLED_CAPABILITIES;
+ #endif
+-	const UCHAR CFG_WPA_EID = WLAN_EID_VENDOR_SPECIFIC;
+ #ifndef DISABLE_HOSTAPD_BEACON
+ #ifdef HOSTAPD_AUTO_CH_SUPPORT
+ 	channel = HcGetChannel(pAd);
+@@ -389,7 +430,7 @@
+ 	PNET_DEV	net_dev_p;
+ 	struct wireless_dev *cfg80211_wdev;
+ 
+-	bcn_interval = *(UINT16 *)(pBeacon->beacon_head + 32);
++	bcn_interval = get_unaligned_le16(pBeacon->beacon_head + 32);
+ 	if (bcn_interval != pAd->CommonCfg.BeaconPeriod) {
+ 		pAd->CommonCfg.BeaconPeriod = bcn_interval;
+ 		wdev->bss_info_argument.bcn_period = bcn_interval;
+@@ -410,10 +451,14 @@
+ 			}
+ 		}
+ 	}
+-	/* if it doesn't find WPA_IE in tail first 30 bytes. treat it as is not found */
+-	wpa_ie = cfg80211_find_ie(CFG_WPA_EID, pBeacon->beacon_tail, pBeacon->beacon_tail_len);
++	wpa_ie = cfg80211_find_vendor_ie(WLAN_OUI_MICROSOFT, WLAN_OUI_TYPE_MICROSOFT_WPA,
++					pBeacon->beacon_tail, pBeacon->beacon_tail_len);
+ 	rsn_ie = cfg80211_find_ie(WLAN_EID_RSN, pBeacon->beacon_tail, pBeacon->beacon_tail_len);/* wpa2 case. */
+ 	rsnx_ie = cfg80211_find_ie(WLAN_EID_RSNX, pBeacon->beacon_tail, pBeacon->beacon_tail_len);/*wpa3 r3*/
++	if ((wpa_ie && !cfg80211_ap_valid_security_ie(wpa_ie, true, true)) ||
++	    (rsn_ie && !cfg80211_ap_valid_security_ie(rsn_ie, false, false)) ||
++	    (rsnx_ie && !rsnx_ie[1]))
++		return FALSE;
+ 	if (rsnx_ie != NULL) {
+ 		if (rsnx_ie[2] & 0x20) {  /*bit5 means h2e*/
+ 			h2e_only |= 0x2;
+@@ -482,7 +527,7 @@
+ 		MTWF_DBG(pAd, DBG_CAT_SEC, CATSEC_SAE, DBG_LVL_INFO,
+ 				"hostapd config Beacon protection:%d\n", sec_cfg->bcn_prot_cfg.desired_bcn_prot_en);
+ 
+-	capa_info = *(UINT16 *)(pBeacon->beacon_head + 34);
++	capa_info = get_unaligned_le16(pBeacon->beacon_head + 34);
+ 	/*check if it is open mode*/
+ 	MTWF_DBG(pAd, DBG_CAT_AP, CATAP_BCN,
+ 		DBG_LVL_NOTICE, "beacon capability info field: %04x\n", capa_info);
+@@ -505,7 +550,7 @@
+ 
+ 		eid = (EID_STRUCT *)mbo_caps;
+ 
+-		if (pMboCtrl && (eid->Len + 2 <= MBO_IE_MAX_LEN)) {
++		if (pMboCtrl && eid->Len >= 7 && (eid->Len + 2 <= MBO_IE_MAX_LEN)) {
+ 			pMboCtrl->bMboEnable = TRUE;
+ 			NdisMoveMemory(pMboCtrl->MBOIE, mbo_caps, eid->Len + 2);
+ 			pMboCtrl->MboIELen = eid->Len + 2;
+@@ -535,7 +580,7 @@
+ #endif
+ 
+ #ifdef HOSTAPD_11K_SUPPORT
+-	if (rrm_caps != NULL) {
++	if (rrm_caps && rrm_caps[1] == 5) {
+ 
+ 		EID_STRUCT *eid;
+ 		INT loop;
+@@ -848,7 +893,7 @@
+ 
+ 			if (eid->Len + 2 <= 500) {
+ #if defined(WSC_INCLUDED)
+-				USHORT i;
++				size_t i;
+ 				PWSC_IE wsc_tlv = NULL;
+ #endif
+ 				NdisCopyMemory(wdev->WscIEBeacon.Value, wsc_ie, eid->Len+2);
+@@ -856,11 +901,14 @@
+ 				NdisCopyMemory(wdev->WscIEProbeResp.Value, wsc_ie, eid->Len + 2);
+ 				wdev->WscIEProbeResp.ValueLen = eid->Len + 2;
+ #if defined(WSC_INCLUDED)
+-				for (i = 6; i < eid->Len + 2; i += be2cpu16(wsc_tlv->Length) + 4) {
++				for (i = 6; i + 4 <= eid->Len + 2; i += be2cpu16(wsc_tlv->Length) + 4) {
+ 					wsc_tlv = (PWSC_IE) &wsc_ie[i];
++					if (be2cpu16(wsc_tlv->Length) > eid->Len + 2 - i - 4)
++						break;
+ 					switch (be2cpu16(wsc_tlv->Type)) {
+ 					case WSC_ID_SEL_REGISTRAR:
+-						wdev->wps_triggered = wsc_tlv->Data[0];
++						if (be2cpu16(wsc_tlv->Length) == 1)
++							wdev->wps_triggered = wsc_tlv->Data[0];
+ 						break;
+ 					}
+ 				}
+@@ -869,7 +917,7 @@
+ 		}
+ 	}
+ #ifdef HOSTAPD_11R_SUPPORT
+-	if (md_ie != NULL) {
++	if (md_ie && md_ie[1] == 3) {
+ 		PFT_CFG pFtCfg = &pAd->ApCfg.MBSSID[mbss_idx].wdev.FtCfg;
+ 		pFtCfg->FtCapFlag.Dot11rFtEnable = TRUE;
+ 		MTWF_DBG(pAd, DBG_CAT_AP, CATAP_BCN, DBG_LVL_INFO, "FT is enable in driver\n");
+@@ -1238,10 +1286,12 @@
+ 	arch_ops->archUpdateBeacon(pAd, &pAd->ApCfg.MBSSID[apidx].wdev, TRUE, BCN_UPDATE_MAX);
+ }
+ 
+-VOID update_bss_info(
++static BOOLEAN update_bss_info(
+ 	IN RTMP_ADAPTER *pAd,
+ 	IN struct wifi_dev *wdev)
+ {
++	UINT8 previous_state = WDEV_BSS_STATE(wdev);
++
+ 	os_move_mem(wdev->bss_info_argument.Bssid, wdev->bssid, MAC_ADDR_LEN);
+ 	WDEV_BSS_STATE(wdev) = BSS_ACTIVE;
+ 	wdev->bss_info_argument.u8BssInfoFeature = 0;
+@@ -1252,9 +1302,13 @@
+ 
+ 	wdev->bss_info_argument.CipherSuit = SecHWCipherSuitMapping(wdev->SecConfig.PairwiseCipher);
+ 
+-	AsicBssInfoUpdate(pAd, &wdev->bss_info_argument);
++	if (AsicBssInfoUpdate(pAd, &wdev->bss_info_argument) != NDIS_STATUS_SUCCESS) {
++		WDEV_BSS_STATE(wdev) = previous_state;
++		return FALSE;
++	}
+ 	MTWF_DBG(NULL, DBG_CAT_AP, CATAP_BCN, DBG_LVL_INFO, "New AP BSSID "MACSTR" (%d)\n",
+ 		MAC2STR(wdev->bssid), wdev->PhyMode);
++	return TRUE;
+ }
+ 
+ #ifdef DOT11V_MBSSID_SUPPORT
+@@ -1367,7 +1421,10 @@
+ 		MSDU_FORBID_CLEAR(wdev, MSDU_FORBID_CONNECTION_NOT_READY);
+ 
+ 		os_msec_delay(200);
+-		update_bss_info(pAd, wdev);
++		if (!update_bss_info(pAd, wdev)) {
++			MSDU_FORBID_SET(wdev, MSDU_FORBID_CONNECTION_NOT_READY);
++			return FALSE;
++		}
+ 	}
+ 	WDEV_BSS_STATE(wdev) = BSS_READY;
+ #ifdef DISABLE_HOSTAPD_BEACON
+@@ -1477,6 +1534,7 @@
+ 	BSS_STRUCT *pMbss = &pAd->ApCfg.MBSSID[apidx];
+ 	struct wifi_dev *wdev = &pMbss->wdev;
+ 	BCN_BUF_STRUCT *bcn_buf = &wdev->bcn_buf;
++	struct freq_oper oper = {};
+ 	tr_tb_idx = wdev->tr_tb_idx;
+ 	pNetDev = pBeacon->pNetDev;
+ #ifdef RT_CFG80211_SUPPORT
+@@ -1501,6 +1559,12 @@
+ 	if (!CFG80211DRV_UpdateApSettingFromBeacon(pAd, apidx, pBeacon, pBcnCfg, &bss_info_change))
+ 		return FALSE;
+ 
++	if (hc_radio_query_by_wdev(wdev, &oper) != HC_STATUS_OK ||
++	    !oper.prim_ch || !oper.cen_ch_1) {
++		MTWF_DBG(pAd, DBG_CAT_CFG80211, CATCFG80211_AP, DBG_LVL_ERROR,
++			 "AP radio channel is not ready\n");
++		return FALSE;
++	}
+ 	APSecInit(pAd, wdev);
+ 	bcn_buf->pWdev = wdev;
+ 
+@@ -1513,26 +1577,19 @@
+ 		wdev->PhyMode = (WMODE_B | WMODE_G | WMODE_GN);
+ #endif /* DISABLE_HOSTAPD_BEACON */
+ 
+-	MSDU_FORBID_CLEAR(wdev, MSDU_FORBID_CONNECTION_NOT_READY);
+ #ifdef BCN_PROTECTION_SUPPORT
+ 	if (wdev->SecConfig.bcn_prot_cfg.bcn_prot_en)
+ 		NdisMoveMemory(&wdev->bss_info_argument.bcn_prot_cfg, &wdev->SecConfig.bcn_prot_cfg, sizeof(wdev->SecConfig.bcn_prot_cfg));
+ #endif /*BCN_PROTECTION_SUPPORT*/
+-	/*
+-		Re-sync freq_oper info due to original bw value
+-		may be changed after RTMP_DRIVER_80211_CHAN_SET.
+-	*/
+-	{
+-		struct freq_oper OperCh = {0};
+-
+-		hc_radio_query_by_wdev(wdev, &OperCh);
+-		/* update freq_oper into bss_info */
+-		NdisCopyMemory(&wdev->bss_info_argument.chan_oper,
+-						&OperCh, sizeof(struct freq_oper));
+-	}
++	wdev->bss_info_argument.chan_oper = oper;
+ 	os_msec_delay(200);
+-	update_bss_info(pAd, wdev);
++	if (!update_bss_info(pAd, wdev)) {
++		bcn_buf->bBcnSntReq = FALSE;
++		MSDU_FORBID_SET(wdev, MSDU_FORBID_CONNECTION_NOT_READY);
++		return FALSE;
++	}
+ 	WDEV_BSS_STATE(wdev) = BSS_READY;
++	MSDU_FORBID_CLEAR(wdev, MSDU_FORBID_CONNECTION_NOT_READY);
+ 
+ #ifdef DISABLE_HOSTAPD_BEACON
+ 	bss_mngr_dev_reg(wdev);
+@@ -3203,13 +3260,13 @@
+ 	PUCHAR pTmp;
+ 	PRSN_IE_HEADER_STRUCT pRsnHeader;
+ 	PCIPHER_SUITE_STRUCT pCipher;
+-	UCHAR Len;
++	size_t Len;
+ 	UINT32 PairCipherLow = 0; /* Lower unicast cipher */
+ 	BOOLEAN bWPA2 = FALSE;
+ 	USHORT Count;
+ 	PAKM_SUITE_STRUCT pAKM;
+ 
+-	if (!rsn_ie)
++	if (!rsn_ie || !cfg80211_ap_valid_security_ie(rsn_ie, rsn_override, false))
+ 		return FALSE;
+ 
+ 	pEid = (PEID_STRUCT)rsn_ie;
+@@ -3523,9 +3580,9 @@
+ 				}
+ 	MTWF_DBG(mac_ad, DBG_CAT_AP, CATAP_BCN, DBG_LVL_INFO,
+ 		"Copied Rsn cap %02x %02x\n", sec_cfg->RsnCap[0], sec_cfg->RsnCap[1]);
++				pTmp += sizeof(RSN_CAPABILITIES);
++				Len -= sizeof(RSN_CAPABILITIES);
+ 			}
+-			pTmp += sizeof(RSN_CAPABILITIES);
+-			Len  -= sizeof(RSN_CAPABILITIES);
+ 			/*Extract PMKID list */
+ 			if (Len >= sizeof(UINT16)) {
+ 				INT offset = sizeof(UINT16);
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_tx.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_tx.c
+@@ -1281,9 +1281,9 @@
+ 			/* wdev->AuthMode = Ndis802_11AuthModeOpen; */
+ 			/* wdev->WepStatus = Ndis802_11WEPDisabled; */
+ 			/* wdev->WpaMixPairCipher = MIX_CIPHER_NOTUSE; */
+-			if (pCfg->auth_type == NL80211_AUTHTYPE_OPEN_SYSTEM)
++			if (!pCfg->privacy || pCfg->auth_type != NL80211_AUTHTYPE_SHARED_KEY)
+ 				SET_AKM_OPEN(wdev->SecConfig.AKMMap);
+-			else if (pCfg->auth_type == NL80211_AUTHTYPE_SHARED_KEY)
++			else
+ 				SET_AKM_SHARED(wdev->SecConfig.AKMMap);
+ 
+ 			if (pCfg->privacy) {
+@@ -1476,22 +1476,6 @@
+ 			SET_CIPHER_TKIP(wdev->SecConfig.PairwiseCipher);
+ 			SET_CIPHER_CCMP128(wdev->SecConfig.PairwiseCipher);
+ 		}
+-	} else {
+-		if (pCfg) {
+-			if (pCfg->auth_type == NL80211_AUTHTYPE_OPEN_SYSTEM)
+-				SET_AKM_OPEN(wdev->SecConfig.AKMMap);
+-			else if (pCfg->auth_type == NL80211_AUTHTYPE_SHARED_KEY)
+-				SET_AKM_SHARED(wdev->SecConfig.AKMMap);
+-			SET_CIPHER_NONE(wdev->SecConfig.PairwiseCipher);
+-			SET_CIPHER_NONE(wdev->SecConfig.GroupCipher);
+-			MTWF_DBG(pAd, DBG_CAT_AP, CATAP_BCN, DBG_LVL_INFO,
+-			    "update AuthMode=%s, Cipher(%s %s)\n",
+-			    GetAuthModeStr(wdev->SecConfig.AKMMap),
+-			    GetEncryModeStr(wdev->SecConfig.PairwiseCipher),
+-			    GetEncryModeStr(wdev->SecConfig.GroupCipher));
+-		} else
+-			MTWF_DBG(pAd, DBG_CAT_AP, CATAP_BCN, DBG_LVL_INFO,
+-			    "skip updating cipher as no cfg from hostapd\n");
+ 	}
+ 
+ #ifdef DOT1X_SUPPORT

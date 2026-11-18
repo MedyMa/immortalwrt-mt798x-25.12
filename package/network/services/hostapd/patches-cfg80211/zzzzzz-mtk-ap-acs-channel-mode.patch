@@ -1,0 +1,204 @@
+--- a/src/ap/ap_drv_ops.c
++++ b/src/ap/ap_drv_ops.c
+@@ -872,39 +872,25 @@
+ }
+ 
+ 
+-static void hostapd_get_hw_mode_any_channels(struct hostapd_data *hapd,
+-					     struct hostapd_hw_modes *mode,
+-					     int acs_ch_list_all,
+-					     int **freq_list)
+-{
+-	int i;
+-
+-	for (i = 0; i < mode->num_channels; i++) {
+-		struct hostapd_channel_data *chan = &mode->channels[i];
+-
+-		if (!acs_ch_list_all &&
+-		    (hapd->iface->conf->acs_freq_list.num &&
+-		     !freq_range_list_includes(
+-			     &hapd->iface->conf->acs_freq_list,
+-			     chan->freq)))
+-			continue;
+-		if (!acs_ch_list_all &&
+-		    (!hapd->iface->conf->acs_freq_list_present &&
+-		     hapd->iface->conf->acs_ch_list.num &&
+-		     !freq_range_list_includes(
+-			     &hapd->iface->conf->acs_ch_list,
+-			     chan->chan)))
+-			continue;
+-		if (is_6ghz_freq(chan->freq) &&
+-		    hapd->iface->conf->acs_exclude_6ghz_non_psc &&
+-		    !is_6ghz_psc_frequency(chan->freq))
+-			continue;
+-		if (!(chan->flag & HOSTAPD_CHAN_DISABLED) &&
+-		    !(hapd->iface->conf->acs_exclude_dfs &&
+-		      (chan->flag & HOSTAPD_CHAN_RADAR)) &&
+-		    !(chan->max_tx_power < hapd->iface->conf->min_tx_power))
+-			int_array_add_unique(freq_list, chan->freq);
+-	}
++bool hostapd_acs_channel_allowed(struct hostapd_data *hapd,
++				 const struct hostapd_channel_data *chan)
++{
++	const struct hostapd_config *conf = hapd->iface->conf;
++
++	if ((chan->flag & HOSTAPD_CHAN_DISABLED) ||
++	    (conf->acs_exclude_dfs && (chan->flag & HOSTAPD_CHAN_RADAR)) ||
++	    chan->max_tx_power < conf->min_tx_power ||
++	    (conf->op_class && is_6ghz_op_class(conf->op_class) !=
++	     is_6ghz_freq(chan->freq)) ||
++	    (conf->acs_exclude_6ghz_non_psc && is_6ghz_freq(chan->freq) &&
++	     !is_6ghz_psc_frequency(chan->freq)))
++		return false;
++
++	if (conf->acs_freq_list_present)
++		return !conf->acs_freq_list.num ||
++			freq_range_list_includes(&conf->acs_freq_list, chan->freq);
++	return !conf->acs_ch_list.num ||
++		freq_range_list_includes(&conf->acs_ch_list, chan->chan);
+ }
+ 
+ 
+@@ -925,7 +911,7 @@
+ int hostapd_drv_do_acs(struct hostapd_data *hapd)
+ {
+ 	struct drv_acs_params params;
+-	int ret, i, acs_ch_list_all = 0;
++	int ret, i, j;
+ 	struct hostapd_hw_modes *mode;
+ 	int *freq_list = NULL;
+ 	enum hostapd_hw_mode selected_mode;
+@@ -935,15 +921,6 @@
+ 
+ 	os_memset(&params, 0, sizeof(params));
+ 	params.hw_mode = hapd->iface->conf->hw_mode;
+-
+-	/*
+-	 * If no chanlist config parameter is provided, include all enabled
+-	 * channels of the selected hw_mode.
+-	 */
+-	if (hapd->iface->conf->acs_freq_list_present)
+-		acs_ch_list_all = !hapd->iface->conf->acs_freq_list.num;
+-	else
+-		acs_ch_list_all = !hapd->iface->conf->acs_ch_list.num;
+ 
+ 	if (hapd->iface->current_mode)
+ 		selected_mode = hapd->iface->current_mode->mode;
+@@ -955,8 +932,12 @@
+ 		if (selected_mode != HOSTAPD_MODE_IEEE80211ANY &&
+ 		    selected_mode != mode->mode)
+ 			continue;
+-		hostapd_get_hw_mode_any_channels(hapd, mode, acs_ch_list_all,
+-						 &freq_list);
++		for (j = 0; j < mode->num_channels; j++) {
++			const struct hostapd_channel_data *chan = &mode->channels[j];
++
++			if (hostapd_acs_channel_allowed(hapd, chan))
++				int_array_add_unique(&freq_list, chan->freq);
++		}
+ 	}
+ 
+ 	params.freq_list = freq_list;
+--- a/src/ap/ap_drv_ops.h
++++ b/src/ap/ap_drv_ops.h
+@@ -15,6 +15,7 @@
+ struct ieee80211_ht_capabilities;
+ struct ieee80211_vht_capabilities;
+ struct hostapd_freq_params;
++struct hostapd_channel_data;
+ 
+ u32 hostapd_sta_flags_to_drv(u32 flags);
+ int hostapd_build_ap_extra_ies(struct hostapd_data *hapd,
+@@ -134,6 +135,8 @@
+ 			  int sec_channel_offset, int oper_chwidth,
+ 			  int center_segment0, int center_segment1,
+ 			  bool radar_background);
++bool hostapd_acs_channel_allowed(struct hostapd_data *hapd,
++				 const struct hostapd_channel_data *chan);
+ int hostapd_drv_do_acs(struct hostapd_data *hapd);
+ int hostapd_drv_update_dh_ie(struct hostapd_data *hapd, const u8 *peer,
+ 			     u16 reason_code, const u8 *ie, size_t ielen);
+--- a/src/ap/drv_callbacks.c
++++ b/src/ap/drv_callbacks.c
+@@ -1118,7 +1118,7 @@
+ {
+ 	int ret, i;
+ 	int err = 0;
+-	struct hostapd_channel_data *pri_chan;
++	struct hostapd_channel_data *pri_chan = NULL;
+ 
+ 	if (hapd->iconf->channel) {
+ 		wpa_printf(MSG_INFO, "ACS: Channel was already set to %d",
+@@ -1126,52 +1126,32 @@
+ 		return;
+ 	}
+ 
+-	hapd->iface->freq = acs_res->pri_freq;
+-
+-	if (!hapd->iface->current_mode) {
+-		for (i = 0; i < hapd->iface->num_hw_features; i++) {
+-			struct hostapd_hw_modes *mode =
+-				&hapd->iface->hw_features[i];
+-
+-			if (mode->mode == acs_res->hw_mode) {
+-				if (hapd->iface->freq > 0 &&
+-				    !hw_get_chan(mode->mode,
+-						 hapd->iface->freq,
+-						 hapd->iface->hw_features,
+-						 hapd->iface->num_hw_features))
+-					continue;
+-				hapd->iface->current_mode = mode;
+-				break;
+-			}
+-		}
+-		if (!hapd->iface->current_mode) {
+-			hostapd_logger(hapd, NULL, HOSTAPD_MODULE_IEEE80211,
+-				       HOSTAPD_LEVEL_WARNING,
+-				       "driver selected to bad hw_mode");
+-			err = 1;
+-			goto out;
+-		}
+-	}
+-
+-	if (!acs_res->pri_freq) {
+-		hostapd_logger(hapd, NULL, HOSTAPD_MODULE_IEEE80211,
+-			       HOSTAPD_LEVEL_WARNING,
+-			       "driver switched to bad channel");
+-		err = 1;
+-		goto out;
+-	}
+-	pri_chan = hw_get_channel_freq(hapd->iface->current_mode->mode,
+-				       acs_res->pri_freq, NULL,
+-				       hapd->iface->hw_features,
+-				       hapd->iface->num_hw_features);
++	/* 5 and 6 GHz can have different channel tables with the same mode. */
++	for (i = 0; i < hapd->iface->num_hw_features; i++) {
++		struct hostapd_hw_modes *mode = &hapd->iface->hw_features[i];
++
++		if (hapd->iconf->hw_mode != HOSTAPD_MODE_IEEE80211ANY &&
++		    hapd->iconf->hw_mode != mode->mode)
++			continue;
++		if (acs_res->hw_mode < NUM_HOSTAPD_MODES &&
++		    acs_res->hw_mode != HOSTAPD_MODE_IEEE80211ANY &&
++		    acs_res->hw_mode != mode->mode)
++			continue;
++		pri_chan = hw_mode_get_channel(mode, acs_res->pri_freq, NULL);
++		if (pri_chan && hostapd_acs_channel_allowed(hapd, pri_chan)) {
++			hapd->iface->current_mode = mode;
++			break;
++		}
++		pri_chan = NULL;
++	}
+ 	if (!pri_chan) {
+-		wpa_printf(MSG_ERROR,
+-			   "ACS: Could not determine primary channel number from pri_freq %u",
++		wpa_printf(MSG_ERROR, "ACS: Invalid selection for this radio (%u MHz)",
+ 			   acs_res->pri_freq);
+ 		err = 1;
+ 		goto out;
+ 	}
+ 
++	hapd->iface->freq = acs_res->pri_freq;
+ 	hapd->iconf->channel = pri_chan->chan;
+ 	hapd->iconf->acs = 1;
+ 

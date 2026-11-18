@@ -46,11 +46,6 @@ const GLOBAL_DEDUP = [
 	/^\s*pmf\s*=/,
 ];
 
-/* 旧 wpad (< 2.10) 不认识的字段，保留会导致整个 network block 被丢弃 */
-const DROP_LEGACY = [
-	/^\s*rsn_overriding\s*=/,
-];
-
 function global_cli(cmd) {
 	return trim(read_pipe(`${WPA_CLI} -g ${WPA_CTRL_DIR}/global ${cmd}`) ?? '');
 };
@@ -203,12 +198,6 @@ function build_global(iface_data, data) {
 	return out;
 };
 
-/*
- * 对 generate() 产生的 .conf 做后处理：
- *   1. 在顶部插入旧 wpad 路径下缺失的全局字段（GLOBAL_CONF）；
- *   2. 去掉与新全局字段重名的项（GLOBAL_DEDUP）；
- *   3. 去掉旧 wpad 不认识的字段（DROP_LEGACY）。
- */
 function fixup_conf(text, iface_data, data) {
 	let lines = split(trim(text ?? ''), '\n');
 	let out = [];
@@ -220,13 +209,8 @@ function fixup_conf(text, iface_data, data) {
 	for (let line in lines) {
 		let drop = false;
 
-		/* DROP_LEGACY / GLOBAL_DEDUP 是正则数组，同样直接拿正则 */
-		for (let re in DROP_LEGACY)
+		for (let re in GLOBAL_DEDUP)
 			if (match(line, re)) { drop = true; break; }
-
-		if (!drop)
-			for (let re in GLOBAL_DEDUP)
-				if (match(line, re)) { drop = true; break; }
 
 		if (!drop)
 			push(out, line);

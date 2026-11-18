@@ -61,6 +61,7 @@ const EXTRA = {
 	device: [
 		[ 'devname', TYPE.string ],
 		[ 'dbdc_main', TYPE.boolean ],
+		[ 'rsn_overriding', TYPE.boolean ],
 		[ 'whnat', TYPE.boolean ],
 		[ 'twt', TYPE.number ],
 		[ 'eht_restricted_twt', TYPE.boolean ],
@@ -79,6 +80,8 @@ const EXTRA = {
 	],
 	iface: [
 		[ 'mldgroup', TYPE.number ],
+		[ 'rsn_overriding', TYPE.boolean ],
+		[ 'rsn_override', TYPE.number ],
 		[ 'ieee80211w', TYPE.number ],
 		[ 'mwds', TYPE.boolean ],
 		[ 'disable_eht', TYPE.boolean ],

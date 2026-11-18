@@ -13,7 +13,8 @@ export function normalize_legacy_device(config, dev) {
 	let band = device_band(dev);
 	let missing_band = config.band == null || config.band == '';
 	let legacy = missing_band && config.phy == dev?.main_ifname;
-	if (missing_band && band) config.band = band;
+	if ((missing_band || config.band == 'auto') && band)
+		config.band = band;
 	if (!defaults[config.band]) return;
 	if (config.htmode == null || config.htmode == '' || (legacy && config.htmode == 'NOHT'))
 		config.htmode = defaults[config.band].htmode;
