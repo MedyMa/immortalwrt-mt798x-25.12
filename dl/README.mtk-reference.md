@@ -9,7 +9,7 @@
 | --- | --- |
 | mt799x_20250613-415824.tar.xz | 对照 Wi-Fi 7 SDK 控制路径、profile、HWIFI、MCU 与协议实现 |
 | warp_20250613-433271.tar.xz | 阅读 WED/WO 平台 glue；不替换当前 warp 实现 |
-| datconf-19d67f.tar.bz2 | 对照 profile 编辑工具的新修订；当前构建仍保留 757f9679 |
+| datconf-19d67f.tar.bz2 | 由 `package/mtk/applications/datconf` 校验 SHA-256 后构建，文件截断在加锁后执行 |
 | 1905daemon-42cf90.tar.bz2 | Multi-AP/1905 协议与角色、事件接口 |
 | libmapd-e1e011.tar.bz2 | MAPD control/client 接口 |
 | libwpactrl-dcc1d7.tar.bz2 | WAPP 与 hostapd/supplicant 的控制连接 |
@@ -18,9 +18,10 @@
 | mtfwd-30b1ab.tar.bz2 | 配套转发模块的参考实现 |
 | wappd-24f7e6.tar.bz2 | 无线应用接口、事件及配置保存 |
 
-这些新归档为 **reference-only**，不意味着切换驱动版本、注册包、选中模块或开机启动 Mesh。
-未改变现有 package Makefile、当前 Wi-Fi 源包和固件选择。
-已有同内容 OSAL/fwdd/wificonf 保留；20250613 的 fallback bin 包未导入。
+这批归档均已解包，并核对大小、SHA-256、Git 对象哈希及文件清单。
+现用 Wi-Fi 驱动和 WARP 来自 BPI-R4 的构建输入。1905daemon、libmapd、libwpactrl、
+mapd、mapfilter、mtfwd 和 wappd 保留供源码对照，EasyMesh 依赖配套协议、服务和驱动接口。
+已有同内容的 OSAL、fwdd 和 wificonf 归档继续由原包配方管理。
 
 通过纯读取工具检索，不运行归档中的脚本或二进制：
 
