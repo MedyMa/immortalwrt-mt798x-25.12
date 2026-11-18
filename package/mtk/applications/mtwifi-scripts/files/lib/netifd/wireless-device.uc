@@ -268,9 +268,20 @@ function __run_next_handler(name)
 function run_next_handler()
 {
 	while (!wdev_cur) {
-		/* config_add can return while the shared MTK driver is still starting an AP. */
-		let runnable = filter(keys(wdev_handler), name =>
-			!deferred_handlers || wdev_handler[name].wdev.data.config.type != "mtwifi");
+		let cleanup_failed = false;
+		for (let _, wdev in netifd.wireless.devices) {
+			if (wdev.data.config.type == "mtwifi" && wdev.teardown_failed) {
+				cleanup_failed = true;
+				break;
+			}
+		}
+
+		/* Start the next MTK radio only after activation or cleanup completes. */
+		let runnable = filter(keys(wdev_handler), name => {
+			let job = wdev_handler[name];
+			return job.wdev.data.config.type != "mtwifi" ||
+			       (!deferred_handlers && (!cleanup_failed || job.op == "teardown"));
+		});
 		let name = sort(runnable, handler_sort_fn)[0];
 		if (!name)
 			break;
