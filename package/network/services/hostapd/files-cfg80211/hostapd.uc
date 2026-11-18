@@ -828,6 +828,16 @@ function bss_config(bss_name) {
 }
 
 let main_obj = {
+	get_radio_status: {
+		args: { iface: "" },
+		call: ex_wrap(function(req) {
+			if (!req.args.iface)
+				return libubus.STATUS_INVALID_ARGUMENT;
+
+			let iface = hostapd.interfaces?.[req.args.iface];
+			return iface ? iface.radio_status() : libubus.STATUS_NOT_FOUND;
+		})
+	},
 	reload: {
 		args: {
 			phy: "",

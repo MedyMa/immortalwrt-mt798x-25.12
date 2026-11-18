@@ -220,54 +220,6 @@ function fixup_conf(text, iface_data, data) {
 }
 
 /*
- * 找同一个 radio 上的 AP 接口名。setup() 的 data 里包含该 radio
- * 上所有接口，非 sta 的就是 AP。
- */
-function find_ap_ifname(data) {
-	let ks = keys(data.interfaces ?? {});
-
-	for (let i = 0; i < length(ks); i++) {
-		let iface_data = data.interfaces[ks[i]];
-		let mode = iface_data?.config?.mode;
-
-		if ((mode == 'ap' || mode == 'ap-wds') && !iface_data.config.disabled && iface_data.config.ifname)
-			return iface_data.config.ifname;
-	}
-
-	return null;
-};
-
-/*
- * 等 AP 接口进入 operstate=up，最多等 tries * 0.2 秒。
- * netifd 触发 setup() 的时机几乎和 hostapd 启动同时，此时 phy 上的
- * AP BSS 还在半初始化，直接创建 STA 接口会被 MTK 驱动误处理，导致
- * AP 接口 MAC 归零、连带打坏整个 phy。
- */
-function wait_ap_ready(data, tries) {
-	let ap_ifname = find_ap_ifname(data);
-
-	if (!ap_ifname)
-		return true;
-
-	for (let i = 0; i < tries; i++) {
-		let state = trim(readfile(`/sys/class/net/${ap_ifname}/operstate`) ?? '');
-
-		if (state == 'up')
-			return true;
-		/* MTK can leave operstate UNKNOWN while IFF_UP and carrier are set. */
-		if (state == 'unknown' &&
-		    (int(trim(readfile(`/sys/class/net/${ap_ifname}/flags`) ?? '0'), 16) & 1) &&
-		    +trim(readfile(`/sys/class/net/${ap_ifname}/carrier`) ?? '0') == 1)
-			return true;
-
-		sleep(0.2);
-	}
-
-	log(`AP ${ap_ifname} not up after ${tries * 0.2}s`);
-	return false;
-};
-
-/*
  * 让 MTK 驱动创建 STA 内核接口。
  *
  * 不用 wpa_supplicant 自己创建的原因：
@@ -373,7 +325,7 @@ function detach(ifname) {
 export function activate(plan) {
 	if (!plan.ok || !wait_for(`${WPA_CTRL_DIR}/global`, 30))
 		return false;
-	if (!wait_ap_ready(plan.data, 150) || !commit_files(plan))
+	if (!commit_files(plan))
 		return false;
 
 	let phy = plan.data.phy;

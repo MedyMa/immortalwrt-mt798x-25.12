@@ -9,13 +9,14 @@ const NOTIFY_CMD_SET_DATA = 1;
 const NOTIFY_CMD_PROCESS_ADD = 2;
 const NOTIFY_CMD_SET_RETRY = 4;
 const NOTIFY_CMD_RESTORE_CONFIG = 5;
+const NOTIFY_CMD_DEFER_SETUP = 6;
 
 const DEFAULT_RETRY = 3;
 const DEFAULT_SCRIPT_TIMEOUT = 30 * 1000;
 
 let wdev_cur;
 let wdev_handler = {};
-let wdev_script_task, wdev_script_timeout;
+let deferred_handlers = 0;
 let handler_timer;
 
 function wireless_config_done()
@@ -152,10 +153,12 @@ function wdev_setup_cb(wdev)
 		return;
 	}
 
-	if (wdev.retry > 0)
-		wdev.retry--;
-	else
-		wdev.retry_setup_failed = true;
+	if (!wdev.cancel_setup && !wdev.config_change) {
+		if (wdev.retry > 0)
+			wdev.retry--;
+		else
+			wdev.retry_setup_failed = true;
+	}
 
 	wdev.teardown();
 }
@@ -175,6 +178,8 @@ function wdev_teardown_cb(wdev, status)
 		return;
 	}
 	delete wdev.teardown_failed;
+	if (wdev.activation?.phase != "failed")
+		delete wdev.activation;
 	wdev.handler_data = {};
 	wdev.state = "down";
 	if (wdev.runtime_data || (wdev.data.config.type == "mtwifi" && wdev.config_change))
@@ -188,25 +193,30 @@ function wdev_teardown_cb(wdev, status)
 	wdev.setup();
 }
 
-function run_handler_cb(wdev, cb, status)
+function run_handler_cb(job, status)
 {
-	if (wdev != wdev_cur.wdev)
+	if (job.done)
 		return;
+	job.done = true;
 
-	wdev.dbg("complete " + wdev_cur.op);
-	if (wdev_script_timeout)
-		wdev_script_timeout.cancel();
-	wdev_script_timeout = null;
-	wdev_script_task = null;
-	wdev_cur = null;
+	let wdev = job.wdev;
+	wdev.dbg("complete " + job.op);
+	job.timeout?.cancel();
+	job.task = null;
+	if (wdev_cur == job)
+		wdev_cur = null;
+	if (wdev.setup_waiting == job) {
+		delete wdev.setup_waiting;
+		deferred_handlers--;
+	}
 	handler_timer.set(1);
-	cb(wdev, status ?? 0);
+	job.cb(wdev, status ?? 0);
 }
 
-function run_handler_timeout(wdev, cb)
+function run_handler_timeout(job)
 {
-	wdev_script_task.cancel();
-	run_handler_cb(wdev, cb, 1);
+	job.task.cancel();
+	run_handler_cb(job, 1);
 }
 
 function handler_sort_fn(a, b)
@@ -225,28 +235,25 @@ function __run_next_handler()
 	if (!name)
 		return;
 
-	wdev_cur = wdev_handler[name];
+	let job = wdev_cur = wdev_handler[name];
 	delete wdev_handler[name];
 
-	let wdev = wdev_cur.wdev;
-	let op = wdev_cur.op;
-	let cb = wdev_cur.cb;
+	let wdev = job.wdev;
+	let op = job.op;
 
 	wdev.dbg("run " + op);
 	wdev.handler_config.data = wdev.handler_data[wdev.name] ?? {};
-	wdev_script_task = netifd.process({
-		cb: (status) => run_handler_cb(wdev, cb, status),
+	job.task = netifd.process({
+		cb: (status) => run_handler_cb(job, status),
 		dir: netifd.wireless.path,
 		argv: [ './' + wdev.script, wdev.data.config.type, op, wdev.name, "" + wdev.handler_config ],
 		log_prefix: wdev.name,
 	});
 
-	if (!wdev_script_task)
-		return run_handler_cb(wdev, cb, 1);
+	if (!job.task)
+		return run_handler_cb(job, 1);
 
-	wdev_script_timeout = uloop.timer(DEFAULT_SCRIPT_TIMEOUT,
-		() => run_handler_timeout(wdev, cb)
-	);
+	job.timeout = uloop.timer(DEFAULT_SCRIPT_TIMEOUT, () => run_handler_timeout(job));
 }
 
 function run_next_handler()
@@ -254,7 +261,7 @@ function run_next_handler()
 	while (!wdev_cur && length(wdev_handler) > 0)
 		__run_next_handler();
 
-	if (!wdev_cur && !length(wdev_handler))
+	if (!wdev_cur && !length(wdev_handler) && !deferred_handlers)
 		wireless_config_done();
 }
 
@@ -322,12 +329,17 @@ function setup()
 
 	wdev_proc_reset(this);
 	delete this.config_change;
+	delete this.activation;
 	this.state = "setup";
 	run_handler(this, "setup", wdev_setup_cb);
 }
 
 function teardown()
 {
+	if (this.setup_waiting) {
+		this.cancel_setup = true;
+		return;
+	}
 	delete this.cancel_setup;
 
 	this.dbg("teardown, state=" + this.state);
@@ -465,6 +477,8 @@ function check()
 	if (this.teardown_failed)
 		return this.teardown();
 
+	if (this.setup_waiting)
+		return;
 	wdev_config_init(this);
 	this.setup();
 }
@@ -532,11 +546,15 @@ function notify(req)
 
 	switch (req.args.command) {
 	case NOTIFY_CMD_UP:
-		if (vif || vlan || this.state != "setup")
+		if (vif || vlan || this.state != "setup" ||
+		    (this.data.config.type == "mtwifi" &&
+		     (!this.autostart || this.cancel_setup || this.config_change)))
 			return ubus.STATUS_INVALID_ARGUMENT;
 
 		return wdev_mark_up(this);
 	case NOTIFY_CMD_SET_DATA:
+		if (!vif && !vlan && this.data.config.type == "mtwifi" && data?.activation)
+			this.activation = data.activation;
 		return wdev_set_data(this, vif, vlan, data);
 	case NOTIFY_CMD_PROCESS_ADD:
 		if (this.state != "setup" && this.state != "up")
@@ -549,6 +567,19 @@ function notify(req)
 			this.retry = data.retry;
 		else
 			this.retry = DEFAULT_RETRY;
+		return 0;
+	case NOTIFY_CMD_DEFER_SETUP:
+		let job = wdev_cur;
+		if (this.data.config.type != "mtwifi" || this.state != "setup" ||
+		    !job?.task || job.wdev != this || job.op != "setup")
+			return ubus.STATUS_INVALID_ARGUMENT;
+		job.timeout.cancel();
+		/* DFS CAC can last 600 seconds. Release the handler queue while waiting. */
+		job.timeout = uloop.timer(690000, () => run_handler_timeout(job));
+		this.setup_waiting = job;
+		deferred_handlers++;
+		wdev_cur = null;
+		handler_timer.set(1);
 		return 0;
 	case NOTIFY_CMD_RESTORE_CONFIG:
 		/* A failed MTK rebuild may restore an older interface order and bridge. */
@@ -639,6 +670,10 @@ function status()
 		autostart: this.autostart,
 		disabled: !!runtime.config.disabled,
 		retry_setup_failed: !!this.retry_setup_failed,
+		...(this.data.config.type == "mtwifi" ? {
+			activation: this.activation,
+			activation_canceled: !!this.setup_waiting && (!!this.cancel_setup || !!this.config_change)
+		} : {}),
 		config: runtime.config,
 		interfaces
 	};

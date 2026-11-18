@@ -1,57 +1,75 @@
-#!/bin/sh
-[ "$SEEN" -lt 3 ] && exit 1
-[ "$ACTION" = "released" ] || exit 1
+#!/usr/bin/ucode
+// SPDX-License-Identifier: GPL-2.0
+'use strict';
 
-wps_catch_credentials() {
-	local iface ifaces ifc ifname ssid encryption key radio radios
-	local found=0
+import * as fs from 'fs';
+import * as ubus from 'ubus';
+import * as uci from 'uci';
+import * as uloop from 'uloop';
+import { valid_ifname } from 'mtwifi.common';
 
-	. /usr/share/libubox/jshn.sh
-	ubus -S -t 30 listen wps_credentials | while read creds; do
-		json_init
-		json_load "$creds"
-		json_select wps_credentials || continue
-		json_get_vars ifname ssid key encryption
-		local ifcname="$ifname"
-		json_init
-		json_load "$(ubus -S call network.wireless status)"
-		json_get_keys radios
-		for radio in $radios; do
-			json_select $radio
-			json_select interfaces
-			json_get_keys ifaces
-			for ifc in $ifaces; do
-				json_select $ifc
-				json_get_vars ifname
-				[ "$ifname" = "$ifcname" ] && {
-					ubus -S call uci set "{\"config\":\"wireless\", \"type\":\"wifi-iface\",		\
-								\"match\": { \"device\": \"$radio\", \"encryption\": \"wps\" },	\
-								\"values\": { \"encryption\": \"$encryption\", 			\
-										\"ssid\": \"$ssid\", 				\
-										\"key\": \"$key\" } }"
-					ubus -S call uci commit '{"config": "wireless"}'
-					ubus -S call uci apply
-				}
-				json_select ..
-			done
-			json_select ..
-			json_select ..
-		done
-	done
+let listen = ARGV[0] == 'listen';
+if (!listen && (getenv('ACTION') != 'released' || +getenv('SEEN') < 3)) exit(1);
+if (listen) uloop.init();
+let conn = ubus.connect(null, 2);
+if (!conn) exit(1);
+let pending = {};
+for (let radio, status in conn.call('network.wireless', 'status') ?? {}) {
+	if (!status.up || status.pending || status.config?.type != 'mtwifi') continue;
+	for (let vif in status.interfaces ?? [])
+		if (vif.config?.mode == 'sta' && vif.config.encryption == 'wps' && valid_ifname(vif.ifname))
+			pending[vif.ifname] = { radio, section: vif.section };
 }
+if (!length(keys(pending))) exit(1);
+if (!listen)
+	exit(system('/etc/rc.wps/50-wps_sta listen </dev/null >/dev/null 2>&1 &'));
 
-wps_done=0
-ubusobjs="$( ubus -S list wpa_supplicant.* )"
-for ubusobj in $ubusobjs; do
-	ifname="$(echo $ubusobj | cut -d'.' -f2 )"
-	multi_ap=""
-	if [ -e "/var/run/wpa_supplicant-${ifname}.conf.is_multiap" ]; then
-		ubus -S call $ubusobj wps_start '{ "multi_ap": true }' && wps_done=1
-	else
-		ubus -S call $ubusobj wps_start && wps_done=1
-	fi
-done
-[ $wps_done = 0 ] && exit 1
+let listener = conn.listener('wps_credentials', (event, creds) => {
+	let member = pending[creds?.ifname];
+	let ssid = creds?.ssid;
+	let enc = creds?.encryption;
+	let key = creds?.key ?? '';
+	if (!member || type(ssid) != 'string' || length(ssid) < 1 || length(ssid) > 32 ||
+	    !(enc in [ 'none', 'psk', 'psk2' ]) || type(key) != 'string' ||
+	    match(ssid + key, /[\r\n]/) || index(ssid + key, '\0') >= 0 ||
+	    (enc == 'none' ? length(key) :
+	     (length(key) < 8 || (length(key) > 63 && !match(key, /^[0-9a-fA-F]{64}$/)))))
+		return;
+	let lock = fs.open('/var/run/mtwifi-config.lock', 'ae', 0600);
+	if (!lock?.lock('x')) return;
+	let ctx = uci.cursor();
+	let section = member.section;
+	let current = conn.call('network.wireless', 'status')?.[member.radio];
+	let active = current?.up && !current.pending &&
+		length(filter(current.interfaces ?? [], (vif) => vif.ifname == creds.ifname &&
+			vif.section == section && vif.config?.encryption == 'wps'));
+	let ok = false;
+	if (active && ctx.get('wireless', section, 'device') == member.radio &&
+	    ctx.get('wireless', section, 'mode') == 'sta' &&
+	    ctx.get('wireless', section, 'encryption') == 'wps' &&
+	    !length(keys(ctx.changes('wireless')?.wireless ?? {}))) {
+		ok = ctx.set('wireless', section, 'ssid', ssid) &&
+			ctx.set('wireless', section, 'encryption', enc);
+		if (enc == 'none') ctx.delete('wireless', section, 'key');
+		else ok = ok && ctx.set('wireless', section, 'key', key);
+		ok = ok && ctx.commit('wireless');
+	}
+	lock.close();
+	if (!ok) return;
+	delete pending[creds.ifname];
+	uloop.end();
+	conn.call('network', 'reload');
+});
+if (!listener) exit(1);
 
-wps_catch_credentials &
-exit 0
+for (let name in keys(pending)) {
+	conn.call('wpa_supplicant.' + name, 'wps_start', {});
+	if (conn.error() != null) delete pending[name];
+}
+if (length(keys(pending))) {
+	let timeout = uloop.timer(120000, () => uloop.end());
+	uloop.run();
+	timeout.cancel();
+}
+listener.remove();
+conn.disconnect();

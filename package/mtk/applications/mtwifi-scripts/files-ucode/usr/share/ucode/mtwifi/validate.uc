@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 'use strict';
-import { valid_ifname } from 'mtwifi.common';
+import * as fs from 'fs';
+import { trim, valid_ifname } from 'mtwifi.common';
 import * as uci from 'uci';
 import { device_band } from 'mtwifi.l1dat';
+import defs from 'mtwifi.defs';
 
 export function normalize_legacy_device(config, dev) {
 	let defaults = {
@@ -16,6 +18,8 @@ export function normalize_legacy_device(config, dev) {
 	if ((missing_band || config.band == 'auto') && band)
 		config.band = band;
 	if (!defaults[config.band]) return;
+	if ((dev?.band || dev?.INDEX == 'MT7990') && band && band != config.band)
+		die('PHY_PROFILE_MISMATCH');
 	if (config.htmode == null || config.htmode == '' || (legacy && config.htmode == 'NOHT'))
 		config.htmode = defaults[config.band].htmode;
 	if (config.channel === 0 || config.channel === '0')
@@ -54,7 +58,7 @@ function validate_mlo(data, previous) {
 		let group = iface.mldgroup ?? (+iface.mlo ? 1 : 0);
 		if (!+group || !affected[group]) continue;
 		/* BE14's profile parser enables MLO only for group 1. */
-		if (+group != 1 || !match(dev.htmode ?? '', /^EHT/) || +iface.wds)
+		if (+group != 1 || !match(dev.htmode ?? '', /^EHT/) || +iface.wds || +iface.mwds)
 			die('INVALID_MLO_MEMBER');
 		let enc = iface.encryption ?? 'none';
 		if (!match(enc, /^(sae|owe)(\+|$)/) ||
@@ -145,13 +149,64 @@ export function segments80(config) {
 	return [ first, second ];
 };
 
+export function center320(channel, layout) {
+	channel = +channel;
+	if (channel < 1 || channel % 4 != 1)
+		return null;
+	for (let center in layout ? [ 31, 63, 95, 127, 159, 191 ] : [ 31, 95, 159, 191 ])
+		if ((!layout || (int((center - 31) / 32) % 2 + 1) == layout) &&
+		    channel >= center - 30 && channel <= center + 30)
+			return center;
+	return null;
+};
+
+function normalize_acl(config) {
+	if (!(config.macfilter in [ 'allow', 'deny' ]))
+		return;
+	let list = config.maclist ?? [];
+	if (type(list) != 'array') die('INVALID_MAC_ACL');
+	if (config.macfile) {
+		let info = fs.stat(config.macfile);
+		if (info?.type != 'file' || info.size > 16384) die('INVALID_MAC_ACL');
+		let file = fs.open(config.macfile, 're');
+		if (!file) die('INVALID_MAC_ACL');
+		let content = file.read(16385);
+		file.close();
+		if (length(content) > 16384) die('INVALID_MAC_ACL');
+		list = [ ...list, ...split(content ?? '', '\n') ];
+	}
+	let entries = {};
+	for (let raw in list) {
+		let line = trim(split(raw, '#', 2)[0]);
+		if (!length(line)) continue;
+		let m = match(line, /^(([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})([ \t]+([0-9]{1,4}))?$/);
+		if (!m || (m[4] && (+m[4] < 1 || +m[4] > 4094)))
+			die('INVALID_MAC_ACL');
+		let mac = lc(m[1]);
+		let entry = m[4] ? mac + ' ' + +m[4] : mac;
+		if (entries[mac] && entries[mac] != entry) die('INVALID_MAC_ACL');
+		entries[mac] = entry;
+	}
+	if (length(keys(entries)) > defs.max_acl_entry) die('MAC_ACL_TOO_LARGE');
+	config.maclist = map(keys(entries), (mac) => entries[mac]);
+	delete config.macfile;
+};
+
 export function validate_profile(data, previous) {
 	check_text(data);
 	let config = data.config;
+	if (config.channel === 0 || config.channel === '0')
+		config.channel = 'auto';
 	limits(config, { twt: [0, 3], tx_preamble: [0, 2], txpower: [1, 100],
-		beacon_int: [20, 999], eht_bw320_offset: [0, 1] });
+		beacon_int: [20, 999], eht_bw320_offset: [0, 2] });
+	if (config.channel == 'auto')
+		limits(config, { acs_alg: [1, 3] });
 	if (!(config.band in [ '2g', '5g', '6g' ]))
 		die('INVALID_BAND');
+	if (config.band == '6g' && +(config.he_6ghz_reg_pwr_type ?? 0) != 0)
+		die('SIX_GHZ_POWER_TYPE_NOT_SUPPORTED');
+	if (config.band == '6g' && config.channel == 'auto' && config.psc_acs && config.acs_alg == 1)
+		die('ACS_PSC_REQUIRES_BUSY_TIME');
 	let bw = match(config.htmode ?? '', /^(HT|VHT|HE|EHT)(20|40|80_80|80|160|320)([+-]|-[12])?$/);
 	let split = bw?.[2] == '80_80';
 	if ((!bw && config.htmode != 'NOHT') ||
@@ -178,6 +233,9 @@ export function validate_profile(data, previous) {
 	if (channel != null && channel != 'auto' &&
 	    (!match('' + channel, /^[0-9]+$/) || +channel > { '2g': 14, '5g': 196, '6g': 233 }[config.band]))
 		die('INVALID_CHANNEL');
+	if (+bw?.[2] == 320 && channel != 'auto' &&
+	    center320(channel, +(bw?.[3] ? substr(bw[3], 1) : 0)) == null)
+		die('INVALID_CHANNEL');
 	feature_defaults(data);
 	let ap_count = 0;
 	let sta_count = 0;
@@ -190,6 +248,8 @@ export function validate_profile(data, previous) {
 			kicklow: [-100, 0], assocthres: [-100, 0] });
 		if (!(c.mode in [ 'ap', 'sta' ]))
 			die('UNSUPPORTED_MODE');
+		if (+c.mwds && (+c.wds || +c.mlo || +c.mldgroup || +c.mac_repeater))
+			die('INVALID_MWDS_MODE');
 		if (!valid_ifname(c.ifname))
 			die('INVALID_IFNAME');
 		for (let value in [ c.macaddr, c.bssid ])
@@ -199,8 +259,10 @@ export function validate_profile(data, previous) {
 				die('INVALID_MAC_ADDRESS');
 		if (c.mode == 'ap') ap_count++;
 		else sta_count++;
-		if (!length(c.ssid ?? '') || length(c.ssid) > 32)
+		let enrolling = c.mode == 'sta' && c.encryption == 'wps' && config.band != '6g';
+		if ((!enrolling && !length(c.ssid ?? '')) || length(c.ssid) > 32)
 			die('INVALID_SSID');
+		if (c.mode == 'ap') normalize_acl(c);
 		let enc = c.encryption ?? 'none';
 		if (match(enc, /^(sae|owe)(\+|$)/)) {
 			if (c.ieee80211w != null && +c.ieee80211w != 2)
@@ -213,6 +275,8 @@ export function validate_profile(data, previous) {
 				die('SIX_GHZ_REQUIRES_WPA3_AND_PMF');
 			c.ieee80211w = 2;
 			c.wps_pushbutton = false;
+			c.wps_label = false;
+			c.ext_registrar = false;
 		}
 		for (let _, vlan in iface.vlans ?? {}) {
 			let v = vlan.config;

@@ -1,0 +1,41 @@
+--- a/mt_wifi/profiles/cmm_profile.c
++++ b/mt_wifi/profiles/cmm_profile.c
+@@ -6246,24 +6246,21 @@
+ 				}
+ 			}
+ 
+-			/*AutoChannelSkipList*/
+-			if (RTMPGetKeyParameter("AutoChannelSkipList", tmpbuf, 128, pBuffer, FALSE)) {
+-				pAd->ApCfg.AutoChannelSkipListNum = delimitcnt(tmpbuf, ";") + 1;
+-				if (delimitcnt(tmpbuf, ";"))
+-					pAd->ApCfg.AutoChannelSkipListNum =
+-						delimitcnt(tmpbuf, ";") + 1;
+-				else
+-					pAd->ApCfg.AutoChannelSkipListNum = 0;
+-
+-				for (i = 0, macptr = rstrtok(tmpbuf, ";"); macptr; macptr = rstrtok(NULL, ";"), i++) {
+-					if (i < pAd->ApCfg.AutoChannelSkipListNum) {
+-						pAd->ApCfg.AutoChannelSkipList[i] = os_str_tol(macptr, 0, 10);
+-						MTWF_DBG(NULL,
+-							DBG_CAT_CFG, CATCFG_PROFILE, DBG_LVL_INFO,
+-							" AutoChannelSkipList[%d]= %d\n", i,
+-							pAd->ApCfg.AutoChannelSkipList[i]);
+-					} else
++			pAd->ApCfg.AutoChannelSkipListNum = 0;
++			if (RTMPGetKeyParameter("AutoChannelSkipList", tmpbuf,
++						MAX_PARAM_BUFFER_SIZE, pBuffer, FALSE)) {
++				for (macptr = rstrtok(tmpbuf, ";"); macptr;
++				     macptr = rstrtok(NULL, ";")) {
++					UCHAR channel;
++
++					if (pAd->ApCfg.AutoChannelSkipListNum >=
++					    ARRAY_SIZE(pAd->ApCfg.AutoChannelSkipList))
+ 						break;
++					if (kstrtou8(strim(macptr), 10, &channel) || !channel)
++						continue;
++
++					pAd->ApCfg.AutoChannelSkipList[
++						pAd->ApCfg.AutoChannelSkipListNum++] = channel;
+ 				}
+ #ifdef CONFIG_6G_AFC_SUPPORT
+ 				afc_save_autochannel_skip_init(pAd);

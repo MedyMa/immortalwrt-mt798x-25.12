@@ -40,6 +40,8 @@ import {
 } from 'mtwifi.common';
 import * as dat from 'mtwifi.dat';
 import * as l1dat from 'mtwifi.l1dat';
+import { device_capabilities } from 'mtwifi.caps';
+import { center320 } from 'mtwifi.validate';
 import defs from 'mtwifi.defs';
 
 const REINSTALL_LOCK = '/tmp/mtwifi_reloading.lock';
@@ -562,6 +564,83 @@ function igmp_snooping_get() {
 	}
 };
 
+function acs_channel_set(value, band, ranges) {
+	let channels = {};
+	let text = trim(type(value) == 'array' ? join(' ', value) : (value ?? ''));
+	let max_channel = { '2g': 14, '5g': 196, '6g': 233 }[band];
+	if (!length(text))
+		return channels;
+	for (let token in split(text, /[;[:space:]]+/)) {
+		if (!length(token)) continue;
+		let span = match(token, ranges ? /^([0-9]{1,3})(-([0-9]{1,3}))?$/ : /^([0-9]{1,3})$/);
+		let first = +(span?.[1] ?? 0);
+		let last = +(span?.[3] ?? first);
+		if (!first || last < first || last > max_channel)
+			die('ACS_INVALID_CHANNEL_LIST');
+		for (let channel = first; channel <= last; channel++)
+			channels[channel] = true;
+	}
+	return channels;
+};
+
+function acs_channel_number(freq, band) {
+	if (band == '2g')
+		return freq == 2484 ? 14 : (freq - 2407) / 5;
+	if (band == '5g')
+		return (freq - (freq >= 4910 && freq <= 4980 ? 4000 : 5000)) / 5;
+	return freq == 5935 ? 2 : (freq - 5950) / 5;
+};
+
+function apply_acs_config(dats, config, default_skip, caps) {
+	let automatic = config.channel == 'auto';
+	let psc = automatic && config.band == '6g' && !!+config.psc_acs;
+	let layout = +(match(config.htmode, /^EHT320-([12])$/)?.[1] ?? 0);
+	dats.AutoChannelSelect = automatic ? config.acs_alg ?? 3 : 0;
+	dats.Channel = automatic ? 0 : config.channel;
+	dats.AutoChannelSkipList = default_skip;
+	dats.AcsPrimaryChannels = '';
+	dats.Eht320Layout = layout;
+	if (config.band == '6g')
+		dats.PSC_ACS = psc ? 1 : 0;
+	if (!automatic)
+		return;
+
+	let blocked = acs_channel_set(config.acs_skiplist, config.band, false);
+	let selected = acs_channel_set(config.chanlist, config.band, true);
+	let restricted = length(keys(selected)) > 0;
+	if (!restricted && !psc && !layout && !config.acs_exclude_dfs && !length(keys(blocked)))
+		return;
+
+	let freqs = (caps ?? device_capabilities(config)).band?.freqs;
+	if (!length(freqs))
+		die('ACS_CHANNELS_UNAVAILABLE');
+	let excluded = { ...acs_channel_set(default_skip, config.band, false), ...blocked };
+	let skip = {};
+	let candidates = [];
+	for (let info in freqs) {
+		if (!info?.freq)
+			continue;
+		let channel = acs_channel_number(info.freq, config.band);
+		if (channel <= 0 || channel != int(channel))
+			continue;
+		if (excluded[channel] || (config.acs_exclude_dfs && info.radar)) {
+			skip[channel] = true;
+			continue;
+		}
+		if ((!restricted || selected[channel]) && (!psc || channel % 16 == 5) &&
+		    (!layout || center320(channel, layout) != null))
+			push(candidates, '' + channel);
+	}
+	if (!length(candidates))
+		die('ACS_NO_ELIGIBLE_CHANNEL');
+
+	/* The driver selects at interface open. Hostapd validates the same candidates. */
+	dats.AutoChannelSkipList = join(';', keys(skip));
+	dats.AcsPrimaryChannels = join(';', candidates);
+	config.chanlist = candidates;
+	config.acs_exclude_6ghz_non_psc = psc;
+};
+
 /* ============================================================
  * write_dat：生成/写回 .dat
  *
@@ -572,7 +651,7 @@ function igmp_snooping_get() {
  * 原 Lua 会自己执行 rmmod/modprobe 和 "/sbin/wifi up" 递归，这里只返回
  * 标志，由 handler 决定（handler 需要先知道结果再决定是否启动 hostapd）。
  * ============================================================ */
-export function prepare_dat(devname, payload) {
+export function prepare_dat(devname, payload, caps) {
 	let result = { ok: false, reinstall: false, changed: false, profiles: {}, files: [] };
 
 	if (exists(REINSTALL_LOCK)) {
@@ -673,7 +752,7 @@ export function prepare_dat(devname, payload) {
 	}
 
 	let bw = bwres[1];
-	let split = payload.config.htmode in [ 'VHT80_80', 'HE80_80' ];
+	let split_bw = payload.config.htmode in [ 'VHT80_80', 'HE80_80' ];
 	let extension = match(payload.config.htmode, /40([+-])$/);
 	if (extension) dats.HT_EXTCHA = extension[1] == '+' ? 1 : 0;
 
@@ -713,9 +792,9 @@ export function prepare_dat(devname, payload) {
 	}
 	let secondary = [];
 	for (let i = 0; i < +dats.BssidNum; i++)
-		push(secondary, split ? '' + payload.config.channel2 : '0');
+		push(secondary, split_bw ? '' + payload.config.channel2 : '0');
 	dats.VHT_Sec80_Channel = join(';', secondary);
-	if (split) {
+	if (split_bw) {
 		dats.VHT_BW = 3;
 		dats.EHT_ApBw = 0;
 	}
@@ -783,10 +862,16 @@ export function prepare_dat(devname, payload) {
 		dats.ApCliSsid = lua_or(v.config.ssid, '');
 		dats.AutoConnect = has_text(v.config.ssid) ? 0 : 1;
 		dats.ApCliBssid = lua_or(v.config.bssid, '');
-		dats.MACRepeaterEn = has_text(v.config.bssid) ? 1 : 0;
+		dats.MACRepeaterEn = truthy(v.config.mac_repeater) ? 1 : 0;
 		dats.ApCliUAPSDCapable = lua_or(v.config.uapsd, 0);
 
-		let encinfo = enc2dat_lookup(v.config.encryption, v.config.sae_ext_key, v.config.gcmp256);
+		let enrolling = v.config.encryption == 'wps';
+		let encinfo = enc2dat_lookup(enrolling ? 'none' : v.config.encryption,
+			v.config.sae_ext_key, v.config.gcmp256);
+		if (enrolling) {
+			dats.AutoConnect = 0;
+			dats.ApCliSsid = '';
+		}
 
 		if (encinfo == null) {
 			log(`unknown encryption "${v.config.encryption}" on ${iface_key}, skip ApCliAuthMode`);
@@ -840,6 +925,7 @@ export function prepare_dat(devname, payload) {
 	set_chip_cfg(payload, dats, devs, dev_name, result);
 
 	let country = payload.config.country ?? payload.config.country_code;
+	let default_skip = '';
 
 	if (type(country) == 'string' && length(country) == 2) {
 		dats.CountryCode = country;
@@ -857,22 +943,14 @@ export function prepare_dat(devname, payload) {
 			dats.CountryRegionABand = region[1];
 
 			if (country == '00' || country == 'US')
-				dats.AutoChannelSkipList = '100;104;108;112;116;120;124;128;132;136;140;144;169;173;177';
-			else
-				dats.AutoChannelSkipList = '';
+				default_skip = '100;104;108;112;116;120;124;128;132;136;140;144;169;173;177';
 		} else if (band == '6g') {
 			dats.PweMethod = 2;
 			dats.CountryRegionABand = region[2];
 		}
 	}
 
-	if (payload.config.channel == 'auto') {
-		dats.AutoChannelSelect = 3;
-		dats.Channel = 0;
-	} else {
-		dats.AutoChannelSelect = 0;
-		dats.Channel = payload.config.channel;
-	}
+	apply_acs_config(dats, payload.config, default_skip, caps);
 
 	/* 原 Lua 直接比较 cfg.config.txpower < 100，txpower 是字符串时会崩 */
 	let txpower = num_or(payload.config.txpower, null);
@@ -897,6 +975,9 @@ export function prepare_dat(devname, payload) {
 		payload.config.he_mu_beamformer = payload.config.mu_beamformer;
 		payload.config.eht_mu_beamformer = payload.config.mu_beamformer;
 	}
+	set_dev_dat(dats, 'ITxBfEn', payload.config.itxbfen);
+	set_dev_dat(dats, 'SREnable', payload.config.sre_enable);
+	set_dev_dat(dats, 'VOW_Airtime_Fairness_En', payload.config.vow_airtime_fairness_en);
 
 	/* HE individual/broadcast TWT and EHT restricted TWT are independent. */
 	if (payload.config.twt != null)
@@ -1107,7 +1188,8 @@ export function prepare_dat(devname, payload) {
 				if (i > defs.max_acl_entry)
 					break;
 
-				maclist = length(maclist) > 0 ? maclist + ';' + entry : entry;
+				let mac = split(entry, ' ', 2)[0];
+				maclist = length(maclist) > 0 ? maclist + ';' + mac : mac;
 			}
 
 			set_idx_dat(dats, apidx - 1, 'AccessControlList', maclist);
@@ -1205,8 +1287,16 @@ export function prepare_dat(devname, payload) {
 
 export function rollback_dat(plan) {
 	let ok = true;
-	for (let file in reverse(plan.committed ?? []))
+	for (let file in reverse(plan.committed ?? [])) {
+		let current = readfile(file.path);
+		if (current == file.previous) continue;
+		if (current != file.text) {
+			log(`profile changed during activation: ${file.path}`);
+			ok = false;
+			continue;
+		}
 		ok = atomic_write(file.path, file.previous) && ok;
+	}
 	if (ok)
 		plan.committed = [];
 	return ok;

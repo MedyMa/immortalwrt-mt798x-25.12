@@ -11,6 +11,7 @@
 #include "utils/eloop.h"
 #include "utils/wpabuf.h"
 #include "common/ieee802_11_defs.h"
+#include "common/wpa_common.h"
 #include "common/hw_features_common.h"
 #include "hostapd.h"
 #include "neighbor_db.h"
@@ -412,6 +413,26 @@ int ieee80211_frequency_to_channel(int freq)
 		return 0;
 }
 
+static void hostapd_bss_activation(struct hostapd_data *hapd)
+{
+	blobmsg_add_u8(&b, "beacon_ready", hapd->started && hapd->beacon_set_done);
+	blobmsg_add_u8(&b, "disabled", !!hapd->conf->start_disabled);
+#ifdef CONFIG_MTK_IEEE80211BE
+	if (hapd->ml_group) {
+		struct wpa_ml_group *group = hapd->ml_group;
+		size_t link;
+
+		for (link = 0; link < group->ml_link_num; link++) {
+			if (group->links[link].ctx != hapd)
+				continue;
+			blobmsg_printf(&b, "mld_addr", MACSTR, MAC2STR(group->ml_addr));
+			blobmsg_add_u32(&b, "link_id", group->links[link].link_id);
+			break;
+		}
+	}
+#endif
+}
+
 static int
 hostapd_bss_get_status(struct ubus_context *ctx, struct ubus_object *obj,
 		       struct ubus_request_data *req, const char *method,
@@ -436,6 +457,7 @@ hostapd_bss_get_status(struct ubus_context *ctx, struct ubus_object *obj,
 	blob_buf_init(&b, 0);
 	blobmsg_add_string(&b, "driver", hapd->driver->name);
 	blobmsg_add_string(&b, "status", hostapd_state_text(hapd->iface->state));
+	hostapd_bss_activation(hapd);
 	blobmsg_printf(&b, "bssid", MACSTR, MAC2STR(hapd->conf->bssid));
 
 	memset(ssid, 0, SSID_MAX_LEN + 1);
@@ -1887,7 +1909,54 @@ bool hostapd_ubus_object_exists(void)
 	return ret;
 }
 
+static int
+hostapd_get_radio_status(struct ubus_context *ctx, struct ubus_object *obj,
+			 struct ubus_request_data *req, const char *method,
+			 struct blob_attr *msg)
+{
+	struct hapd_interfaces *interfaces = get_hapd_interfaces_from_object(obj);
+	struct blob_attr *tb[__CONFIG_REM_MAX];
+	struct hostapd_iface *iface = NULL;
+	void *bsses;
+	const char *phy;
+	size_t i;
+
+	blobmsg_parse(config_remove_policy, __CONFIG_REM_MAX, tb,
+		      blob_data(msg), blob_len(msg));
+	if (!tb[CONFIG_REM_IFACE])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	phy = blobmsg_get_string(tb[CONFIG_REM_IFACE]);
+
+	for (i = 0; i < interfaces->count; i++) {
+		if (os_strcmp(interfaces->iface[i]->phy, phy) == 0) {
+			iface = interfaces->iface[i];
+			break;
+		}
+	}
+	if (!iface)
+		return UBUS_STATUS_NOT_FOUND;
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "status", hostapd_state_text(iface->state));
+	blobmsg_add_u32(&b, "freq", iface->freq);
+	blobmsg_add_u32(&b, "channel", iface->conf->channel);
+	blobmsg_add_u8(&b, "cac_active", !!iface->cac_started);
+	blobmsg_add_u32(&b, "cac_seconds", iface->dfs_cac_ms / 1000);
+	bsses = blobmsg_open_table(&b, "bss");
+	for (i = 0; i < iface->num_bss; i++) {
+		struct hostapd_data *hapd = iface->bss[i];
+		void *entry = blobmsg_open_table(&b, hapd->conf->iface);
+
+		hostapd_bss_activation(hapd);
+		blobmsg_close_table(&b, entry);
+	}
+	blobmsg_close_table(&b, bsses);
+	ubus_send_reply(ctx, req, b.head);
+	return UBUS_STATUS_OK;
+}
+
 static const struct ubus_method daemon_methods[] = {
+	UBUS_METHOD("get_radio_status", hostapd_get_radio_status, config_remove_policy),
 	UBUS_METHOD("config_add", hostapd_config_add, config_add_policy),
 	UBUS_METHOD("config_remove", hostapd_config_remove, config_remove_policy),
 };

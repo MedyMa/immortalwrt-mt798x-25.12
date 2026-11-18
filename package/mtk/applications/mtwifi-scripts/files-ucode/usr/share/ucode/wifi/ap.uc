@@ -237,8 +237,10 @@ function iface_wps(config) {
 		config.eap_server = 1;
 		set_default(config, 'wps_state', 2);
 
-		if (config.ext_registrar && config.network_bridge)
+		if (config.ext_registrar && config.network_bridge) {
 			set_default(config, 'upnp_iface', config.network_bridge);
+			append('wps_cred_processing', 1);
+		}
 
 		if (config.multi_ap && config.multi_ap_backhaul_ssid) {
 			append_string_vars(config, [ 'multi_ap_backhaul_ssid' ]);

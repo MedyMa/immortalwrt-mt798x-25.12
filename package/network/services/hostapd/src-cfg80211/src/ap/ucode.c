@@ -504,6 +504,36 @@ uc_hostapd_disable_iface(struct hostapd_iface *iface)
 }
 
 static uc_value_t *
+uc_hostapd_iface_radio_status(uc_vm_t *vm, size_t nargs)
+{
+	struct hostapd_iface *iface = uc_fn_thisval("hostapd.iface");
+	uc_value_t *status, *bsses;
+	size_t i;
+
+	if (!iface)
+		return NULL;
+
+	status = ucv_object_new(vm);
+	ucv_object_add(status, "status", ucv_string_new(hostapd_state_text(iface->state)));
+	ucv_object_add(status, "freq", ucv_int64_new(iface->freq));
+	ucv_object_add(status, "channel", ucv_int64_new(iface->conf->channel));
+	ucv_object_add(status, "cac_active", ucv_boolean_new(iface->cac_started));
+	ucv_object_add(status, "cac_seconds", ucv_int64_new(iface->dfs_cac_ms / 1000));
+	bsses = ucv_object_new(vm);
+	for (i = 0; iface->bss && i < iface->num_bss; i++) {
+		struct hostapd_data *hapd = iface->bss[i];
+		uc_value_t *entry = ucv_object_new(vm);
+
+		ucv_object_add(entry, "beacon_ready", ucv_boolean_new(hapd->started && hapd->beacon_set_done));
+		ucv_object_add(entry, "disabled", ucv_boolean_new(hapd->conf->start_disabled));
+		ucv_object_add(bsses, hapd->conf->iface, entry);
+	}
+	ucv_object_add(status, "bss", bsses);
+
+	return status;
+}
+
+static uc_value_t *
 uc_hostapd_iface_stop(uc_vm_t *vm, size_t nargs)
 {
 	struct hostapd_iface *iface = uc_fn_thisval("hostapd.iface");
@@ -848,6 +878,7 @@ int hostapd_ucode_init(struct hapd_interfaces *ifaces)
 	static const uc_function_list_t iface_fns[] = {
 		{ "set_bss_order", uc_hostapd_iface_set_bss_order },
 		{ "add_bss", uc_hostapd_iface_add_bss },
+		{ "radio_status", uc_hostapd_iface_radio_status },
 		{ "stop", uc_hostapd_iface_stop },
 		{ "start", uc_hostapd_iface_start },
 		{ "switch_channel", uc_hostapd_iface_switch_channel },

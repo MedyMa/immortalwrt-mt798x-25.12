@@ -15,6 +15,7 @@ local MAX_MANAGED_GROUP = 1
 local lock_fd
 local MAX_REQUEST = 4096
 local OPERATION_TIMEOUT = 180
+local CFG80211_OPERATION_TIMEOUT = 720
 local RELOAD_RETRY_INTERVAL = 8
 local MAX_RELOAD_ATTEMPTS = 5
 local RELOAD_TIMEOUT = 8
@@ -359,6 +360,8 @@ local function runtime_field_matches(config, expected, name)
 end
 
 local function wireless_runtime_matches(status, members, expected)
+	local cfg80211 = fs.stat("/usr/share/ucode/mtwifi/cfg.uc")
+	local links, mld_addr = {}, nil
 	for _, member in ipairs(members or {}) do
 		local device = status[member.device]
 		if type(device) ~= "table" or device.up ~= true or device.pending ~= false or
@@ -370,6 +373,23 @@ local function wireless_runtime_matches(status, members, expected)
 				local matches = true
 				for _, name in ipairs(MANAGED) do
 					if not runtime_field_matches(iface.config, fields, name) then matches = false; break end
+				end
+				if matches and cfg80211 then
+					local name = iface.ifname
+					if type(name) ~= "string" or #name > 15 or not name:match("^[%w_%-]+$") then return false end
+					local ok, text = bounded_exec({ "/bin/ubus", "call", "hostapd." .. name, "get_status" },
+						STATUS_TIMEOUT, true)
+					local decoded, ap = pcall(cjson.decode, text or "")
+					if not ok or not decoded or type(ap) ~= "table" or ap.status ~= "ENABLED" or
+						(ap.beacon_ready ~= true and ap.beacon_ready ~= 1) or (tonumber(ap.freq) or 0) <= 0 then return false end
+					local active_group = tonumber(scalar(iface.config.mldgroup) or "0") or 0
+					if active_group > 0 or scalar(iface.config.mlo) == "1" then
+						if type(ap.mld_addr) ~= "string" or ap.mld_addr == "00:00:00:00:00:00" or
+							type(ap.link_id) ~= "number" or ap.link_id < 0 or ap.link_id > 15 or
+							(mld_addr and ap.mld_addr ~= mld_addr) or links[ap.link_id] then return false end
+						mld_addr = ap.mld_addr
+						links[ap.link_id] = true
+					end
 				end
 				if matches then found = true; break end
 			end
@@ -458,7 +478,8 @@ local function selected_aps(c, selected, allow_owned, state)
 		if type(section) ~= "string" or not section:match("^[%w_]+$") or unique[section] then return nil, "invalid_member" end
 		unique[section] = true
 		local iface = c:get_all("wireless", section)
-		if not iface or iface[".type"] ~= "wifi-iface" or iface.mode ~= "ap" or disabled(iface.disabled) or disabled(iface.wds) then
+		if not iface or iface[".type"] ~= "wifi-iface" or iface.mode ~= "ap" or
+			disabled(iface.disabled) or disabled(iface.wds) or disabled(iface.mwds) then
 			return nil, "invalid_member"
 		end
 		local identity = interface_identity(c, section)
@@ -509,7 +530,9 @@ local function build_status()
 			(phase == "applied" and "saved" or phase))
 		groups[#groups + 1] = {
 			id = record.id, state = state_name,
-			runtime = phase == "applied" and (record.runtime_confirmed and "config_applied" or "unverified") or "not_ready",
+			runtime = phase == "applied" and
+				(record.links_confirmed and "links_confirmed" or
+				 (record.runtime_confirmed and "config_applied" or "unverified")) or "not_ready",
 			members = members
 		}
 	end
@@ -530,7 +553,7 @@ local function build_status()
 			band = band_name(c, device, htmode), ssid = scalar(iface.ssid) or "",
 			grouped = not valid or (group or 0) > 0,
 			managed = rec ~= nil,
-			eligible = supported and not disabled(iface.wds),
+			eligible = supported and not disabled(iface.wds) and not disabled(iface.mwds),
 			legacy = legacy,
 			disabled = disabled(iface.disabled) or disabled(c:get("wireless", device, "disabled"))
 		}
@@ -683,14 +706,17 @@ local function finish_operation(state, record, index, was_restore)
 		record.phase, record.action, record.operation = "applied", nil, nil
 		record.precondition, record.previous, record.restore_expected = nil, nil, nil
 		record.runtime_confirmed = true
+		record.links_confirmed = fs.stat("/usr/share/ucode/mtwifi/cfg.uc") and true or nil
 		if not save_state(state) then return { ok = false, code = "state_write_failed", message = "state_write_failed" } end
-		return { ok = true, state = "saved", pending = false, id = record.id, runtime = "config_applied" }
+		return { ok = true, state = "saved", pending = false, id = record.id,
+			runtime = record.links_confirmed and "links_confirmed" or "config_applied" }
 	end
 	if operation == "edit" or record.previous then
 		local target = record.restore_expected or record.previous
 		record.expected, record.phase, record.action, record.operation = target, "applied", nil, nil
 		record.previous, record.restore_expected, record.precondition = nil, nil, nil
 		record.runtime_confirmed = true
+		record.links_confirmed = fs.stat("/usr/share/ucode/mtwifi/cfg.uc") and true or nil
 		record.ssid = target[record.members[1].section].ssid.value
 		if not save_state(state) then return { ok = false, code = "state_write_failed", message = "state_write_failed" } end
 		return { ok = true, state = operation == "close" and "restored" or "rolled_back", pending = false, id = record.id }
@@ -719,8 +745,12 @@ local function poll_operation(state, id)
 		record.phase = "recovery_conflict"; save_state(state)
 		return { ok = false, code = "conflict", message = "external_change_detected", pending = true, id = id }
 	end
-	if target and runtime_matches(record.members, target) then return finish_operation(state, record, entry.index, restoring) end
-	if not restoring and now - (tonumber(record.started_at) or now) >= OPERATION_TIMEOUT then
+	local runtime = wireless_runtime_status()
+	if runtime and target and wireless_runtime_matches(runtime, record.members, target) then
+		return finish_operation(state, record, entry.index, restoring)
+	end
+	local deadline = fs.stat("/usr/share/ucode/mtwifi/cfg.uc") and CFG80211_OPERATION_TIMEOUT or OPERATION_TIMEOUT
+	if not restoring and now - (tonumber(record.started_at) or now) >= deadline then
 		local rollback = record.operation == "edit" and record.previous or record.original
 		local allowed = { record.original or {}, record.expected or {}, rollback or {} }
 		local ok, err = restore_snapshots(state, record, rollback, allowed, true)
@@ -732,7 +762,11 @@ local function poll_operation(state, id)
 	end
 	local last = tonumber(record.last_reload_at) or 0
 	local attempts = tonumber(record.reload_attempts) or 0
-	local retry_reload = record.reload_failed == true or (restoring and now - last >= 60)
+	local waiting = false
+	for _, member in ipairs(record.members or {}) do
+		if runtime and runtime[member.device] and runtime[member.device].pending then waiting = true; break end
+	end
+	local retry_reload = not waiting and (record.reload_failed == true or (restoring and now - last >= 60))
 	if attempts < MAX_RELOAD_ATTEMPTS and retry_reload and now - last >= RELOAD_RETRY_INTERVAL then
 		record.last_reload_at, record.reload_attempts = now, attempts + 1
 		record.reload_failed = true

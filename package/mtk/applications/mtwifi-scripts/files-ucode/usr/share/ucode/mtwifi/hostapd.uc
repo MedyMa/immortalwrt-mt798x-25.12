@@ -23,13 +23,14 @@
  */
 
 import * as fs from 'fs';
+import * as ubus from 'ubus';
 import {
 	append, append_raw, append_vars, comment, dump_config, flush_config, set_default
 } from 'wifi.common';
 import * as ap from 'wifi.ap';
 import * as netifd from 'wifi.netifd';
 import { device_capabilities } from 'mtwifi.caps';
-import { segments80 } from 'mtwifi.validate';
+import { center320, segments80 } from 'mtwifi.validate';
 import { log, trim, readfile, daemon_config_write, capture_files, commit_files, rollback_files, exists, shell_quote, sleep } from 'mtwifi.common';
 
 const HOSTAPD = '/usr/sbin/hostapd';
@@ -262,34 +263,18 @@ function device_rates(config) {
 
 /* MTK：6G EHT320 的 center/width 约定与官方 ucode 不同 */
 function device_eht320(config) {
+	let layout = +(match(config.htmode, /^EHT320-([12])$/)?.[1] ?? 0);
 	if (!config.channel) {
 		config.op_class = 137;
 		config.vht_oper_chwidth = 2;
 		config.eht_oper_chwidth = 9;
 		config.eht_oper_centr_freq_seg0_idx = 0;
-		config.eht_bw320_offset = config.htmode == 'EHT320' ? 0 : 1;
+		config.eht_bw320_offset = layout;
 		return true;
 	}
-	let eht_center_seg0_map = [ [ 61, 31 ], [ 125, 95 ], [ 189, 159 ], [ 221, 191 ] ];
-	let idx = 0;
-
-	for (let k, pair in eht_center_seg0_map)
-		if (config.channel <= pair[0]) {
-			idx = pair[1];
-			break;
-		}
-
-	/* 与 shell 版一致：EHT320-1 不能用于 193 以上，EHT320-2 不能用于 29 以下 */
-	if ((config.htmode == 'EHT320-1' && config.channel >= 193) ||
-	    (config.htmode == 'EHT320-2' && config.channel <= 29))
+	let idx = center320(config.channel, layout);
+	if (idx == null)
 		return false;
-
-	if (config.htmode == 'EHT320-2' && config.channel <= 189) {
-		if (config.channel > idx)
-			idx += 32;
-		else
-			idx -= 32;
-	}
 
 	config.vht_oper_chwidth = 2;
 	config.vht_oper_centr_freq_seg0_idx = (config.channel > idx) ? idx + 16 : idx - 16;
@@ -297,16 +282,7 @@ function device_eht320(config) {
 	config.eht_oper_centr_freq_seg0_idx = idx;
 	config.op_class = 137;
 
-	switch (config.htmode) {
-	case 'EHT320-1':
-	case 'EHT320-2':
-		config.eht_bw320_offset = 1;
-		break;
-	case 'EHT320':
-		config.eht_bw320_offset = 0;
-		break;
-	}
-
+	config.eht_bw320_offset = layout;
 	return true;
 };
 
@@ -682,7 +658,7 @@ function generate_device(config, caps) {
 	else
 		set_default(config, 'enable_background_radar', false);
 
-	append_vars(config, [ 'acs_chan_bias', 'acs_exclude_dfs', 'enable_background_radar' ]);
+	append_vars(config, [ 'acs_chan_bias', 'acs_exclude_dfs', 'acs_exclude_6ghz_non_psc', 'enable_background_radar' ]);
 
 	/* TX power */
 	append_vars(config, [ 'min_tx_power' ]);
@@ -756,7 +732,9 @@ function setup_interface(interface, data, vif, caps, idx) {
 	push(bss_options, 'use_driver_iface_addr=1');
 	config.hostapd_bss_options = bss_options;
 
-	ap.generate(interface, data, config, vif.vlans ?? {}, vif.stas ?? {}, caps.features);
+	ap.generate(interface, { ...data, ap_start_disabled: !!config.start_disabled },
+		config, vif.vlans ?? {}, vif.stas ?? {}, caps.features);
+	return config;
 };
 
 /* ------------------------------------------------------------------ */
@@ -798,23 +776,12 @@ function wps_er_start(ifnames) {
 	for (let ifname in ifnames) {
 		let ctrl = `${CTRL_DIR}/${ifname}`;
 		let pidfile = `/var/run/action-${ifname}-wps-er.pid`;
-		let i;
-
-		for (i = 0; i < 10; i++) {
-			if (fs.stat(ctrl))
-				break;
-			sleep(1);
-		}
-
-		if (i == 10) {
-			log(`ctrl socket ${ctrl} not ready, skip WPS ER for ${ifname}`);
-			continue;
-		}
 
 		kill_pidfile(pidfile);
-		system(`${HOSTAPD_CLI} -i ${shell_quote(ifname)} -a ${shell_quote(WPS_ER_SCRIPT)} -B -P ${shell_quote(pidfile)}`);
-		log(`WPS ER attached to ${ifname}`);
+		if (!fs.stat(ctrl) || system(`${HOSTAPD_CLI} -i ${shell_quote(ifname)} -a ${shell_quote(WPS_ER_SCRIPT)} -B -P ${shell_quote(pidfile)}`))
+			return false;
 	}
+	return true;
 };
 
 function wps_er_stop(ifnames) {
@@ -836,15 +803,17 @@ export function wait_ready() {
 	return false;
 };
 
-export function prepare(data) {
+export function prepare(data, caps) {
 	let suffix = data.vif_phy_suffix ?? '';
 	let file = conf_path(data.phy, suffix);
 	let config = data.config;
 	config.phy = data.phy;
 	config.country_code ??= config.country;
-	let caps = device_capabilities(config);
+	caps ??= device_capabilities(config);
 	let idx = 0;
 	let ifnames = [];
+	let advertised = [];
+	let registrars = [];
 	let render = () => {
 		flush_config();
 		if (!generate_device(config, caps))
@@ -857,13 +826,19 @@ export function prepare(data) {
 				die('OWE_TRANSITION_NOT_SUPPORTED');
 			iface.config.network_bridge = iface.bridge;
 			iface.config.network_ifname = iface['bridge-ifname'];
-			setup_interface(k, data, iface, caps, idx++);
-			push(ifnames, iface.config.ifname);
+			let bss = setup_interface(k, data, iface, caps, idx++);
+			push(ifnames, bss.ifname);
+			if (!bss.start_disabled) {
+				push(advertised, bss.ifname);
+				if (bss.ext_registrar && bss.network_bridge && bss.wps_possible &&
+				    length(bss.config_methods))
+					push(registrars, bss.ifname);
+			}
 		}
 		return daemon_config_write(file, dump_config(), CTRL_DIR);
 	};
 	let staged = capture_files(() => netifd.capture_notifications(render));
-	return { ok: !!staged.result.result, file, text: dump_config(), ifnames,
+	return { ok: !!staged.result.result, file, text: dump_config(), ifnames, advertised, registrars,
 		files: staged.files, notifications: staged.result.notifications,
 		previous: readfile(file), phy: data.phy };
 };
@@ -893,13 +868,14 @@ function detach(ifnames, plan) {
 };
 
 export function activate(plan) {
-	if (!plan.ok || !length(plan.ifnames))
-		return plan.ok;
-	if (!commit_files(plan))
+	if (!plan.ok || !commit_files(plan))
 		return false;
 	plan.previous_ifnames = conf_ifnames_text(plan.previous);
+	wps_er_stop(plan.previous_ifnames);
 	if (!detach(plan.previous_ifnames, plan))
 		return false;
+	if (!length(plan.ifnames))
+		return true;
 	plan.attach_attempted = true;
 	if (!attach(plan)) {
 		log(`hostapd rejected configuration for ${plan.phy}`);
@@ -908,10 +884,58 @@ export function activate(plan) {
 	return true;
 };
 
+export function activation(plan, report, canceled) {
+	let connection = ubus.connect(null, 2);
+	if (!connection)
+		return 'HOSTAPD_STATUS_UNAVAILABLE';
+	let started = clock(true)[0];
+	let deadline = started + 45;
+	let last_cac = false;
+	let missing = 0;
+	let result = 'HOSTAPD_ACTIVATION_TIMEOUT';
+	while (clock(true)[0] <= deadline) {
+		if (canceled(connection)) {
+			result = 'ACTIVATION_CANCELED';
+			break;
+		}
+		let state = connection.call('hostapd', 'get_radio_status', { iface: plan.phy });
+		if (type(state) != 'object') {
+			if (++missing >= 5) {
+				result = 'HOSTAPD_STATUS_UNAVAILABLE';
+				break;
+			}
+		} else {
+			missing = 0;
+			let cac = state.cac_active || state.status == 'DFS';
+			if (cac && !last_cac)
+				deadline = min(started + 650,
+					clock(true)[0] + min(600, state.cac_seconds || 600) + 15);
+			last_cac = cac;
+			let phase = cac ? 'cac' : state.status == 'ACS' ? 'acs' : 'configured';
+			if (state.status == 'DISABLED') {
+				result = 'HOSTAPD_ACTIVATION_FAILED';
+				break;
+			}
+			if (state.status == 'ENABLED' && state.freq > 0 &&
+			    !length(filter(plan.advertised, (name) => !state.bss?.[name]?.beacon_ready))) {
+				report(length(plan.advertised) ? 'beaconing' : 'standby', state);
+				result = null;
+				break;
+			}
+			report(phase, state);
+		}
+		sleep(1);
+	}
+	connection.disconnect();
+	return result;
+};
+
 /* Stop new BSSs before restoring .dat, then restore every AP file before attach. */
 export function stop(plan) {
-	if (plan?.attach_attempted)
+	if (plan?.attach_attempted) {
+		wps_er_stop(plan.registrars);
 		return detach(plan.ifnames);
+	}
 	return !plan?.previous_removed || detach(plan.previous_ifnames);
 };
 
@@ -921,7 +945,7 @@ export function rollback(plan, restart) {
 	if (!rollback_files(plan))
 		return false;
 	if (restart != false && plan.previous_removed) {
-		if (!attach(plan))
+		if (!attach(plan) || !wps_er_start(plan.previous_registrars ?? []))
 			return false;
 	}
 	plan.attach_attempted = false;
@@ -930,8 +954,11 @@ export function rollback(plan, restart) {
 };
 
 export function complete(plan) {
+	if (!wps_er_start(plan?.registrars ?? []))
+		return false;
 	for (let n in plan?.notifications ?? [])
 		netifd.notify(n.command, n.params, n.data);
+	return true;
 };
 
 export function teardown(phy, radio) {

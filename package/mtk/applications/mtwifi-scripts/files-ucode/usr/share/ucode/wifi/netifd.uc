@@ -9,6 +9,7 @@ const CMD_PROCESS_ADD = 2;
 const CMD_PROCESS_KILL_ALL = 3;
 const CMD_SET_RETRY = 4;
 const CMD_RESTORE_CONFIG = 5;
+const CMD_DEFER_SETUP = 6;
 
 let pending_notifications;
 
@@ -40,6 +41,12 @@ export function notify(command, params, data) {
 
 export function set_up() {
 	notify(CMD_UP);
+	return global.ubus.error() == null;
+};
+
+export function defer_setup() {
+	notify(CMD_DEFER_SETUP);
+	return global.ubus.error() == null;
 };
 
 export function restore_config(payload) {

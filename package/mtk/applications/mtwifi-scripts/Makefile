@@ -12,7 +12,7 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=mtwifi-scripts
 PKG_LICENSE:=GPL-2.0+
 PKG_VERSION:=2.0
-PKG_RELEASE:=17
+PKG_RELEASE:=18
 
 PKG_MAINTAINER:=ChuCi Nan <nanchuci023@gmail.com>
 PKG_CONFIG_DEPENDS:=CONFIG_WIFI_SCRIPTS_UCODE CONFIG_WIFI_SCRIPTS_WPS_BUTTON_DISABLED \
@@ -31,7 +31,7 @@ define Package/mtwifi-scripts
   SUBMENU:=Applications
   TITLE:=mtwifi configure scripts for mt799x (ucode)
   DEPENDS:=+wifi-dats +netifd +iwinfo +iw +mwctl +hostapd-utils +wpa-cli wpad-openssl +@WIFI_SCRIPTS_UCODE \
-	+ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus \
+	+ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-uloop \
 	+ucode-mod-nl80211 +ucode-mod-rtnl +ucode-mod-digest \
 	+lua-cjson +libuci-lua +luci-lib-nixio \
 	@MTK_WIFI7_CFG80211_SUPPORT @MTK_WIFI7_IWCOMMAND_CFG80211_SUPPORT \

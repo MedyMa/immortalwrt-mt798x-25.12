@@ -24,7 +24,6 @@ import * as fs from 'fs';
 import * as uci from 'uci';
 import { validate } from 'wifi.validate';
 import * as netifd from 'wifi.netifd';
-import { find_phy } from 'wifi.utils';
 
 import * as l1dat from 'mtwifi.l1dat';
 import * as cfg from 'mtwifi.cfg';
@@ -63,6 +62,9 @@ const EXTRA = {
 		[ 'dbdc_main', TYPE.boolean ],
 		[ 'rsn_overriding', TYPE.boolean ],
 		[ 'whnat', TYPE.boolean ],
+		[ 'acs_alg', TYPE.number ],
+		[ 'acs_skiplist', TYPE.array ],
+		[ 'psc_acs', TYPE.boolean ],
 		[ 'twt', TYPE.number ],
 		[ 'eht_restricted_twt', TYPE.boolean ],
 		[ 'tx_burst', TYPE.boolean ],
@@ -74,6 +76,9 @@ const EXTRA = {
 		[ 'vht_1024', TYPE.boolean ],
 		[ 'he_ldpc', TYPE.boolean ],
 		[ 'mu_beamformer', TYPE.boolean ],
+		[ 'itxbfen', TYPE.boolean ],
+		[ 'sre_enable', TYPE.boolean ],
+		[ 'vow_airtime_fairness_en', TYPE.boolean ],
 		[ 'map_mode', TYPE.number ],
 		[ 'obss_interval', TYPE.number ],
 		[ 'eht_bw320_offset', TYPE.number ],
@@ -84,6 +89,7 @@ const EXTRA = {
 		[ 'rsn_override', TYPE.number ],
 		[ 'ieee80211w', TYPE.number ],
 		[ 'mwds', TYPE.boolean ],
+		[ 'mac_repeater', TYPE.boolean ],
 		[ 'disable_eht', TYPE.boolean ],
 		[ 'amsdu', TYPE.boolean ],
 		[ 'autoba', TYPE.boolean ],
@@ -295,18 +301,21 @@ function phy_of_ifname(ifname) {
 
 function resolve_phy(config, dev) {
 	let expected = phy_of_ifname(dev?.main_ifname);
-	/* PHY numbers can change after unloading; the L1 netdevice remains authoritative. */
-	if (expected) {
-		if (config.path || config.macaddr) {
-			let bound = find_phy({ ...config, phy: expected }, true);
-			if (bound && bound != expected) die('PHY_PROFILE_MISMATCH');
-		}
-		return expected;
+	if (expected && config.macaddr &&
+	    lc(trim(readfile(`/sys/class/ieee80211/${expected}/macaddress`) ?? '')) != lc(config.macaddr))
+		die('PHY_PROFILE_MISMATCH');
+	if (expected && config.path) {
+		let parts = split(config.path, '+');
+		let devices = filter(fs.lsdir('/sys/class/ieee80211') ?? [], (name) => {
+			let path = fs.realpath(`/sys/class/ieee80211/${name}/device`) ?? '';
+			return substr(path, -length(parts[0])) == parts[0];
+		});
+		sort(devices, (a, b) => +readfile(`/sys/class/ieee80211/${a}/index`) -
+			+readfile(`/sys/class/ieee80211/${b}/index`));
+		if (devices[+parts[1]] != expected)
+			die('PHY_PROFILE_MISMATCH');
 	}
-	let phy = find_phy(config, true);
-	if (!phy)
-		log(`cannot resolve phy for ${dev?.main_ifname ?? 'unknown'}`);
-	return phy;
+	return expected;
 };
 
 /* ------------------------------------------------------------------ */
@@ -372,7 +381,10 @@ function rebuild_devices(ctx, up, wait) {
 			die('WIRELESS_CONTROL_FAILED');
 	}
 	if (wait === false) return;
-	for (let attempt = 0; attempt < (up ? 180 : 200); attempt++) {
+	let start = clock(true)[0];
+	let deadline = start + (up ? 90 : 20);
+	let cac = {};
+	while (clock(true)[0] <= deadline) {
 		let status = global.ubus.call('network.wireless', 'status');
 		if (type(status) != 'object')
 			die('WIRELESS_STATUS_UNAVAILABLE');
@@ -381,6 +393,13 @@ function rebuild_devices(ctx, up, wait) {
 			let device = status[name];
 			if (device?.teardown_failed)
 				die('WIRELESS_STOP_FAILED');
+			if (up && device?.retry_setup_failed && !device.pending)
+				die(device.activation?.error ?? 'WIRELESS_START_FAILED');
+			if (up && !cac[name] && device?.activation?.phase == 'cac') {
+				cac[name] = true;
+				deadline = max(deadline, min(start + 700,
+					clock(true)[0] + min(600, device.activation.cac_seconds || 600) + 30));
+			}
 			ready &&= !!device && !device.pending && (up ? !!device.up : !device.up);
 		}
 		if (ready) return;
@@ -616,32 +635,72 @@ function rebuild(retry) {
 	return result;
 };
 
-let setup_transaction;
+let setup_transaction, config_lock;
 
 function try_rollback(step, callback) {
 	try { return callback() ?? true; }
 	catch (e) { log(`rollback ${step} failed: ${e}`); return false; }
 };
 
-function rollback_setup() {
+function rollback_setup(recover) {
 	let tx = setup_transaction;
 	if (!tx)
-		return;
+		return true;
 	setup_transaction = null;
 	/* Do not reattach an old BSS while the new vendor profile is still live. */
 	let stopped_sta = try_rollback('STA stop', () => mt_supplicant.stop(tx.sta));
 	let stopped_ap = try_rollback('AP stop', () => mt_hostapd.stop(tx.ap));
-	let metadata = try_rollback('metadata', () => rollback_files(tx.metadata));
-	let restored = try_rollback('vendor profiles', () => cfg.rollback_dat(tx.dat));
-	let restart = restored && stopped_sta && stopped_ap;
+	let metadata = !tx.metadata || try_rollback('metadata', () => rollback_files(tx.metadata));
+	let restored = !tx.dat || try_rollback('vendor profiles', () => cfg.rollback_dat(tx.dat));
+	let restart = recover != false && restored && stopped_sta && stopped_ap;
 	let ap_restored = try_rollback('AP files', () => mt_hostapd.rollback(tx.ap, restart));
 	let sta_restored = try_rollback('STA files', () => mt_supplicant.rollback(tx.sta, restart));
-	if (!restart || !metadata || !ap_restored || !sta_restored)
+	let ok = restored && stopped_sta && stopped_ap && metadata && ap_restored && sta_restored;
+	if (ok && tx.journal) fs.unlink(tx.journal);
+	if (!ok)
 		log('configuration rollback failed; keeping failed setup down');
+	return ok;
+};
+
+function restore_runtime(tx, reason) {
+	let previous = tx.previous;
+	if (tx.reported_vifs || !previous?.profile_applied || !previous.payload)
+		return false;
+	let ifaces = previous.profile?.interfaces ?? {};
+	if (!length(keys(ifaces))) return false;
+	let ap = global.ubus.call('hostapd', 'get_radio_status', { iface: tx.identity.phy });
+	for (let _, entry in ifaces) {
+		let config = entry.config;
+		if (config?.disabled) continue;
+		if (config.mode == 'ap' && !config.start_disabled &&
+		    (ap?.status != 'ENABLED' || !ap.bss?.[config.ifname]?.beacon_ready))
+			return false;
+		if (config.mode == 'sta' && !length(global.ubus.list('wpa_supplicant.' + config.ifname)))
+			return false;
+	}
+	netifd.restore_config(previous.payload);
+	for (let id, entry in ifaces)
+		if (entry.config?.ifname) netifd.set_vif(id, entry.config.ifname);
+	netifd.set_data({ ...tx.identity, activation: {
+		phase: 'restored', freq: ap?.freq, channel: ap?.channel, error: reason,
+	} });
+	log(`restored last active configuration for ${tx.identity.devname} after ${reason}`);
+	return netifd.set_up();
 };
 
 function fail_setup(reason) {
-	rollback_setup();
+	let tx = setup_transaction;
+	let data = tx?.identity;
+	if (rollback_setup(reason != 'ACTIVATION_CANCELED') && tx && reason != 'ACTIVATION_CANCELED') {
+		let recovered = try_rollback('runtime', () => restore_runtime(tx, reason));
+		if (recovered) return 0;
+	}
+	if (data)
+		netifd.set_data({ ...data, activation: {
+			phase: reason == 'ACTIVATION_CANCELED' ? 'canceled' : 'failed', error: reason,
+		} });
+	if (reason == 'ACTIVATION_CANCELED')
+		return 1;
 	netifd.setup_failed(reason);
 	return 1;
 };
@@ -691,7 +750,15 @@ function setup() {
 		netifd.setup_failed('UNKNOWN_DEVICE');
 		return 1;
 	}
+	for (let name, config in uci.cursor().get_all('wireless') ?? {})
+		if (name != ARGV[2] && config['.type'] == 'wifi-device' &&
+		    config.type == 'mtwifi' && !+config.disabled && (config.devname ?? name) == devname)
+			die('PHY_PROFILE_MISMATCH');
 	let marker = `/var/run/mtwifi-${devname}.configured`;
+	if (exists(marker + '.pending')) {
+		netifd.setup_failed('ACTIVATION_RECOVERY_PENDING');
+		return 1;
+	}
 	let previous = read_json(marker);
 	let profile_applied = previous?.profile_applied ?? (length(keys(previous?.profile?.interfaces ?? {})) > 0);
 	if (!length(keys(payload.interfaces ?? {}))) {
@@ -711,6 +778,12 @@ function setup() {
 		return 0;
 	}
 
+	let phy = phy_of_ifname(dev.main_ifname);
+	let previous_radio = previous?.profile?.config?.radio ?? payload.config?.radio;
+	setup_transaction = { previous, identity: {
+		phy, devname, radio: previous_radio, suffix: mt_hostapd.suffix_of(previous_radio),
+	} };
+
 	/* Validate before creating files, changing interfaces or sending commands. */
 	normalize_legacy_device(payload.config, dev);
 	let country = payload.config?.country;
@@ -722,34 +795,30 @@ function setup() {
 	validate_ifaces(payload);
 
 	/* 5. phy / 后缀 */
-	let phy = resolve_phy(payload.config, dev);
+	phy = resolve_phy(payload.config, dev);
 
 	if (!phy) {
 		log(`no phy for ${devname}`);
-		netifd.setup_failed('NO_PHY');
+		print('NO_PHY\n');
 		return 1;
 	}
 
 	let suffix = mt_hostapd.suffix_of(payload.config.radio);
 	let has_ap = ifname.has_mode(payload, 'ap');
 	let has_sta = ifname.has_mode(payload, 'sta');
+	let previous_ap = ifname.has_mode(previous?.profile ?? {}, 'ap');
+	let previous_sta = ifname.has_mode(previous?.profile ?? {}, 'sta');
 
 	payload.phy = phy;
 	payload.config.phy = phy;
 	payload.phy_suffix = suffix;
 	payload.vif_phy_suffix = suffix;
-	validate_capabilities(payload);
-
-	/* MTK APCLI uses the AP's configured channel; do not silently strand an AP. */
-	payload.ap_start_disabled = false;
-	for_each_vif(payload, 'ap', (k, v) => {
-		payload.ap_start_disabled ||= !!v.config.start_disabled;
-	});
+	let caps = validate_capabilities(payload);
 
 	if (!payload.config.ifname_prefix)
 		payload.ifname_prefix = `${phy}${suffix}-`;
 
-	if (has_ap && !mt_hostapd.wait_ready()) {
+	if ((has_ap || previous_ap) && !mt_hostapd.wait_ready()) {
 		/* Service startup is transient; preserve netifd's bounded retry budget. */
 		log('hostapd is not ready; keeping netifd setup retries');
 		print('HOSTAPD_UNAVAILABLE\n');
@@ -761,12 +830,10 @@ function setup() {
 		return 1;
 	}
 	let record = { radio: ARGV[2], devname, payload: original,
-		profile: json(sprintf('%J', payload)), profile_applied: true };
-	let dat_plan = cfg.prepare_dat(devname, payload);
-	if (!dat_plan.ok) {
-		netifd.setup_failed('PROFILE_GENERATION_FAILED');
-		return 1;
-	}
+		profile: json(sprintf('%J', payload)), profile_applied: true,
+		activation_id: join('-', clock(true)) };
+	let dat_plan = cfg.prepare_dat(devname, payload, caps);
+	if (!dat_plan.ok) return fail_setup('PROFILE_GENERATION_FAILED');
 	if (dat_plan.reinstall && (profile_applied || (exists(marker) && (!previous?.payload || !previous?.profile)))) {
 		if (!previous?.payload || !previous?.profile || restored ||
 		    !exists('/sys/module/mt_wifi/refcnt')) {
@@ -776,39 +843,87 @@ function setup() {
 		netifd.setup_failed(queue_rebuild(record) ? 'DRIVER_REBUILD_PENDING' : 'DRIVER_REBUILD_FAILED');
 		return 1;
 	}
-	let ap_plan = has_ap ? mt_hostapd.prepare(payload) : null;
-	if (ap_plan && !ap_plan.ok) {
-		netifd.setup_failed('HOSTAPD_CONFIG_FAILED');
-		return 1;
+	let ap_plan = has_ap || previous_ap ? mt_hostapd.prepare(payload, caps) : null;
+	if (ap_plan && !ap_plan.ok) return fail_setup('HOSTAPD_CONFIG_FAILED');
+	if (ap_plan) {
+		ap_plan.previous_registrars = previous?.registrars ?? [];
+		record.registrars = ap_plan.registrars;
 	}
 	let sta_plan = has_sta ? mt_supplicant.prepare(payload) : null;
-	if (sta_plan && !sta_plan.ok) {
-		netifd.setup_failed('SUPPLICANT_CONFIG_FAILED');
-		return 1;
-	}
+	if (sta_plan && !sta_plan.ok) return fail_setup('SUPPLICANT_CONFIG_FAILED');
+	let identity = { phy, radio: payload.config.radio, devname, suffix };
 	setup_transaction = {
 		dat: dat_plan, ap: ap_plan, sta: sta_plan,
+		identity, previous,
 		metadata: { files: map([ IFACE_WPS_FILE, marker ], (path) => ({
 			path, previous: readfile(path), previous_owner: fs.stat(path),
 		})), committed: [] },
 	};
+	let last_activation;
+	let report_activation = (phase, state, error) => {
+		let activation = { phase, freq: state?.freq, channel: state?.channel,
+			cac_seconds: phase == 'cac' ? state?.cac_seconds : null, error };
+		let signature = sprintf('%J', activation);
+		if (signature == last_activation) return;
+		last_activation = signature;
+		log(`${devname}: activation ${phase}${state?.freq ? ' at ' + state.freq + ' MHz' : ''}${error ? ' (' + error + ')' : ''}`);
+		netifd.set_data({ ...identity, activation });
+	};
 	if (restored) netifd.restore_config(original);
 	if (!cfg.commit_dat(dat_plan))
 		return fail_setup('PROFILE_WRITE_FAILED');
+	report_activation('configuring');
 	if (ap_plan && !mt_hostapd.activate(ap_plan))
 		return fail_setup('HOSTAPD_START_FAILED');
+	if (ap_plan && length(ap_plan.ifnames)) {
+		/* Keep the rollback snapshot if the deferred handler is killed. */
+		setup_transaction.journal = marker + '.pending';
+		setup_transaction.activation_id = record.activation_id;
+		if (!atomic_write(setup_transaction.journal, sprintf('%J\n', setup_transaction)))
+			return fail_setup('METADATA_WRITE_FAILED');
+		if (!netifd.defer_setup())
+			return fail_setup('HOSTAPD_ACTIVATION_UNAVAILABLE');
+		report_activation('configured');
+		config_lock.close();
+		config_lock = null;
+		let failure, exception;
+		try {
+			failure = mt_hostapd.activation(ap_plan, report_activation, (bus) => {
+				let status = bus.call('network.wireless', 'status')?.[global.radio];
+				return status && (!status.pending || !status.autostart || status.activation_canceled);
+			});
+		} catch (e) {
+			exception = e;
+		}
+		config_lock = fs.open('/var/run/mtwifi-config.lock', 'ae', 0600);
+		if (!config_lock || !config_lock.lock('x')) die('CONFIG_LOCK_FAILED');
+		if (exception) die(exception);
+		if (failure)
+			return fail_setup(failure);
+	}
 	if (sta_plan && !mt_supplicant.activate(sta_plan))
 		return fail_setup('SUPPLICANT_START_FAILED');
+	if (!has_sta && previous_sta && !mt_supplicant.teardown(dev.apcli_ifname))
+		return fail_setup('SUPPLICANT_STOP_FAILED');
 	cfg.driver_up(devname, payload);
-	mt_hostapd.complete(ap_plan);
-	for (let k in vif_keys(payload))
-		netifd.set_vif(k, payload.interfaces[k].config.ifname);
+	/* Other radios may have updated the shared map while this radio waited. */
+	let wps_snapshot = setup_transaction.metadata.files[0];
+	wps_snapshot.previous = readfile(IFACE_WPS_FILE);
+	wps_snapshot.previous_owner = fs.stat(IFACE_WPS_FILE);
 	setup_transaction.metadata.committed = setup_transaction.metadata.files;
 	if (!ifname.write_wps_map(payload, dev, IFACE_WPS_FILE) ||
 	    !atomic_write(marker, sprintf('%J\n', record)))
 		return fail_setup('METADATA_WRITE_FAILED');
-	netifd.set_data({ phy, radio: payload.config.radio, devname, suffix });
-	netifd.set_up();
+	if (!mt_hostapd.complete(ap_plan))
+		return fail_setup('WPS_REGISTRAR_START_FAILED');
+	setup_transaction.reported_vifs = true;
+	for (let k in vif_keys(payload))
+		netifd.set_vif(k, payload.interfaces[k].config.ifname);
+	if (!has_ap)
+		report_activation('station_configured');
+	if (!netifd.set_up())
+		return fail_setup('ACTIVATION_CANCELED');
+	if (setup_transaction.journal) fs.unlink(setup_transaction.journal);
 	setup_transaction = null;
 
 	return 0;
@@ -832,6 +947,21 @@ function teardown() {
 
 	log(`teardown ${ARGV[2]} (devname ${devname}, phy ${phy})`);
 
+	if (dev) {
+		let marker = `/var/run/mtwifi-${devname}.configured`;
+		let path = marker + '.pending';
+		if (exists(path)) {
+			let interrupted = read_json(path);
+			if (interrupted?.identity?.devname != devname || interrupted.journal != path)
+				die('ACTIVATION_SNAPSHOT_INVALID');
+			if (read_json(marker)?.activation_id != interrupted.activation_id) {
+				setup_transaction = interrupted;
+				if (!rollback_setup(false)) die('ACTIVATION_RESTORE_FAILED');
+			}
+			fs.unlink(path);
+		}
+	}
+
 	if (!mt_supplicant.teardown(dev?.apcli_ifname)) die('SUPPLICANT_STOP_FAILED');
 
 	if (phy && !mt_hostapd.teardown(phy, radio)) die('HOSTAPD_STOP_FAILED');
@@ -847,7 +977,6 @@ function teardown() {
 /* ------------------------------------------------------------------ */
 
 let ret = 1;
-let config_lock;
 try {
 	if (ARGV[1] == 'setup' || ARGV[1] == 'teardown') {
 		config_lock = fs.open('/var/run/mtwifi-config.lock', 'ae', 0600);
@@ -865,8 +994,9 @@ try {
 } catch (e) {
 	log(`wireless operation failed: ${e}`);
 	if (ARGV[1] == 'setup') {
-		try { rollback_setup(); } catch (re) { log(`rollback failed: ${re}`); }
-		netifd.setup_failed(e.message == 'AP_VLAN_NOT_SUPPORTED' ? e.message : 'INVALID_CONFIG');
+		let reason = match(e.message ?? '', /^(AP_VLAN_NOT_SUPPORTED|PHY_PROFILE_MISMATCH|ACS_[A-Z_]+|SIX_GHZ_POWER_TYPE_NOT_SUPPORTED|INVALID_MWDS_MODE|INVALID_MAC_ACL|MAC_ACL_TOO_LARGE)$/);
+		try { ret = fail_setup(reason ? reason[0] : 'INVALID_CONFIG'); }
+		catch (re) { log(`rollback failed: ${re}`); }
 	}
 }
 if (config_lock) config_lock.close();

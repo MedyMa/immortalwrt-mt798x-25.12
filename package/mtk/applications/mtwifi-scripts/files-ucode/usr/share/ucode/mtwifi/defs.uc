@@ -213,6 +213,7 @@ export default {
 		'wep-shared': [ 'SHARED', 'WEP' ],
 		'wep-auto': [ 'WEPAUTO', 'WEP' ],
 		'owe': [ 'OWE', 'AES' ],
+		'owe+ccmp': [ 'OWE', 'AES' ],
 	},
 
 	/* CountryCode = 2g region, 5g region, 6g region */
