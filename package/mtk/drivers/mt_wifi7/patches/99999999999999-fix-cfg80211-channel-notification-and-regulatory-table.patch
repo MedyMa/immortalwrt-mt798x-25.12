@@ -1,0 +1,408 @@
+--- a/mt_wifi/common/mgmt/be_phy.c
++++ b/mt_wifi/common/mgmt/be_phy.c
+@@ -621,6 +621,9 @@
+ 
+ #ifdef RT_CFG80211_SUPPORT
+ 	if (!ad->CommonCfg.wifi_cert) {
++#ifdef BACKPORT_NOSTDINC
++		CFG80211_QueueChannelNotify(wdev, &oper_dev);
++#else
+ #if defined(CFG_CFG80211_VERSION) && (KERNEL_VERSION(6, 1, 0) <= CFG_CFG80211_VERSION)
+ 		struct cfg80211_chan_def *chandef = wdev_chandef(ad->pCfg80211_CB->pCfg80211_Wdev, 0);
+ #else
+@@ -667,6 +670,7 @@
+ #else
+ 		cfg80211_ch_switch_notify(net_dev, chandef);
+ #endif /* CFG_CFG80211_VERSION */
++#endif /* BACKPORT_NOSTDINC */
+ 	}
+ #endif /*RT_CFG80211_SUPPORT*/
+ 
+--- a/mt_wifi/include/os/cfg80211/cfg80211.h
++++ b/mt_wifi/include/os/cfg80211/cfg80211.h
+@@ -103,6 +103,12 @@
+ 
+ 	/* to protect scan status */
+ 	spinlock_t scan_notify_lock;
++#ifdef BACKPORT_NOSTDINC
++	struct delayed_work channel_notify_work;
++	struct cfg80211_chan_def pending_channel;
++	unsigned int pending_channel_freq;
++	bool channel_notify_stopping;
++#endif
+ 
+ } CFG80211_CB;
+ 
+@@ -192,6 +198,10 @@
+ 	struct wireless_dev *wl_dev);
+ 
+ VOID *CFG80211_FindChan(struct _RTMP_ADAPTER *pAd, UCHAR chan_id);
++#ifdef BACKPORT_NOSTDINC
++struct freq_oper;
++void CFG80211_QueueChannelNotify(struct wifi_dev *wdev, const struct freq_oper *oper);
++#endif
+ 
+ enum nl80211_band CFG80211_Get_BandId(struct _RTMP_ADAPTER *pAd);
+ 
+--- a/mt_wifi/os/linux/cfg80211/cfg80211.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211.c
+@@ -3105,6 +3105,131 @@
+ 		"PhyMode(%d) invalid, return NL80211_BAND_5GHZ!\n", main_bss_wdev->PhyMode);
+ 	return NL80211_BAND_5GHZ;
+ }
++
++#ifdef BACKPORT_NOSTDINC
++static void CFG80211_ChannelNotifyWork(struct work_struct *work)
++{
++	CFG80211_CB *cb = container_of(to_delayed_work(work), CFG80211_CB,
++				      channel_notify_work);
++	struct wiphy *wiphy = cb->pCfg80211_Wdev->wiphy;
++	struct _RTMP_ADAPTER *ad;
++	struct wireless_dev *wdev;
++	struct cfg80211_chan_def chandef;
++	struct mtk_mac_dev *mac_dev;
++	struct mtk_mac_phy *mac_phy;
++	unsigned long flags;
++	unsigned int freq;
++	enum nl80211_band band;
++	bool matches;
++
++	MAC80211_PAD_GET_NO_RV(ad, wiphy);
++	rtnl_lock();
++	wiphy_lock(wiphy);
++
++	OS_SPIN_LOCK_IRQSAVE(&ad->VirtualIfLock, &flags);
++	chandef = cb->pending_channel;
++	freq = cb->pending_channel_freq;
++	OS_SPIN_UNLOCK_IRQRESTORE(&ad->VirtualIfLock, &flags);
++
++	chandef.chan = ieee80211_get_channel(wiphy, freq);
++	if (!chandef.chan || !cfg80211_chandef_valid(&chandef))
++		goto unlock;
++
++	/* A stop or retune may have overtaken the queued notification. */
++	mac_dev = hc_get_mac_dev(ad);
++	if (!mac_dev)
++		goto unlock;
++	mac_phy = &mac_dev->mac_phy;
++	band = chandef.chan->band;
++	OS_SEM_LOCK(&mac_phy->lock);
++	matches = mac_phy->state &&
++		  (mac_phy->reason == REASON_NORMAL_SCAN ||
++		   (freq == ieee80211_channel_to_frequency(mac_phy->chan, band) &&
++		    chandef.width == phy_bw_2_nl_bw(mac_phy->bw) &&
++		    chandef.center_freq1 == ieee80211_channel_to_frequency(mac_phy->cen_chan, band) &&
++		    (chandef.width != NL80211_CHAN_WIDTH_80P80 ||
++		     chandef.center_freq2 == ieee80211_channel_to_frequency(mac_phy->chan2, band))));
++	OS_SEM_UNLOCK(&mac_phy->lock);
++	if (!matches)
++		goto unlock;
++
++	list_for_each_entry(wdev, &wiphy->wdev_list, list) {
++		struct cfg80211_chan_def *active;
++
++		if (!wdev->netdev || !netif_running(wdev->netdev) ||
++		    (wdev->iftype != NL80211_IFTYPE_AP &&
++		     wdev->iftype != NL80211_IFTYPE_P2P_GO) ||
++		    (wdev->valid_links && !(wdev->valid_links & BIT(0))) ||
++		    !wdev->links[0].ap.beacon_interval)
++			continue;
++
++		active = &wdev->links[0].ap.chandef;
++		if (!active->chan || active->chan->band != band)
++			continue;
++
++		chandef.punctured = active->punctured;
++		if (chandef.punctured && !cfg80211_chandef_valid(&chandef))
++			chandef.punctured = 0;
++		if (!cfg80211_chandef_identical(active, &chandef))
++			cfg80211_ch_switch_notify(wdev->netdev, &chandef, 0);
++	}
++
++unlock:
++	wiphy_unlock(wiphy);
++	rtnl_unlock();
++}
++
++void CFG80211_QueueChannelNotify(struct wifi_dev *wdev, const struct freq_oper *oper)
++{
++	struct _RTMP_ADAPTER *ad = wdev->sys_handle;
++	struct cfg80211_chan_def chandef = {};
++	enum nl80211_band band;
++	unsigned long flags;
++	unsigned int freq;
++	UCHAR center = oper->cen_ch_1;
++	CFG80211_CB *cb;
++
++	/* Initial tuning is part of ndo_open. START_AP sets the first chandef. */
++	if (!wdev->if_dev || !(READ_ONCE(wdev->if_dev->flags) & IFF_UP))
++		return;
++
++	switch (oper->ch_band) {
++	case CMD_CH_BAND_24G:
++		band = NL80211_BAND_2GHZ;
++		break;
++	case CMD_CH_BAND_5G:
++		band = NL80211_BAND_5GHZ;
++		break;
++	case CMD_CH_BAND_6G:
++		band = NL80211_BAND_6GHZ;
++		break;
++	default:
++		return;
++	}
++
++#ifdef DOT11_EHT_BE
++	if (oper->bw == BW_320)
++		center = oper->eht_cen_ch;
++#endif
++	freq = ieee80211_channel_to_frequency(oper->prim_ch, band);
++	chandef.width = phy_bw_2_nl_bw(oper->bw);
++	chandef.center_freq1 = ieee80211_channel_to_frequency(center, band);
++	if (chandef.width == NL80211_CHAN_WIDTH_80P80)
++		chandef.center_freq2 = ieee80211_channel_to_frequency(oper->cen_ch_2, band);
++	if (!freq || !chandef.center_freq1)
++		return;
++
++	/* The producer can run in ndo_open, a cfg80211 callback or a driver task. */
++	OS_SPIN_LOCK_IRQSAVE(&ad->VirtualIfLock, &flags);
++	cb = ad->pCfg80211_CB;
++	if (cb && !cb->channel_notify_stopping) {
++		cb->pending_channel = chandef;
++		cb->pending_channel_freq = freq;
++		mt_queue_delayed_work(system_wq, &cb->channel_notify_work, 0);
++	}
++	OS_SPIN_UNLOCK_IRQRESTORE(&ad->VirtualIfLock, &flags);
++}
++#endif /* BACKPORT_NOSTDINC */
+ 
+ VOID *CFG80211_FindChan(struct _RTMP_ADAPTER *pAd, UCHAR chan_id)
+ {
+@@ -16629,6 +16754,9 @@
+ 	CFG80211_BAND BandInfo = {};
+ 	INT err = 0;
+ 	UINT32 OpMode;
++#ifdef BACKPORT_NOSTDINC
++	unsigned long flags;
++#endif
+ 	/* allocate Main Device Info structure */
+ 	os_alloc_mem(NULL, (UCHAR **)&pCfg80211_CB, sizeof(CFG80211_CB));
+ 
+@@ -16669,7 +16797,15 @@
+ 	pNetDev->ieee80211_ptr = pCfg80211_CB->pCfg80211_Wdev;
+ 	SET_NETDEV_DEV(pNetDev, wiphy_dev(pCfg80211_CB->pCfg80211_Wdev->wiphy));
+ 	pCfg80211_CB->pCfg80211_Wdev->netdev = pNetDev;
++#ifdef BACKPORT_NOSTDINC
++	mt_init_delayed_work(&pCfg80211_CB->channel_notify_work,
++			     CFG80211_ChannelNotifyWork);
++	OS_SPIN_LOCK_IRQSAVE(&pAd->VirtualIfLock, &flags);
++#endif
+ 	pAd->pCfg80211_CB = pCfg80211_CB;
++#ifdef BACKPORT_NOSTDINC
++	OS_SPIN_UNLOCK_IRQRESTORE(&pAd->VirtualIfLock, &flags);
++#endif
+ 	RTMP_DRIVER_80211_RESET(pAd);
+ 	RTMP_DRIVER_80211_SCAN_STATUS_LOCK_INIT(pAd, TRUE);
+ #ifdef RFKILL_HW_SUPPORT
+--- a/mt_wifi/os/linux/cfg80211/cfg80211_util.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211_util.c
+@@ -650,8 +650,6 @@
+ 		pNetDev->ieee80211_ptr = NULL;
+ 		SET_NETDEV_DEV(pNetDev, NULL);
+ 	}
+-
+-	os_free_mem(pCfg80211_CB);
+ }
+ 
+ 
+--- a/mt_wifi/os/linux/cfg80211/cfg80211drv.c
++++ b/mt_wifi/os/linux/cfg80211/cfg80211drv.c
+@@ -3050,13 +3050,31 @@
+ {
+ 	PRTMP_ADAPTER pAd = (PRTMP_ADAPTER)pAdOrg;
+ 	PCFG80211_CTRL pCfg80211_ctrl = &pAd->cfg80211_ctrl;
+-
+-	/* sanity check */
+-	if (pAd->pCfg80211_CB == NULL)
++	CFG80211_CB *cb = pAd->pCfg80211_CB;
++#ifdef BACKPORT_NOSTDINC
++	unsigned long flags;
++#endif
++
++	if (!cb)
+ 		return;
+ 
+-	CFG80211OS_UnRegister(pAd->pCfg80211_CB, pNetDev);
++#ifdef BACKPORT_NOSTDINC
++	/* This follows netdev detach, after the caller has released RTNL. */
++	OS_SPIN_LOCK_IRQSAVE(&pAd->VirtualIfLock, &flags);
++	cb->channel_notify_stopping = true;
++	OS_SPIN_UNLOCK_IRQRESTORE(&pAd->VirtualIfLock, &flags);
++	cancel_delayed_work_sync(&cb->channel_notify_work);
++#endif
++	CFG80211OS_UnRegister(cb, pNetDev);
+ 	RTMP_DRIVER_80211_SCAN_STATUS_LOCK_INIT(pAd, FALSE);
++#ifdef BACKPORT_NOSTDINC
++	OS_SPIN_LOCK_IRQSAVE(&pAd->VirtualIfLock, &flags);
++#endif
++	pAd->pCfg80211_CB = NULL;
++#ifdef BACKPORT_NOSTDINC
++	OS_SPIN_UNLOCK_IRQRESTORE(&pAd->VirtualIfLock, &flags);
++#endif
++	os_free_mem(cb);
+ 	/* CFG80211_Register does not register cfg80211_netdev_notifier. */
+ 	/* Reset CFG80211 Global Setting Here */
+ 	MTWF_DBG(NULL, DBG_CAT_CFG, CATCFG_CMD, DBG_LVL_INFO,
+@@ -3065,7 +3083,6 @@
+ 									pCfg80211_ctrl->cfg80211MainDev.Cfg80211ActionCount = 0;
+ 	pCfg80211_ctrl->cfg80211MainDev.Cfg80211RegisterProbeReqFrame = FALSE;
+ 	pCfg80211_ctrl->cfg80211MainDev.Cfg80211ProbeReqCount = 0;
+-	pAd->pCfg80211_CB = NULL;
+ 	pAd->CommonCfg.HT_Disable = 0;
+ 
+ 	/* It should be free when ScanEnd, */
+@@ -3240,7 +3257,7 @@
+ {
+ 	PRTMP_ADAPTER pAd = (PRTMP_ADAPTER)pAdCB;
+ 	VOID *pBand24G, *pBand5G, *pBand6G;
+-	UINT32 IdBand, IdChan, IdPwr;
++	UINT32 IdBand, IdChan;
+ 	UINT32 ChanNum, ChanId, Power, RecId, DfsType;
+ 	BOOLEAN FlgIsRadar;
+ 	ULONG IrqFlags;
+@@ -3253,7 +3270,7 @@
+ 	pBand5G = NULL;
+ 	pBand6G = NULL;
+ 
+-	if (pAd == NULL)
++	if (!pAd || !pAd->hdev_ctrl)
+ 		return;
+ 
+ 	RTMP_IRQ_LOCK(&PD_GET_DEVICE_IRQ(pAd->physical_dev), IrqFlags);
+@@ -3302,11 +3319,14 @@
+ #endif /* EXT_BUILD_CHANNEL_LIST */
+ #endif /* AUTO_CH_SELECT_ENHANCE */
+ 
++	pChCtrl = hc_get_channel_ctrl(pAd->hdev_ctrl);
+ 	pAd->CommonCfg.CountryCode[0] = pAlpha2[0];
+ 	pAd->CommonCfg.CountryCode[1] = pAlpha2[1];
+ 	pAd->CommonCfg.bCountryFlag = TRUE;
+-
+-	for (IdBand = 0; IdBand < IEEE80211_NUM_BANDS; IdBand++) {
++	os_zero_mem(pChCtrl->ChList, sizeof(pChCtrl->ChList));
++
++	for (IdBand = 0; IdBand < IEEE80211_NUM_BANDS &&
++	     RecId < ARRAY_SIZE(pChCtrl->ChList); IdBand++) {
+ 		if (((IdBand == NL80211_BAND_2GHZ) && (pBand24G == NULL)) ||
+ 			((IdBand == NL80211_BAND_5GHZ) && (pBand5G == NULL)))
+ 		continue;
+@@ -3320,7 +3340,8 @@
+ 
+ 		ChanNum = CFG80211OS_ChanNumGet(CFG80211CB, pWiphy, IdBand);
+ 
+-		for (IdChan = 0; IdChan < ChanNum; IdChan++) {
++		for (IdChan = 0; IdChan < ChanNum &&
++		     RecId < ARRAY_SIZE(pChCtrl->ChList); IdChan++) {
+ 			if (CFG80211OS_ChanInfoGet(CFG80211CB, pWiphy, IdBand, IdChan,
+ 									   &ChanId, &Power, &FlgIsRadar) == FALSE) {
+ 				/* the channel is not allowed in the regulatory domain */
+@@ -3339,50 +3360,17 @@
+ 				if (ChanId > CFG80211_NUM_OF_CHAN_2GHZ)
+ 					continue;
+ 			}
+-			pChCtrl = hc_get_channel_ctrl(pAd->hdev_ctrl);
+-
+-			/* zero first */
+-			os_zero_mem(pChCtrl->ChList, MAX_NUM_OF_CHANNELS * sizeof(CHANNEL_TX_POWER));
+-			for (IdPwr = 0; IdPwr < MAX_NUM_OF_CHANNELS; IdPwr++) {
+-				/* sachin - TODO */
+-				/* if (ChanId == pAd->TxPower[IdPwr].Channel) */
+-				{
+-					/* sachin - TODO */
+-					/* init the channel info. */
+-					/* os_move_mem(&pAd->ChannelList[RecId],&pAd->TxPower[IdPwr],sizeof(CHANNEL_TX_POWER)); */
+-					/* keep channel number */
+-					pChCtrl->ChList[RecId].Channel = ChanId;
+-					/* keep maximum tranmission power */
+-					pChCtrl->ChList[RecId].MaxTxPwr = Power;
+-
+-					/* keep DFS flag */
+-					if (FlgIsRadar == TRUE)
+-						pChCtrl->ChList[RecId].DfsReq = TRUE;
+-					else
+-						pChCtrl->ChList[RecId].DfsReq = FALSE;
+-
+-					/* keep DFS type */
+-					pChCtrl->ChList[RecId].RegulatoryDomain = DfsType;
+-					/* re-set DFS info. */
+-					pAd->CommonCfg.RDDurRegion = DfsType;
+-					MTWF_DBG(NULL,
+-						DBG_CAT_CFG80211, CATCFG80211_CMM, DBG_LVL_INFO,
+-						"Chan %03d:\tpower %d dBm, DFS %d, DFS Type %d\n",
+-						ChanId, Power,
+-						((FlgIsRadar == TRUE) ? 1 : 0),
+-						DfsType);
+-					/* change to record next channel info. */
+-					RecId++;
+-					/*break;*/
+-				}
+-			}
+-		}
+-	}
+-	if (pChCtrl) {
+-		pChCtrl->ChListNum = RecId;
+-		MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_CMM, DBG_LVL_INFO,
+-			"pChCtrl->ChListNum = %d\n", pChCtrl->ChListNum);
+-	}
++			pChCtrl->ChList[RecId].Channel = ChanId;
++			pChCtrl->ChList[RecId].MaxTxPwr = Power;
++			pChCtrl->ChList[RecId].DfsReq = FlgIsRadar;
++			pChCtrl->ChList[RecId].RegulatoryDomain = DfsType;
++			RecId++;
++		}
++	}
++	pChCtrl->ChListNum = RecId;
++	if (RecId)
++		pAd->CommonCfg.RDDurRegion = DfsType;
++
+ 	RTMP_IRQ_UNLOCK(&PD_GET_DEVICE_IRQ(pAd->physical_dev), IrqFlags);
+ 	MTWF_DBG(NULL, DBG_CAT_CFG80211, CATCFG80211_CMM, DBG_LVL_INFO,
+ 		"crda> Number of channels = %d\n", RecId);
+--- a/mt_wifi/os/linux/rt_linux.c
++++ b/mt_wifi/os/linux/rt_linux.c
+@@ -1816,8 +1816,11 @@
+ 		return;
+ #if defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
+ 	wdev = pNetDev->ieee80211_ptr;
+-	if (wdev)
++	if (wdev) {
++		/* NETDEV_GOING_DOWN and NETDEV_DOWN take the wiphy lock. */
++		dev_close(pNetDev);
+ 		wiphy_lock(wdev->wiphy);
++	}
+ #endif
+ #if defined(RT_CFG80211_SUPPORT) && (defined(IWCOMMAND_CFG80211_SUPPORT) || defined(HOSTAPD_MBSS_SUPPORT))
+ 	{
+--- a/mt_wifi/os/linux/rt_main_dev.c
++++ b/mt_wifi/os/linux/rt_main_dev.c
+@@ -894,8 +894,9 @@
+ 
+ BOOLEAN RtmpPhyNetDevExit(VOID *pAd, PNET_DEV net_dev)
+ {
+-	/*remove cfg */
++#if !defined(RT_CFG80211_SUPPORT) || !defined(BACKPORT_NOSTDINC)
+ 	wpf_exit(pAd);
++#endif
+ #ifdef CONFIG_AP_SUPPORT
+ #ifdef WDS_SUPPORT
+ 	/* remove all WDS virtual interfaces. */
+@@ -930,6 +931,9 @@
+ #endif /* RT_CFG80211_SUPPORT */
+ 	}
+ 
++#if defined(RT_CFG80211_SUPPORT) && defined(BACKPORT_NOSTDINC)
++	wpf_exit(pAd);
++#endif
+ 	return TRUE;
+ }
+ 
