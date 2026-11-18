@@ -608,7 +608,8 @@ function apply_acs_config(dats, config, default_skip, caps) {
 	let blocked = acs_channel_set(config.acs_skiplist, config.band, false);
 	let selected = acs_channel_set(config.chanlist, config.band, true);
 	let restricted = length(keys(selected)) > 0;
-	if (!restricted && !psc && !layout && !config.acs_exclude_dfs && !length(keys(blocked)))
+	let skip_dfs = config.acs_exclude_dfs || (config.band == '5g' && (config.doth === false || config.dfs === false));
+	if (!restricted && !psc && !layout && !skip_dfs && !length(keys(blocked)))
 		return;
 
 	let freqs = (caps ?? device_capabilities(config)).band?.freqs;
@@ -617,16 +618,27 @@ function apply_acs_config(dats, config, default_skip, caps) {
 	let excluded = { ...acs_channel_set(default_skip, config.band, false), ...blocked };
 	let skip = {};
 	let candidates = [];
+	let width = match(config.htmode, /(20|40|80|160|320)/)?.[1] ?? '20';
+	let width_flag = 'no_' + width + 'mhz';
+	let he = match(config.htmode, /^(HE|EHT)/);
+	let eht = match(config.htmode, /^EHT/);
 	for (let info in freqs) {
 		if (!info?.freq)
 			continue;
 		let channel = acs_channel_number(info.freq, config.band);
 		if (channel <= 0 || channel != int(channel))
 			continue;
-		if (excluded[channel] || (config.acs_exclude_dfs && info.radar)) {
+		/* DFS state 1 means radar was detected. Usable DFS channels can still run CAC. */
+		if (excluded[channel] || info.disabled || info[width_flag] ||
+		    (he && info.no_he) || (eht && info.no_eht) || (info.no_ir && !info.radar) ||
+		    (info.radar && (skip_dfs || info.dfs_state == 1))) {
 			skip[channel] = true;
 			continue;
 		}
+		if (width == '40' && (info.no_ht40_plus && info.no_ht40_minus ||
+		    info.no_ht40_plus && match(config.htmode, /\+$/) ||
+		    info.no_ht40_minus && match(config.htmode, /-$/)))
+			continue;
 		if ((!restricted || selected[channel]) && (!psc || channel % 16 == 5) &&
 		    (!layout || center320(channel, layout) != null))
 			push(candidates, '' + channel);

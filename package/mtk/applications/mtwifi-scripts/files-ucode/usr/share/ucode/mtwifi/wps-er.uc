@@ -53,9 +53,8 @@ function credential(hex) {
 };
 
 let ifname = ARGV[0];
-let event = match(ARGV[1] ?? '', /^WPS-NEW-AP-SETTINGS (.+)$/);
-if (!valid_ifname(ifname) || !event) exit(0);
-let settings = credential(event[1]);
+if (!valid_ifname(ifname) || ARGV[1] != 'WPS-NEW-AP-SETTINGS') exit(0);
+let settings = length(ARGV) == 3 ? credential(ARGV[2]) : null;
 if (!settings) {
 	log('WPS registrar credentials rejected');
 	exit(1);

@@ -322,6 +322,20 @@ function detach(ifname) {
 	return global.ubus.error() == null;
 };
 
+function interface_state(entry) {
+	let ifname = entry.iface;
+	return { entry, created: !fs.stat(`/sys/class/net/${ifname}`),
+		mac: trim(readfile(`/sys/class/net/${ifname}/address`) ?? '') };
+};
+
+export function interrupted_plan(plan) {
+	if (!plan) return null;
+	return { committed: plan.files, touched: map(plan.entries, (entry) => ({
+		...interface_state(entry), entry: { iface: entry.iface }, detached: true,
+		mac_changed: !entry.vif.config.default_macaddr && !!entry.vif.config.macaddr,
+	})) };
+};
+
 export function activate(plan) {
 	if (!plan.ok || !wait_for(`${WPA_CTRL_DIR}/global`, 30))
 		return false;
@@ -331,11 +345,8 @@ export function activate(plan) {
 	let phy = plan.data.phy;
 	for (let entry in plan.entries) {
 		let ifname = entry.iface;
-		let state = {
-			entry, was_attached: index(iface_list(), ifname) >= 0,
-			created: !fs.stat(`/sys/class/net/${ifname}`),
-			mac: trim(readfile(`/sys/class/net/${ifname}/address`) ?? ''),
-		};
+		let state = interface_state(entry);
+		state.was_attached = index(iface_list(), ifname) >= 0;
 		push(plan.touched, state);
 		if (!ensure_sta_iface(ifname, phy))
 			return false;

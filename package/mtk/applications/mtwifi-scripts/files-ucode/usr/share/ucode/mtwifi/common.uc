@@ -213,6 +213,19 @@ export function capture_files(render) {
 export function rollback_files(plan) {
 	let ok = true;
 	for (let file in reverse(plan?.committed ?? [])) {
+		if (file.text != null) {
+			let current = readfile(file.path);
+			if (current == file.previous) {
+				let owner = fs.stat(file.path);
+				if (!owner || !file.previous_owner ||
+				    owner.uid == file.previous_owner.uid && owner.gid == file.previous_owner.gid)
+					continue;
+			} else if (current != file.text) {
+				log(`configuration changed during activation: ${file.path}`);
+				ok = false;
+				continue;
+			}
+		}
 		if (file.previous != null)
 			ok = atomic_write(file.path, file.previous, file.previous_owner) && ok;
 		else if (fs.stat(file.path))

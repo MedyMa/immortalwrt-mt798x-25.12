@@ -253,7 +253,9 @@ function __run_next_handler()
 	if (!job.task)
 		return run_handler_cb(job, 1);
 
-	job.timeout = uloop.timer(DEFAULT_SCRIPT_TIMEOUT, () => run_handler_timeout(job));
+	/* MTK config_add may wait up to 90 seconds before deferred ACS/CAC begins. */
+	let timeout = op == "setup" && wdev.data.config.type == "mtwifi" ? 120000 : DEFAULT_SCRIPT_TIMEOUT;
+	job.timeout = uloop.timer(timeout, () => run_handler_timeout(job));
 }
 
 function run_next_handler()
@@ -305,7 +307,8 @@ function wdev_proc_check(wdev)
 
 function wdev_proc_add(wdev, data)
 {
-	if (!data.pid || !data.exe)
+	if (!data.pid || !data.exe ||
+	    length(filter(wdev.procs, p => p.pid == data.pid && p.exe == data.exe)))
 		return;
 
 	push(wdev.procs, data);
@@ -327,6 +330,8 @@ function setup()
 	if (this.teardown_failed)
 		return this.teardown();
 
+	if (this.state == "up" && this.data.config.type == "mtwifi")
+		this.previous_procs = this.procs;
 	wdev_proc_reset(this);
 	delete this.config_change;
 	delete this.activation;
@@ -347,6 +352,7 @@ function teardown()
 		return;
 
 	delete this.teardown_failed;
+	delete this.previous_procs;
 	wdev_proc_reset(this);
 	this.state = "teardown";
 	run_handler(this, "teardown", wdev_teardown_cb);
@@ -551,6 +557,11 @@ function notify(req)
 		     (!this.autostart || this.cancel_setup || this.config_change)))
 			return ubus.STATUS_INVALID_ARGUMENT;
 
+		if (this.activation?.phase == "restored")
+			for (let proc in this.previous_procs ?? [])
+				if (netifd.process_check(proc.pid, proc.exe))
+					wdev_proc_add(this, proc);
+		delete this.previous_procs;
 		return wdev_mark_up(this);
 	case NOTIFY_CMD_SET_DATA:
 		if (!vif && !vlan && this.data.config.type == "mtwifi" && data?.activation)

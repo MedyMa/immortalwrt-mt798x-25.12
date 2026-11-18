@@ -18,7 +18,8 @@ for (let radio, status in conn.call('network.wireless', 'status') ?? {}) {
 	if (!status.up || status.pending || status.config?.type != 'mtwifi') continue;
 	for (let vif in status.interfaces ?? [])
 		if (vif.config?.mode == 'sta' && vif.config.encryption == 'wps' && valid_ifname(vif.ifname))
-			pending[vif.ifname] = { radio, section: vif.section };
+			pending[vif.ifname] = { radio, section: vif.section,
+				multi_ap: !!+(vif.config.multi_ap_backhaul_sta ?? vif.config.multi_ap) };
 }
 if (!length(keys(pending))) exit(1);
 if (!listen)
@@ -63,7 +64,7 @@ let listener = conn.listener('wps_credentials', (event, creds) => {
 if (!listener) exit(1);
 
 for (let name in keys(pending)) {
-	conn.call('wpa_supplicant.' + name, 'wps_start', {});
+	conn.call('wpa_supplicant.' + name, 'wps_start', pending[name].multi_ap ? { multi_ap: true } : {});
 	if (conn.error() != null) delete pending[name];
 }
 if (length(keys(pending))) {

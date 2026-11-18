@@ -668,15 +668,20 @@ function restore_runtime(tx, reason) {
 		return false;
 	let ifaces = previous.profile?.interfaces ?? {};
 	if (!length(keys(ifaces))) return false;
-	let ap = global.ubus.call('hostapd', 'get_radio_status', { iface: tx.identity.phy });
+	let ap, ifnames = [], advertised = [];
 	for (let _, entry in ifaces) {
 		let config = entry.config;
 		if (config?.disabled) continue;
-		if (config.mode == 'ap' && !config.start_disabled &&
-		    (ap?.status != 'ENABLED' || !ap.bss?.[config.ifname]?.beacon_ready))
-			return false;
+		if (config.mode == 'ap') {
+			push(ifnames, config.ifname);
+			if (!config.start_disabled) push(advertised, config.ifname);
+		}
 		if (config.mode == 'sta' && !length(global.ubus.list('wpa_supplicant.' + config.ifname)))
 			return false;
+	}
+	if (length(ifnames)) {
+		ap = global.ubus.call('hostapd', 'get_radio_status', { iface: tx.identity.phy });
+		if (!mt_hostapd.radio_ready(ap, ifnames, advertised)) return false;
 	}
 	netifd.restore_config(previous.payload);
 	for (let id, entry in ifaces)
@@ -726,12 +731,14 @@ function setup() {
 		}
 	}
 	let restored = read_json(REBUILD_RESTORE);
-	if (restored?.source == rebuild_source() && restored.radios?.[ARGV[2]]?.payload)
-		payload = json(sprintf('%J', restored.radios[ARGV[2]].payload));
-	else {
-		restored = null;
+	if (restored && restored.source != rebuild_source()) {
 		fs.unlink(REBUILD_RESTORE);
+		restored = null;
 	}
+	if (restored?.radios?.[ARGV[2]]?.payload)
+		payload = json(sprintf('%J', restored.radios[ARGV[2]].payload));
+	else
+		restored = null;
 	let original = json(sprintf('%J', payload));
 
 	let l1 = l1dat.load_cached();
@@ -830,8 +837,7 @@ function setup() {
 		return 1;
 	}
 	let record = { radio: ARGV[2], devname, payload: original,
-		profile: json(sprintf('%J', payload)), profile_applied: true,
-		activation_id: join('-', clock(true)) };
+		profile: json(sprintf('%J', payload)), profile_applied: true };
 	let dat_plan = cfg.prepare_dat(devname, payload, caps);
 	if (!dat_plan.ok) return fail_setup('PROFILE_GENERATION_FAILED');
 	if (dat_plan.reinstall && (profile_applied || (exists(marker) && (!previous?.payload || !previous?.profile)))) {
@@ -869,6 +875,19 @@ function setup() {
 		log(`${devname}: activation ${phase}${state?.freq ? ' at ' + state.freq + ' MHz' : ''}${error ? ' (' + error + ')' : ''}`);
 		netifd.set_data({ ...identity, activation });
 	};
+	/* Save the intended writes before an ioctl or synchronous daemon request can block.
+	 * Teardown removes only this radio's entries from the shared WPS map. */
+	let journal = marker + '.pending';
+	let snapshot = {
+		journal, identity, dat: { committed: dat_plan.files },
+		ap: ap_plan ? { committed: ap_plan.files, ifnames: ap_plan.ifnames,
+			registrars: ap_plan.registrars, attach_attempted: true } : null,
+		sta: mt_supplicant.interrupted_plan(sta_plan),
+		metadata: { committed: [ setup_transaction.metadata.files[1] ] },
+	};
+	if (!atomic_write(journal, sprintf('%J\n', snapshot)))
+		return fail_setup('METADATA_WRITE_FAILED');
+	setup_transaction.journal = journal;
 	if (restored) netifd.restore_config(original);
 	if (!cfg.commit_dat(dat_plan))
 		return fail_setup('PROFILE_WRITE_FAILED');
@@ -876,11 +895,6 @@ function setup() {
 	if (ap_plan && !mt_hostapd.activate(ap_plan))
 		return fail_setup('HOSTAPD_START_FAILED');
 	if (ap_plan && length(ap_plan.ifnames)) {
-		/* Keep the rollback snapshot if the deferred handler is killed. */
-		setup_transaction.journal = marker + '.pending';
-		setup_transaction.activation_id = record.activation_id;
-		if (!atomic_write(setup_transaction.journal, sprintf('%J\n', setup_transaction)))
-			return fail_setup('METADATA_WRITE_FAILED');
 		if (!netifd.defer_setup())
 			return fail_setup('HOSTAPD_ACTIVATION_UNAVAILABLE');
 		report_activation('configured');
@@ -911,8 +925,7 @@ function setup() {
 	wps_snapshot.previous = readfile(IFACE_WPS_FILE);
 	wps_snapshot.previous_owner = fs.stat(IFACE_WPS_FILE);
 	setup_transaction.metadata.committed = setup_transaction.metadata.files;
-	if (!ifname.write_wps_map(payload, dev, IFACE_WPS_FILE) ||
-	    !atomic_write(marker, sprintf('%J\n', record)))
+	if (!ifname.write_wps_map(payload, dev, IFACE_WPS_FILE))
 		return fail_setup('METADATA_WRITE_FAILED');
 	if (!mt_hostapd.complete(ap_plan))
 		return fail_setup('WPS_REGISTRAR_START_FAILED');
@@ -921,6 +934,8 @@ function setup() {
 		netifd.set_vif(k, payload.interfaces[k].config.ifname);
 	if (!has_ap)
 		report_activation('station_configured');
+	if (!atomic_write(marker, sprintf('%J\n', record)))
+		return fail_setup('METADATA_WRITE_FAILED');
 	if (!netifd.set_up())
 		return fail_setup('ACTIVATION_CANCELED');
 	if (setup_transaction.journal) fs.unlink(setup_transaction.journal);
@@ -954,11 +969,8 @@ function teardown() {
 			let interrupted = read_json(path);
 			if (interrupted?.identity?.devname != devname || interrupted.journal != path)
 				die('ACTIVATION_SNAPSHOT_INVALID');
-			if (read_json(marker)?.activation_id != interrupted.activation_id) {
-				setup_transaction = interrupted;
-				if (!rollback_setup(false)) die('ACTIVATION_RESTORE_FAILED');
-			}
-			fs.unlink(path);
+			setup_transaction = interrupted;
+			if (!rollback_setup(false)) die('ACTIVATION_RESTORE_FAILED');
 		}
 	}
 

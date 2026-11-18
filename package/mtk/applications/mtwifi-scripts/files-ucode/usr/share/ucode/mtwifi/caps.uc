@@ -117,7 +117,8 @@ export function validate_capabilities(data) {
 	for (let _, iface in data.interfaces ?? {}) {
 		let c = iface.config;
 		needs_vlan ||= +c.dynamic_vlan > 0 || !!c.per_sta_vif ||
-			length(keys(iface.vlans ?? {})) > 0;
+			length(keys(iface.vlans ?? {})) > 0 ||
+			(c.macfilter == 'allow' && length(filter(c.maclist ?? [], (row) => index(row, ' ') >= 0)) > 0);
 		for (let _, sta in iface.stas ?? {})
 			needs_vlan ||= +sta.config?.vid > 0;
 	}

@@ -741,10 +741,15 @@ function setup_interface(interface, data, vif, caps, idx) {
 /* hostapd 进程管理                                                    */
 /* ------------------------------------------------------------------ */
 
-function kill_pidfile(pidfile) {
+function stop_registrar(ifname, pidfile) {
 	let pid = trim(readfile(pidfile) ?? '');
 
-	if (match(pid, /^[0-9]+$/) && +pid > 1) {
+	let args = match(pid, /^[0-9]+$/) && +pid > 1 ?
+		split(readfile(`/proc/${pid}/cmdline`) ?? '', '\0') : [];
+	/* The pidfile can outlive the listener and its PID can be reused. */
+	if (args[0] == HOSTAPD_CLI && args[1] == '-i' && args[2] == ifname &&
+	    args[3] == '-a' && args[4] == WPS_ER_SCRIPT && args[5] == '-B' &&
+	    args[6] == '-P' && args[7] == pidfile) {
 		system(`kill ${+pid} 2>/dev/null`);
 		sleep(0.2);
 	}
@@ -777,7 +782,7 @@ function wps_er_start(ifnames) {
 		let ctrl = `${CTRL_DIR}/${ifname}`;
 		let pidfile = `/var/run/action-${ifname}-wps-er.pid`;
 
-		kill_pidfile(pidfile);
+		stop_registrar(ifname, pidfile);
 		if (!fs.stat(ctrl) || system(`${HOSTAPD_CLI} -i ${shell_quote(ifname)} -a ${shell_quote(WPS_ER_SCRIPT)} -B -P ${shell_quote(pidfile)}`))
 			return false;
 	}
@@ -789,7 +794,7 @@ function wps_er_stop(ifnames) {
 		let pidfile = `/var/run/action-${ifname}-wps-er.pid`;
 
 		if (fs.stat(pidfile))
-			kill_pidfile(pidfile);
+			stop_registrar(ifname, pidfile);
 	}
 };
 
@@ -844,9 +849,13 @@ export function prepare(data, caps) {
 };
 
 function attach(plan) {
-	let reply = global.ubus.call('hostapd', 'config_add', {
+	/* config_add can wait synchronously for first-time vendor radio initialization. */
+	let connection = ubus.connect(null, 90);
+	if (!connection) return false;
+	let reply = connection.call('hostapd', 'config_add', {
 		iface: plan.phy, config: plan.file,
 	});
+	connection.disconnect();
 	if (type(reply) != 'object' || !(reply.pid > 1))
 		return false;
 	netifd.add_process(HOSTAPD, reply.pid, true, true);
@@ -884,12 +893,24 @@ export function activate(plan) {
 	return true;
 };
 
+export function radio_ready(state, ifnames, advertised) {
+	if (state?.status != 'ENABLED' || !length(ifnames) || (length(advertised) && !(state.freq > 0)))
+		return false;
+	for (let name in ifnames) {
+		let bss = state.bss?.[name];
+		if (!bss || (index(advertised, name) >= 0 ?
+		    !bss.beacon_ready || bss.disabled : !bss.disabled || bss.beacon_ready))
+			return false;
+	}
+	return true;
+};
+
 export function activation(plan, report, canceled) {
 	let connection = ubus.connect(null, 2);
 	if (!connection)
 		return 'HOSTAPD_STATUS_UNAVAILABLE';
 	let started = clock(true)[0];
-	let deadline = started + 45;
+	let deadline = started + 120;
 	let last_cac = false;
 	let missing = 0;
 	let result = 'HOSTAPD_ACTIVATION_TIMEOUT';
@@ -900,7 +921,7 @@ export function activation(plan, report, canceled) {
 		}
 		let state = connection.call('hostapd', 'get_radio_status', { iface: plan.phy });
 		if (type(state) != 'object') {
-			if (++missing >= 5) {
+			if (connection.error(true) != ubus.STATUS_TIMEOUT && ++missing >= 5) {
 				result = 'HOSTAPD_STATUS_UNAVAILABLE';
 				break;
 			}
@@ -916,8 +937,7 @@ export function activation(plan, report, canceled) {
 				result = 'HOSTAPD_ACTIVATION_FAILED';
 				break;
 			}
-			if (state.status == 'ENABLED' && state.freq > 0 &&
-			    !length(filter(plan.advertised, (name) => !state.bss?.[name]?.beacon_ready))) {
+			if (radio_ready(state, plan.ifnames, plan.advertised)) {
 				report(length(plan.advertised) ? 'beaconing' : 'standby', state);
 				result = null;
 				break;

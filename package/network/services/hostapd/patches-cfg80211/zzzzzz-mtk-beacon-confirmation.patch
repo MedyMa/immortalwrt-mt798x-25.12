@@ -1,0 +1,42 @@
+--- a/src/ap/beacon.c
++++ b/src/ap/beacon.c
+@@ -2014,8 +2014,6 @@
+ 		return -1;
+ 	}
+ 
+-	hapd->beacon_set_done = 1;
+-
+ 	if (ieee802_11_build_ap_params(hapd, &params) < 0)
+ 		return -1;
+ 
+@@ -2054,7 +2052,6 @@
+ 		params.dot11vmbssid = 0;
+ 	}
+ #endif /* CONFIG_IEEE80211AX */
+-	hapd->reenable_beacon = 0;
+ #ifdef CONFIG_SAE
+ 	params.sae_pwe = hapd->conf->sae_pwe;
+ #endif /* CONFIG_SAE */
+@@ -2092,8 +2089,11 @@
+ 	hostapd_free_ap_extra_ies(hapd, beacon, proberesp, assocresp);
+ 	if (res)
+ 		wpa_printf(MSG_ERROR, "Failed to set beacon parameters");
+-	else
++	else {
++		hapd->beacon_set_done = 1;
++		hapd->reenable_beacon = 0;
+ 		ret = 0;
++	}
+ 
+ 	hostapd_drv_set_hidden_ssid(hapd, params.hide_ssid);
+ fail:
+--- a/src/ap/drv_callbacks.c
++++ b/src/ap/drv_callbacks.c
+@@ -2139,6 +2139,7 @@
+ 		hostapd_free_stas(hapd);
+ 		wpa_msg(hapd->msg_ctx, MSG_INFO, INTERFACE_DISABLED);
+ 		hapd->disabled = 1;
++		hapd->beacon_set_done = 0;
+ 		break;
+ #ifdef CONFIG_ACS
+ 	case EVENT_ACS_CHANNEL_SELECTED:
