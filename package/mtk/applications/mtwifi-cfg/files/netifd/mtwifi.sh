@@ -22,6 +22,8 @@ drv_mtwifi_init_device_config() {
 
 drv_mtwifi_init_iface_config() {
 	config_add_string 'ssid:string' macfilter macfile bssid kicklow assocthres 'macaddr:macaddr'
+	config_add_string auth_server auth_secret ownip
+	config_add_int auth_port
 	config_add_boolean mlo wmm hidden isolate ieee80211k bss_transition mac_repeater
 	config_add_int mldgroup
 	config_add_int wpa_group_rekey frag rts dtim_period ieee80211w
@@ -84,8 +86,6 @@ mtwifi_vif_sta_set_data() {
 }
 
 drv_mtwifi_setup() {
-	ubus -t 120 wait_for network.interface.lan
-
 	local dev="$1"
 
 	json_add_string device "$dev"
@@ -113,6 +113,12 @@ drv_mtwifi_setup() {
 	fi
 
 	MTWIFI_NOTIFY_FAILED=0
+	local dot1x_pid main_ifname
+	main_ifname="$(l1util get "$dev" main_ifname)"
+	if [ -r "/var/run/8021xd_${main_ifname}.pid" ]; then
+		read -r dot1x_pid < "/var/run/8021xd_${main_ifname}.pid"
+		mtwifi_notify _wireless_add_process "$dot1x_pid" /usr/bin/8021xd 1 || MTWIFI_NOTIFY_FAILED=1
+	fi
 	for_each_interface "ap sta" mtwifi_vif_config
 
 	if [ "$MTWIFI_NOTIFY_FAILED" = 1 ] || ! mtwifi_notify _wireless_set_up; then

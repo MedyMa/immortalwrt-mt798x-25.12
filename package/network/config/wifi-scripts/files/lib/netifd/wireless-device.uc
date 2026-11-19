@@ -14,7 +14,7 @@ const DEFAULT_SCRIPT_TIMEOUT = 30 * 1000;
 
 let wdev_cur;
 let wdev_handler = {};
-let wdev_script_task, wdev_script_timeout;
+let handler_sequence = 0;
 let handler_timer;
 
 function wireless_config_done()
@@ -140,8 +140,13 @@ function wdev_config_init(wdev)
 		wdev.handler_data[wdev.name] = prev[wdev.name];
 }
 
-function wdev_setup_cb(wdev)
+function wdev_setup_cb(wdev, status)
 {
+	if (wdev.data.config.type == "mtwifi" &&
+	    (wdev.cancel_setup || !wdev.autostart || (wdev.state == "up" && status))) {
+		wdev.teardown();
+		return;
+	}
 	if (wdev.state != "setup") {
 		if (wdev.state == "up" && wdev.config_change) {
 			wdev_config_init(wdev);
@@ -158,15 +163,25 @@ function wdev_setup_cb(wdev)
 	wdev.teardown();
 }
 
-function wdev_teardown_cb(wdev)
+function wdev_teardown_cb(wdev, status)
 {
+	delete wdev.cleanup_retrying;
 	for (let section, data in wdev.handler_data) {
 		if (data.ifname)
 			handle_link(data.ifname, data, false);
 	}
 
+	if (wdev.data.config.type == "mtwifi" && status) {
+		wdev.teardown_failed = true;
+		wdev.retry_setup_failed = true;
+		netifd.log(netifd.L_NOTICE, `wireless: ${wdev.name}: teardown failed, cleanup required\n`);
+		return;
+	}
+	delete wdev.teardown_failed;
 	wdev.handler_data = {};
 	wdev.state = "down";
+	if (wdev.data.config.type == "mtwifi" && wdev.config_change)
+		wdev_config_init(wdev);
 
 	if (wdev.delete) {
 		delete_wdev(wdev.data.name);
@@ -176,71 +191,58 @@ function wdev_teardown_cb(wdev)
 	wdev.setup();
 }
 
-function run_handler_cb(wdev, cb)
+function run_handler_cb(job, status)
 {
-	if (wdev != wdev_cur.wdev)
+	if (wdev_cur != job)
 		return;
 
-	wdev.dbg("complete " + wdev_cur.op);
-	if (wdev_script_timeout)
-		wdev_script_timeout.cancel();
-	wdev_script_timeout = null;
-	wdev_script_task = null;
+	job.wdev.dbg("complete " + job.op);
+	job.timeout?.cancel();
 	wdev_cur = null;
 	handler_timer.set(1);
-	cb(wdev);
+	job.cb(job.wdev, job.timed_out ? 1 : status);
 }
 
-function run_handler_timeout(wdev, cb)
+function run_handler_timeout(job)
 {
-	wdev_script_task.cancel();
-	run_handler_cb(wdev, cb);
-}
-
-function handler_sort_fn(a, b)
-{
-	return wdev_handler[a].time - wdev_handler[b].time
-}
-
-function __run_next_handler_name()
-{
-	return sort(keys(wdev_handler), handler_sort_fn)[0];
-}
-
-function __run_next_handler()
-{
-	let name = __run_next_handler_name();
-	if (!name)
+	if (wdev_cur != job)
 		return;
-
-	wdev_cur = wdev_handler[name];
-	delete wdev_handler[name];
-
-	let wdev = wdev_cur.wdev;
-	let op = wdev_cur.op;
-	let cb = wdev_cur.cb;
-
-	wdev.dbg("run " + op);
-	wdev.handler_config.data = wdev.handler_data[wdev.name] ?? {};
-	wdev_script_task = netifd.process({
-		cb: () => run_handler_cb(wdev, cb),
-		dir: netifd.wireless.path,
-		argv: [ './' + wdev.script, wdev.data.config.type, op, wdev.name, "" + wdev.handler_config ],
-		log_prefix: wdev.name,
-	});
-
-	if (!wdev_script_task)
-		return run_handler_cb(wdev, cb);
-
-	wdev_script_timeout = uloop.timer(DEFAULT_SCRIPT_TIMEOUT,
-		() => run_handler_timeout(wdev, cb)
-	);
+	job.timed_out = true;
+	job.task.cancel();
+	run_handler_cb(job, 1);
 }
 
 function run_next_handler()
 {
-	while (!wdev_cur && length(wdev_handler) > 0)
-		__run_next_handler();
+	while (!wdev_cur && length(wdev_handler)) {
+		let cleanup_failed = false;
+		for (let _, radio in netifd.wireless.devices)
+			if (radio.teardown_failed)
+				cleanup_failed = true;
+		let names = filter(keys(wdev_handler), name => {
+			let job = wdev_handler[name];
+			return !cleanup_failed || job.op == "teardown" || job.wdev.data.config.type != "mtwifi";
+		});
+		let name = sort(names, (a, b) => wdev_handler[a].sequence - wdev_handler[b].sequence)[0];
+		if (!name)
+			break;
+		let job = wdev_cur = wdev_handler[name];
+		delete wdev_handler[name];
+
+		let wdev = job.wdev;
+		wdev.dbg("run " + job.op);
+		wdev.handler_config.data = wdev.handler_data[wdev.name] ?? {};
+		job.task = netifd.process({
+			cb: (status) => run_handler_cb(job, status),
+			dir: netifd.wireless.path,
+			argv: [ './' + wdev.script, wdev.data.config.type, job.op, wdev.name, "" + wdev.handler_config ],
+			log_prefix: wdev.name,
+		});
+		if (job.task)
+			job.timeout = uloop.timer(DEFAULT_SCRIPT_TIMEOUT, () => run_handler_timeout(job));
+		else
+			run_handler_cb(job, 1);
+	}
 
 	if (!wdev_cur && !length(wdev_handler))
 		wireless_config_done();
@@ -251,7 +253,7 @@ function run_handler(wdev, op, cb)
 	wdev.dbg("queue " + op);
 	wdev_handler[wdev.name] = {
 		op, wdev, cb,
-		time: time()
+		sequence: ++handler_sequence
 	};
 
 	run_next_handler();
@@ -316,9 +318,10 @@ function teardown()
 	delete this.cancel_setup;
 
 	this.dbg("teardown, state=" + this.state);
-	if (this.state == "teardown" || this.state == "down")
+	if (this.cleanup_retrying || (this.state == "teardown" && !this.teardown_failed) || this.state == "down")
 		return;
 
+	if (this.teardown_failed) this.cleanup_retrying = true;
 	wdev_proc_reset(this);
 	this.state = "teardown";
 	run_handler(this, "teardown", wdev_teardown_cb);
@@ -389,6 +392,7 @@ function update(data)
 
 	wdev_reset(this);
 	this.config_change = true;
+	if (this.teardown_failed) return this.teardown();
 	this.check();
 }
 
@@ -401,6 +405,7 @@ function start()
 	this.autostart = true;
 
 	wdev_reset(this);
+	if (this.teardown_failed) return this.teardown();
 
 	if (this.state != "down")
 		return;
@@ -427,6 +432,7 @@ function stop()
 {
 	this.dbg("stop, state=" + this.state);
 	this.autostart = false;
+	if (this.teardown_failed) return this.teardown();
 
 	switch (this.state) {
 	case "setup":
@@ -443,6 +449,8 @@ function check()
 	if (!wdev_update_disabled_vifs(this))
 		return;
 
+	if (this.data.config.type == "mtwifi" && (this.state == "setup" || this.state == "teardown"))
+		return;
 	wdev_config_init(this);
 	this.setup();
 }
@@ -452,6 +460,9 @@ function wdev_mark_up(wdev)
 	wdev.dbg("mark up, state=" + wdev.state);
 	if (wdev.state != "setup")
 		return;
+
+	if (wdev.data.config.type == "mtwifi" && (wdev.cancel_setup || !wdev.autostart))
+		return ubus.STATUS_INVALID_ARGUMENT;
 
 	for (let section, data in wdev.handler_data) {
 		if (data.ifname)
@@ -535,6 +546,7 @@ function notify(req)
 
 function hotplug(name, add)
 {
+	if (add && this.data.config.type == "mtwifi" && (this.state != "up" || !this.autostart)) return;
 	let dev = name;
 	let m = match(name, /(.+)\.sta.+/);
 	if (m)
@@ -595,7 +607,8 @@ function status()
 	}
 	return {
 		up: this.state == "up",
-		pending: this.state == "setup" || this.state == "teardown",
+		pending: this.state == "setup" || (this.state == "teardown" && !this.teardown_failed),
+		teardown_failed: !!this.teardown_failed,
 		autostart: this.autostart,
 		disabled: !!this.data.config.disabled,
 		retry_setup_failed: !!this.retry_setup_failed,

@@ -350,9 +350,22 @@ function l1dat_parser.load_l1_profile(path)
     if ok then
         local cursor = uci.cursor()
         local physical = devs[dridx]
-        local names, canonical, ambiguous, mapped = {}, {}, {}, {}
+        local names, canonical, ambiguous, blocked, mapped = {}, {}, {}, {}, {}
         cursor:foreach("wireless", "wifi-device", function(section)
-            local dev = section.type == "mtwifi" and physical[section.devname or section[".name"]]
+            if section.type ~= "mtwifi" then return end
+            local by_name = physical[section[".name"]]
+            local by_dev = physical[section.devname]
+            local by_phy = devs[ridx][section.phy]
+            if by_phy and by_phy.main_ifname ~= section.phy then by_phy = nil end
+            local dev = by_dev or by_name or by_phy
+            if (section.devname and not by_dev) or
+                (by_name and by_name ~= dev) or (by_phy and by_phy ~= dev) then
+                -- Neither side of a contradictory binding is a missing radio.
+                if by_name then blocked[by_name] = true end
+                if by_phy then blocked[by_phy] = true end
+                if by_dev then blocked[by_dev] = true end
+                return
+            end
             if dev then
                 if names[dev] and names[dev] ~= section[".name"] then ambiguous[dev] = true end
                 names[dev] = section[".name"]
@@ -360,13 +373,17 @@ function l1dat_parser.load_l1_profile(path)
             end
         end)
         cursor:close()
+        local aliases = {}
         for name, dev in pairs(physical) do
             local owner = canonical[dev] or (not ambiguous[dev] and (names[dev] or name))
             -- Conflicting aliases without a canonical owner must not create
             -- a new default AP beside the saved configuration.
-            if owner then mapped[owner] = dev end
+            if owner and not blocked[dev] then
+                mapped[owner] = dev
+                aliases[name] = dev
+            end
         end
-        devs[dridx] = setmetatable(mapped, { __index = physical })
+        devs[dridx] = setmetatable(mapped, { __index = aliases })
     end
     fd:close()
     return devs

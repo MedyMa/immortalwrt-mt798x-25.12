@@ -55,6 +55,7 @@ function save_profile(cfgs, path)
         return false
     end
 
+    if not fs.chmod(path, 384) then return false end
     local datobj = datconf.openfile(path)
     if not datobj then return false end
     datobj:merge(cfgs)
@@ -92,35 +93,69 @@ local function whnat_value(group)
     nixio.syslog("err", "mtwifi-cfg: invalid WHNAT value for " .. group.master)
 end
 
-local function whnat_save(group, value, current_path, current_dats)
-    local profiles = {}
-    -- Resolve the raw L1 entry, including band aliases whose mainidx differs.
-    for path in pairs(group.profiles) do
-        profiles[path] = path == current_path and current_dats or load_profile(path)
-        if not profiles[path] then
-            nixio.syslog("err", "mtwifi-cfg: cannot read WHNAT profile " .. path)
-            return false
-        end
+-- The netifd wrapper and boot service serialize all writers with mtwifi.lock.
+-- Stage every DAT edit before the first write. datconf can truncate on failure,
+-- so keep the exact original bytes, including comments, for every touched file.
+local function stage_profile(changes, path, fields)
+    local entry = changes[path]
+    if not entry then
+        local file = io.open(path, "rb")
+        if not file then return false end
+        local original = file:read("*a")
+        file:close()
+        if not original then return false end
+        entry = { original = original, fields = {} }
+        changes[path] = entry
     end
-    profiles[group.path] = load_profile(group.path)
-    if not profiles[group.path] then
-        nixio.syslog("err", "mtwifi-cfg: cannot read WHNAT init profile " .. group.path)
-        return false
-    end
+    for k, v in pairs(fields) do entry.fields[k] = v end
+    return true
+end
 
-    for path, dats in pairs(profiles) do
-        if path == current_path then
-            dats.WHNAT = value
-        elseif tostring(dats.WHNAT) ~= value then
-            if not save_profile({WHNAT = value}, path) then return false end
-            local saved = load_profile(path)
-            if not saved or saved.WHNAT ~= value then
-                nixio.syslog("err", "mtwifi-cfg: cannot save WHNAT profile " .. path)
-                return false
+local function restore_profiles(changes)
+    local restored = true
+    for path, entry in pairs(changes) do
+        if entry.written then
+            local temporary = path .. ".mtwifi-restore"
+            local file = io.open(temporary, "wb")
+            local ok = file and fs.chmod(temporary, 384) and file:write(entry.original)
+            if file and not file:close() then ok = false end
+            if ok and os.rename(temporary, path) then
+                entry.written = false
+            else
+                os.remove(temporary)
+                nixio.syslog("err", "mtwifi-cfg: cannot restore " .. path)
+                restored = false
             end
         end
     end
+    return restored
+end
+
+local function commit_profiles(changes)
+    for path, entry in pairs(changes) do
+        entry.written = true
+        if not save_profile(entry.fields, path) then
+            restore_profiles(changes)
+            return false
+        end
+    end
     return true
+end
+
+local function whnat_stage(changes, group, value, current_path, current_dats)
+    local function stage(path)
+        if path == current_path then
+            current_dats.WHNAT = value
+            return true
+        end
+        local dats = load_profile(path)
+        return dats and (tostring(dats.WHNAT) == value or
+            stage_profile(changes, path, { WHNAT = value }))
+    end
+    for path in pairs(group.profiles) do
+        if not stage(path) then return false end
+    end
+    return stage(group.path)
 end
 
 local function whnat_apply(group, value)
@@ -143,14 +178,25 @@ local function whnat_apply(group, value)
 end
 
 function mtwifi_cfg_whnat()
-    local ok = true
-    for _, group in ipairs(whnat_groups()) do
-        local value = whnat_value(group)
-        if not value or not whnat_save(group, value) or not whnat_apply(group, value) then
-            ok = false
+    local changes, groups = {}, whnat_groups()
+    for _, group in ipairs(groups) do
+        group.value = whnat_value(group)
+        local before = load_profile(group.path)
+        if not before or not group.value or not whnat_stage(changes, group, group.value) then return false end
+        group.previous = before.WHNAT
+    end
+    if not commit_profiles(changes) then return false end
+    for i, group in ipairs(groups) do
+        if not whnat_apply(group, group.value) then
+            restore_profiles(changes)
+            for j = 1, i do
+                local previous = groups[j].previous
+                if previous == "0" or previous == "1" then whnat_apply(groups[j], previous) end
+            end
+            return false
         end
     end
-    return ok
+    return true
 end
 
 function diff_cfg(cfg1, cfg2)
@@ -340,8 +386,9 @@ function mtwifi_up(devname, cfg, restore_vifs, is_dbdc)
     if not dev then return false end
 
     if is_dbdc then
-        local dbdc_main_dev = dev.INDEX .. "_1_1"
-        local dbdc_main_ifname = l1dat.devname_ridx[dbdc_main_dev].main_ifname
+        local dbdc_main_dev = l1dat.devname_ridx[dev.INDEX .. "_1_1"]
+        if not dbdc_main_dev then return false end
+        local dbdc_main_ifname = dbdc_main_dev.main_ifname
 
         if not is_dbdc_inited(dbdc_main_ifname) then
             nixio.syslog("info", "mtwifi-cfg: dbdc card init...")
@@ -380,6 +427,28 @@ function mtwifi_up(devname, cfg, restore_vifs, is_dbdc)
     return true
 end
 
+local function stop_dot1x(dev)
+    local path = "/var/run/8021xd_" .. dev.main_ifname .. ".pid"
+    local file = io.open(path)
+    if not file then return true end
+    local pid = tonumber(file:read("*l"))
+    file:close()
+    local function running()
+        return pid and pid > 1 and fs.readlink("/proc/" .. pid .. "/exe") == "/usr/bin/8021xd" and
+            (fs.readfile("/proc/" .. pid .. "/cmdline") or ""):find("-i%z" .. utils.esc(dev.main_ifname) .. "%z")
+    end
+    if running() then
+        nixio.kill(pid, 15)
+        for i = 1, 20 do
+            if not running() then break end
+            nixio.nanosleep(0, 100000000)
+        end
+        if running() then return false end
+    end
+    os.remove(path)
+    return true
+end
+
 function mtwifi_down(devname, cfg)
     nixio.syslog("info", "mtwifi-cfg: stop "..devname)
     local dev = l1dat.devname_ridx[devname]
@@ -387,7 +456,7 @@ function mtwifi_down(devname, cfg)
 
     if not dev then return reset_vifs, false end
 
-    local ok = true
+    local ok = stop_dot1x(dev)
     for _,vif in ipairs(string.split(utils.read_pipe("ls /sys/class/net"), "\n")) do
         if (vif_status(vif) == "up" and vif_in_dev(vif, dev)) then
             nixio.syslog("info", "mtwifi-cfg: down vif: "..vif)
@@ -495,43 +564,29 @@ function mtwifi_cfg_iwpriv_hook(cfg)
     mtwifi_cfg_foreach_vif(cfg, "sta", apcli_hook)
 end
 
-function set_chip_cfg(cfg, dats, init_whnat)
-    local dev_dats
-    local uci
-    local dat_key
-
-    if not cfg.config.dbdc_main then return end
-
-    for k,v in pairs(defs.chip_cfgs) do
-        uci = k
-        dat_key = v[1]
-
-        if not (init_whnat and dat_key == "WHNAT") then
-            -- reset chip cfgs to default
-            dats[dat_key] = v[2]
-
-            -- setup current dev cfg
-            set_dev_dat(dats, dat_key, cfg.config[uci])
+local function set_chip_cfg(cfg, dats, init_whnat, changes)
+    if not defs.disabled(cfg.config.dbdc_main) then return true end
+    local shared = {}
+    for option, field in pairs(defs.chip_cfgs) do
+        local key = field[1]
+        if key ~= "WHNAT" or not init_whnat then
+            dats[key] = field[2]
+            set_dev_dat(dats, key, cfg.config[option])
+            shared[key] = dats[key]
         end
     end
-
-    -- setup other dev cfg
-    for k,v in pairs(l1dat.devname_ridx) do
-        if k ~= cfg.device and
-        v.INDEX == l1dat.devname_ridx[cfg.device].INDEX and
-        v.mainidx == l1dat.devname_ridx[cfg.device].mainidx then
-            dev_dats = load_profile(v.profile_path)
-            if dev_dats then
-                for _,j in pairs(defs.chip_cfgs) do
-                    dat_key = j[1]
-                    if not (init_whnat and dat_key == "WHNAT") then
-                        set_dev_dat(dev_dats, dat_key, dats[dat_key])
-                    end
-                end
-                save_profile(dev_dats, v.profile_path)
+    local dev = l1dat.devname_ridx[cfg.device]
+    for _, radio in pairs(l1dat.devname_ridx) do
+        if radio.profile_path ~= dev.profile_path and radio.INDEX == dev.INDEX and radio.mainidx == dev.mainidx then
+            local current = load_profile(radio.profile_path)
+            if not current then return false end
+            for key, value in pairs(shared) do
+                if tostring(current[key]) ~= tostring(value) and
+                    not stage_profile(changes, radio.profile_path, { [key] = value }) then return false end
             end
         end
     end
+    return true
 end
 
 local function mld_group(config)
@@ -864,20 +919,8 @@ function mtwifi_cfg_setup(argv)
     end
     local dats_orig = load_profile(profile)
     if not dats_orig then return false end
-    local previous_file = io.open(profile, "r")
-    if not previous_file then return false end
-    local previous_text = previous_file:read("*a")
-    previous_file:close()
-    local function restore_profile()
-        local temporary = profile .. ".mtwifi-restore"
-        local file = io.open(temporary, "w")
-        if not file then return false end
-        local ok = fs.chmod(temporary, 384) and file:write(previous_text)
-        local closed = file:close()
-        ok = ok and closed and os.rename(temporary, profile)
-        if not ok then os.remove(temporary) end
-        return not not ok
-    end
+    local changes = {}
+    local function restore_profile() return restore_profiles(changes) end
     set_optional_dev_dat(dats, "Vht1024QamSupport", cfg.config.vht_1024)
     set_optional_dev_dat(dats, "TxBurst", cfg.config.tx_burst)
     local is_5g = cfg.config.band == "5g"
@@ -1015,7 +1058,7 @@ function mtwifi_cfg_setup(argv)
     end
 
     -- setup chip cfgs
-    set_chip_cfg(cfg, dats, whnat ~= nil)
+    if not set_chip_cfg(cfg, dats, whnat ~= nil, changes) then return false end
 
     -- setup other dev cfgs
     if cfg.config.txpower and cfg.config.txpower < 100 then
@@ -1091,11 +1134,27 @@ function mtwifi_cfg_setup(argv)
     end
 
     -- setup vif cfgs
+    local eap_bridges, ownip = {}, nil
     local apidx = 1
     for _, v in ipairs(ordered_vifs(cfg)) do
         if v.config.mode == "ap" then
             local settings = vifs[v]
             local security = settings.security
+            if security.server and not defs.disabled(v.config.disabled) then
+                local bridge = v.bridge or v.mtwifi_ifname
+                if not bridge or #bridge > 15 or not bridge:match("^[%w_.-]+$") then return false end
+                local ip = v.config.ownip or utils.read_pipe("ip -4 route get " .. security.server):match(" src ([%d.]+)")
+                if not ip or (ownip and ip ~= ownip) then
+                    nixio.syslog("err", "mtwifi-cfg: RADIUS source address unavailable or inconsistent")
+                    return false
+                end
+                ownip = ip
+                eap_bridges[bridge] = true
+                set_dat(dats, apidx, "RADIUS_Server", security.server)
+                set_dat(dats, apidx, "RADIUS_Port", security.port)
+                set_idx_dat(dats, apidx, "RADIUS_Key", security.secret)
+                -- WPA2 selects the external authenticator. IEEE8021X enables dynamic WEP in WEXT.
+            end
             set_idx_dat(dats, apidx, "SSID", settings.ssid)
             set_idx_dat(dats, apidx, "WPAPSK", security.key)
             set_dat(dats, apidx, "NoForwarding", defs.disabled(v.config.isolate) and 1 or 0)
@@ -1174,11 +1233,19 @@ function mtwifi_cfg_setup(argv)
         end
     end
 
+    if ownip then
+        local names = {}
+        for name in pairs(eap_bridges) do names[#names + 1] = name end
+        table.sort(names)
+        dats.own_ip_addr = ownip
+        dats.EAPifname = table.concat(names, ";")
+        dats.PreAuthifname = dats.EAPifname
+    end
     local reinstall_wifidrv = false
     local whnat_enabled
     if whnat then
         whnat_enabled = whnat_value(whnat)
-        if not whnat_enabled or not whnat_save(whnat, whnat_enabled, profile, dats) then
+        if not whnat_enabled or not whnat_stage(changes, whnat, whnat_enabled, profile, dats) then
             return false
         end
     end
@@ -1212,10 +1279,7 @@ function mtwifi_cfg_setup(argv)
             return false
         end
     end
-    if not save_profile(dats, profile) then
-        if not restore_profile() then nixio.syslog("err", "mtwifi-cfg: profile recovery failed") end
-        return false
-    end
+    if not stage_profile(changes, profile, dats) or not commit_profiles(changes) then return false end
     local is_dbdc = string.find(profile, "dbdc") ~= nil
     local function recover()
         local _, stopped = mtwifi_down(devname)
@@ -1272,8 +1336,20 @@ function mtwifi_cfg_setup(argv)
         if not stopped or not mtwifi_up(devname, cfg, nil, is_dbdc) then return recover() end
     end
 
+    if ownip then
+        if not dev.main_ifname:match("^[%w_]+$") or not dev.ext_ifname:match("^[%w_]+$") or
+            not command_ok("/usr/bin/8021xd -i " .. dev.main_ifname .. " -p " .. dev.ext_ifname) then
+            nixio.syslog("err", "mtwifi-cfg: RADIUS authenticator failed to start")
+            return recover()
+        end
+    end
     mtwifi_cfg_iwpriv_hook(cfg)
-    if whnat and not whnat_apply(whnat, whnat_enabled) then return recover() end
+    if whnat and not whnat_apply(whnat, whnat_enabled) then
+        recover()
+        local before = load_profile(whnat.path)
+        if before and (before.WHNAT == "0" or before.WHNAT == "1") then whnat_apply(whnat, before.WHNAT) end
+        return false
+    end
     return true
 end
 

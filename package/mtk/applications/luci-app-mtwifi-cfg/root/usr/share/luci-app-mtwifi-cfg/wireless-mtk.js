@@ -1401,10 +1401,13 @@ function mtwifi_center80(band, channel) {
 }
 
 function mtwifi_segment_available(channels, band, channel) {
-	var center = mtwifi_center80(band, channel), values = channels && channels[band];
-	if (center == null) return false;
+	var center = mtwifi_center80(band, channel);
+	return center != null && mtwifi_channel_block(channels && channels[band], center - 6, 4);
+}
+
+function mtwifi_channel_block(values, first, count) {
 	if (!values) return true;
-	for (var part = center - 6; part <= center + 6; part += 4) {
+	for (var part = first; part < first + count * 4; part += 4) {
 		var available = false;
 		for (var i = 0; i < values.length; i += 3)
 			if (+values[i] == part && (values[i+2] === true || values[i+2]?.available === true))
@@ -1447,11 +1450,12 @@ function mtwifi_radio_info(section_id) {
 	}).catch(function() { return {}; });
 }
 
-function mtwifi_320_primary(channel, layout) {
+function mtwifi_320_primary(channel, layout, channels) {
 	for (var i = 0; i < 6; i++) {
 		var first = 1 + i * 32;
 		if ((!layout || layout == i % 2 + 1) && channel >= first &&
-		    channel <= first + 60 && (channel - first) % 4 == 0)
+		    channel <= first + 60 && (channel - first) % 4 == 0 &&
+		    mtwifi_channel_block(channels, first, 16))
 			return true;
 	}
 	return false;
@@ -1632,13 +1636,16 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		var radio = this.radio, band = radio && radio.band;
 		if (!band) return;
 
-		if (this.liveChannels && this.liveChannels.length > 3 &&
-		    (!this.country || this.country == radio.country)) {
-			this.channels[band] = this.liveChannels;
-			return;
-		}
 		var region = this.country ? radio.countries?.[this.country] : radio.region;
 		var list = radio.channels?.[region] || [];
+		if (this.liveChannels && this.liveChannels.length > 3 &&
+		    (!this.country || this.country == radio.country)) {
+			this.channels[band] = this.liveChannels.filter(function(_, i, values) {
+				var ch = values[i - i % 3];
+				return ch == 'auto' || !list.length || list.indexOf(+ch) >= 0;
+			});
+			return;
+		}
 		var channels = [ 'auto', 'auto', true ];
 		list.forEach(function(ch) {
 			var mhz = band == '2g' ? (ch == 14 ? 2484 : 2407 + ch * 5) :
@@ -1735,7 +1742,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 			var filtered = [];
 			for (var i = 0; values && i < values.length; i += 3)
 				if (split ? mtwifi_segment_available(this.channels, band.value, values[i]) :
-				    values[i] == 'auto' || mtwifi_320_primary(+values[i], +width.slice(7)))
+				    values[i] == 'auto' || mtwifi_320_primary(+values[i], +width.slice(7), values))
 					filtered.push(values[i], values[i+1], values[i+2]);
 			values = filtered;
 		}
@@ -1876,7 +1883,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		if (this.radio?.band && value[1] != this.radio.band)
 			return _('The selected band does not match this radio.');
 		if (/^EHT320(?:-[12])?$/.test(value[0]) && value[2] != 'auto' &&
-		    !mtwifi_320_primary(+value[2], +String(value[0]).slice(7)))
+		    !mtwifi_320_primary(+value[2], +String(value[0]).slice(7), this.channels['6g']))
 			return _('Invalid primary channel for the selected bandwidth.');
 		if (this.radio?.band && value[2] != 'auto' &&
 		    !this.channels[value[1]].some(function(channel, i, values) {
@@ -3112,6 +3119,7 @@ return view.extend({
 						crypto_modes.push(['psk', 'WPA-PSK', 12]);
 						if (ifmode == 'ap') {
 							crypto_modes.push(['psk-mixed', 'WPA-PSK/WPA2-PSK Mixed Mode', 22]);
+							crypto_modes.push(['wpa2', 'WPA2-Enterprise', 35]);
 						}
 					}
 				}
@@ -3133,7 +3141,8 @@ return view.extend({
 				o = ss.taboption('encryption', form.Value, 'auth_server', _('Radius-Authentication-Server'));
 				add_dependency_permutations(o, { mode: ['ap', 'ap-wds'], encryption: ['wpa', 'wpa2', 'wpa3', 'wpa3-mixed'] });
 				o.rmempty = true;
-				o.datatype = 'host(0)';
+				o.datatype = hwtype == 'mtwifi' ? 'ip4addr("nomask")' : 'host(0)';
+				if (hwtype == 'mtwifi') o.rmempty = false;
 
 				o = ss.taboption('encryption', form.Value, 'auth_port', _('Radius-Authentication-Port'), _('Default %d').format(1812));
 				add_dependency_permutations(o, { mode: ['ap', 'ap-wds'], encryption: ['wpa', 'wpa2', 'wpa3', 'wpa3-mixed'] });
@@ -3144,6 +3153,7 @@ return view.extend({
 				add_dependency_permutations(o, { mode: ['ap', 'ap-wds'], encryption: ['wpa', 'wpa2', 'wpa3', 'wpa3-mixed'] });
 				o.rmempty = true;
 				o.password = true;
+				if (hwtype == 'mtwifi') o.rmempty = false;
 
 				o = ss.taboption('encryption', form.Value, 'acct_server', _('Radius-Accounting-Server'));
 				add_dependency_permutations(o, { mode: ['ap', 'ap-wds'], encryption: ['wpa', 'wpa2', 'wpa3', 'wpa3-mixed'] });
@@ -3245,7 +3255,7 @@ return view.extend({
 					o.value('0', _('Disabled'));
 					o.value('1', _('Optional'));
 					o.value('2', _('Required'));
-					['psk2', 'psk-mixed', 'sae-mixed', 'sae', 'owe'].forEach(function(enc) { o.depends('encryption', enc); });
+					['wpa2', 'psk2', 'psk-mixed', 'sae-mixed', 'sae', 'owe'].forEach(function(enc) { o.depends('encryption', enc); });
 					o.validate = function(section_id, value) {
 						var enc = encr.formvalue(section_id);
 						if (!value) return true;

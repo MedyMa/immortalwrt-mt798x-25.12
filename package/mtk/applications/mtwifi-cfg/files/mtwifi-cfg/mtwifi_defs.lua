@@ -138,12 +138,23 @@ mtwifi_defs.enc2dat = {
     ["psk-mixed+ccmp"] = {"WPAPSKWPA2PSK", "AES"},
     ["psk-mixed+aes"] = {"WPAPSKWPA2PSK", "AES"},
     ["psk-mixed"] = {"WPAPSKWPA2PSK", "AES"},
+    ["wpa2"] = {"WPA2", "AES"},
+    ["wpa2+ccmp"] = {"WPA2", "AES"},
+    ["wpa2+aes"] = {"WPA2", "AES"},
     ["owe"] = {"OWE", "AES"},
     ["owe+ccmp"] = {"OWE", "AES"},
 }
 
 function mtwifi_defs.disabled(value)
     return value == true or value == 1 or value == "1"
+end
+
+local function radius_ipv4(value)
+    if type(value) ~= "string" then return false end
+    local a, b, c, d = value:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+    return a and tonumber(a) > 0 and tonumber(a) < 224 and tonumber(b) < 256 and
+        tonumber(c) < 256 and tonumber(d) < 256 and
+        value == string.format("%d.%d.%d.%d", a,b,c,d)
 end
 
 function mtwifi_defs.security(config)
@@ -163,7 +174,7 @@ function mtwifi_defs.security(config)
     elseif auth == "WPA2PSKWPA3PSK" then
         if pmf == 0 then return nil, "SAE_TRANSITION_REQUIRES_PMF" end
         pmf = pmf or 1
-    elseif auth ~= "WPA2PSK" and auth ~= "WPAPSKWPA2PSK" then
+    elseif auth ~= "WPA2" and auth ~= "WPA2PSK" and auth ~= "WPAPSKWPA2PSK" then
         pmf = 0
     end
     if cipher == "TKIP" or cipher == "TKIPAES" then
@@ -171,7 +182,18 @@ function mtwifi_defs.security(config)
     end
 
     local key = ""
-    if auth ~= "OPEN" and auth ~= "OWE" then
+    if auth == "WPA2" then
+        local server = config.auth_server
+        if type(server) == "table" and #server == 1 then server = server[1] end
+        local port, secret = tonumber(config.auth_port or 1812), config.auth_secret
+        if config.mode ~= "ap" or not radius_ipv4(server) or not port or port % 1 ~= 0 or
+            port < 1 or port > 65535 or type(secret) ~= "string" or #secret < 1 or
+            #secret > 63 or secret:find("%c") or (config.ownip and not radius_ipv4(config.ownip)) then
+            return nil, "INVALID_RADIUS_SETTINGS"
+        end
+        return { auth = auth, cipher = cipher, key = "", pmf = pmf or 0,
+            server = server, port = port, secret = secret }
+    elseif auth ~= "OPEN" and auth ~= "OWE" then
         key = config.key
         local allow_hex = auth ~= "WPA3PSK" and auth ~= "WPA2PSKWPA3PSK"
         if type(key) ~= "string" or key:find("%c") or #key < 8 or
@@ -185,7 +207,11 @@ function mtwifi_defs.security(config)
 end
 
 function mtwifi_defs.security_signature(security)
-    return { security.auth, security.cipher, security.key, tostring(security.pmf) }
+    local signature = { security.auth, security.cipher, security.key, tostring(security.pmf) }
+    if security.server then
+        signature[5], signature[6], signature[7] = security.server, tostring(security.port), security.secret
+    end
+    return signature
 end
 
 mtwifi_defs.countryRegions = {
