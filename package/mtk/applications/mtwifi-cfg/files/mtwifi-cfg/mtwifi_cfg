@@ -935,6 +935,26 @@ function mtwifi_cfg_setup(argv)
         return false
     end
 
+    if is_ax_mode(cfg) or is_be_mode(cfg) then
+        if radio.bss_color ~= nil and radio.bss_color ~= "" then
+            local color = tonumber(radio.bss_color)
+            if not color or color ~= math.floor(color) or (color ~= 255 and (color < 1 or color > 63)) then
+                nixio.syslog("err", "mtwifi-cfg: invalid BSS color")
+                return false
+            end
+            dats.BSSColorValue = color
+        end
+        local sr = cfg2dat(radio.sre_enable)
+        if sr ~= nil and sr ~= "" then
+            sr = tonumber(sr)
+            if sr ~= 0 and sr ~= 1 then
+                nixio.syslog("err", "mtwifi-cfg: invalid spatial reuse value")
+                return false
+            end
+            dats.SREnable = sr
+        end
+    end
+
     -- setup apcli
     dats.ApCliEnable = 0
     dats.ApCliSsid = ""

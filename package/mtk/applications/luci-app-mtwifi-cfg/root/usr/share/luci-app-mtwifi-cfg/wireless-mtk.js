@@ -1290,6 +1290,7 @@ function add_dep_he_feature(o) {
 	o.depends({'_freq': 'HE20', '!contains': true});
 	o.depends({'_freq': 'HE40', '!contains': true});
 	o.depends({'_freq': 'HE80', '!contains': true});
+	o.depends({'_freq': 'HE80_80', '!contains': true});
 	o.depends({'_freq': 'HE160', '!contains': true});
 }
 
@@ -2401,6 +2402,26 @@ return view.extend({
 						o.value('0', _('Disabled'));
 						o.optional = true;
 						o.rmempty = true;
+
+						o = ss.taboption('advanced', form.Value, 'bss_color', _('BSS color'),
+							_('Set a BSS color from 1 to 63, or enter 255 to let the driver pick a color. Leave empty to use the profile setting.'));
+						add_dep_he_feature(o);
+						add_dep_be_feature(o);
+						o.datatype = 'or(and(uinteger,range(1,63)),"255")';
+						o.placeholder = _('Use profile setting');
+						o.optional = true;
+						o.rmempty = true;
+						o.retain = true;
+
+						o = ss.taboption('advanced', form.ListValue, 'sre_enable', _('Spatial reuse'));
+						add_dep_he_feature(o);
+						add_dep_be_feature(o);
+						o.value('', _('Use profile setting'));
+						o.value('1', _('Enabled'));
+						o.value('0', _('Disabled'));
+						o.optional = true;
+						o.rmempty = true;
+						o.retain = true;
 
 						o = ss.taboption('advanced', form.ListValue, 'tx_burst', _('Transmit Burst'));
 						o.value('', _('Use profile setting'));

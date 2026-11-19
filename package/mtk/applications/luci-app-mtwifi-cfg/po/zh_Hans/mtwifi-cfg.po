@@ -522,3 +522,12 @@ msgstr "管理帧保护需要使用 AES 密码套件。"
 
 msgid "This network uses an encryption or mode the MTK driver cannot join."
 msgstr "MTK 驱动不支持连接此网络所用的加密方式或模式。"
+
+msgid "BSS color"
+msgstr "BSS 着色"
+
+msgid "Set a BSS color from 1 to 63, or enter 255 to let the driver pick a color. Leave empty to use the profile setting."
+msgstr "请输入 1 至 63 的 BSS 颜色编号，或输入 255 让驱动自动选色。留空时沿用当前无线配置文件的设置。"
+
+msgid "Spatial reuse"
+msgstr "空间复用"
