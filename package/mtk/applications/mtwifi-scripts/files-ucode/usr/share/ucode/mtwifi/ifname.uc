@@ -175,7 +175,7 @@ export function remove_wps_map(dev, path) {
 /* 当前 vif 列表里是否有某个 mode */
 export function has_mode(payload, mode) {
 	for (let k in iface_keys(payload))
-		if (payload.interfaces[k]?.config?.mode == mode && !payload.interfaces[k].config.disabled)
+		if (payload.interfaces[k]?.config?.mode == mode && !+payload.interfaces[k].config.disabled)
 			return true;
 
 	return false;
