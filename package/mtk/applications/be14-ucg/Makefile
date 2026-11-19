@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=be14-ucg
 PKG_VERSION:=1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-or-later
 
 include $(INCLUDE_DIR)/package.mk
@@ -11,7 +11,7 @@ define Package/be14-ucg
   SECTION:=net
   CATEGORY:=Network
   TITLE:=UniFi inform client for the BPI-R4 BE14
-  DEPENDS:=+mtwifi-cfg +libubus-lua +rpcd-mod-iwinfo +python3-cryptography +python3-urllib +python3-openssl
+  DEPENDS:=+mtwifi-cfg +libubus-lua +rpcd-mod-iwinfo +python3-cryptography +python3-urllib +python3-openssl +python3-codecs
   PKGARCH:=all
 endef
 
