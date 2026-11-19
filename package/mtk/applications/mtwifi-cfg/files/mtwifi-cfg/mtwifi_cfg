@@ -55,7 +55,10 @@ function save_profile(cfgs, path)
         return false
     end
 
-    if not fs.chmod(path, 384) then return false end
+    if not fs.chmod(path, "600") then
+        nixio.syslog("err", "mtwifi-cfg: cannot set profile permissions on " .. path)
+        return false
+    end
     local datobj = datconf.openfile(path)
     if not datobj then return false end
     datobj:merge(cfgs)
@@ -117,7 +120,7 @@ local function restore_profiles(changes)
         if entry.written then
             local temporary = path .. ".mtwifi-restore"
             local file = io.open(temporary, "wb")
-            local ok = file and fs.chmod(temporary, 384) and file:write(entry.original)
+            local ok = file and fs.chmod(temporary, "600") and file:write(entry.original)
             if file and not file:close() then ok = false end
             if ok and os.rename(temporary, path) then
                 entry.written = false
@@ -943,7 +946,9 @@ function mtwifi_cfg_setup(argv)
         return false
     end
 
-    dats.BssidNum = math.max(4, bssid_num, tonumber(dats_orig.BssidNum) or 0)
+    -- Changing BssidNum reloads the shared driver. Keep the vendor allocation
+    -- (two on BE14 6 GHz) unless the requested APs need more slots.
+    dats.BssidNum = math.max(1, bssid_num, tonumber(dats_orig.BssidNum) or 4)
 
     -- HeLdpc is parsed as one semicolon-delimited value per BSSID. Only
     -- replace the profile when the radio option is explicitly configured.
