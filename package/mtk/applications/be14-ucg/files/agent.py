@@ -13,16 +13,17 @@ import sys
 import tempfile
 import time
 import zlib
-from collections import Counter
 from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidTag
 from inform import FACTORY_KEY, HEADER, LIMIT, packet, unpack
+from telemetry import wireless_report
 from wlan import flat, plan, report_wlans, sys_vaps, valid_wlan_id
 
 STATE = Path("/etc/be14-ucg/state.json")
 LOCK = "/var/run/be14-ucg.lock"
 BRIDGE = "/usr/lib/be14-ucg/wireless.lua"
+MODEL = "E7"
 
 
 def endpoint(url):
@@ -107,38 +108,20 @@ def report(snapshot, state):
         raise ValueError("invalid management MAC")
     ipaddress.IPv4Address(snapshot["ip"])
     adopted = state["key"] != FACTORY_KEY
-    msg = dict(type="uap", model="U7PRO", model_display="BPI-R4 BE14", version="8.6.11.18870",
+    # The E7 inform shortname and board ID resolve to UAPA697 in the UniFi catalog.
+    msg = dict(type="uap", model=MODEL, sysid=0xA697, model_display="BPI-R4 BE14", version="8.6.11.18870",
                hostname=socket.gethostname(), serial=mac.replace(":", "").upper(), mac=mac,
                ip=snapshot["ip"], inform_url=state["url"], x_authkey=state["key"],
                default=not adopted, _default_key=not adopted, state=4 if adopted else 1,
-               fw_caps=3, sshd_port=snapshot["sshd_port"], cfgversion=state["cfgversion"],
+               fw_caps=3, support_wifi6e="6e" in snapshot["radios"],
+               sshd_port=snapshot["sshd_port"], cfgversion=state["cfgversion"],
                uptime=int(float(Path("/proc/uptime").read_text().split()[0])), time=int(time.time()))
     if adopted:
-        msg["radio_table"] = [snapshot["radios"][c] for c in ("ng", "na", "6e")]
-        msg["radio_table_stats"] = [
-            {k: v for k, v in radio.items() if k in ("name", "channel", "tx_power", "up", "num_sta")}
-            for radio in msg["radio_table"]]
-        msg["vap_table"] = []
-        names = Counter((vap["radio"], vap["essid"]) for vap in snapshot["aps"])
-        learned = state.get("report_wlans", {})
-        for vap in snapshot["aps"]:
-            band, ssid = vap["radio"], vap["essid"]
-            bound = snapshot["bindings"].get(band, {})
-            if bound.get("section") == vap["section"]:
-                ident = snapshot["wlan_id"]
-            elif names[band, ssid] == 1:
-                ident = learned.get(band, {}).get(ssid)
-            else:
-                continue
-            if not ident:
-                continue
-            entry = {k: vap[k] for k in ("name", "radio", "radio_name", "essid", "bssid",
-                                         "channel", "up", "num_sta") if k in vap}
-            entry.update(id=ident, usage="user")
-            if "sta_table" in vap:
-                # lua-cjson encodes an empty Lua table as a JSON object.
-                entry["sta_table"] = vap["sta_table"] or []
-            msg["vap_table"].append(entry)
+        msg.update(wireless_report(snapshot, state.get("report_wlans", {})))
+        # An adopted U7 record may have acknowledged a WLAN configuration
+        # that omitted 6 GHz. Request a fresh one with the E7 capabilities.
+        if state.get("wlan_model") != MODEL and (state["gcm"] or state["url"].startswith("https://")):
+            msg["cfgversion"] = "0"
     return msg
 
 
@@ -265,10 +248,13 @@ def handle(msg, state, snap, authenticated=False):
     mapping_changed = learned != state.get("report_wlans")
     if mapping_changed:
         state["report_wlans"] = learned
+    model_changed = authenticated and state.get("wlan_model") != MODEL
+    if model_changed:
+        state["wlan_model"] = MODEL
     if not changes:
         if expected and not active(snap["bindings"], expected):
             raise ValueError("WLAN live settings differ, revision withheld")
-        if state["cfgversion"] != version or mapping_changed:
+        if state["cfgversion"] != version or mapping_changed or model_changed:
             state["cfgversion"] = version
             save(state)
         return 5

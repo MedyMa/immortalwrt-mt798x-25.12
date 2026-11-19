@@ -71,14 +71,13 @@ local function snapshot()
         if dev.INDEX == "MT7990" and code then
             assert(not radios[code], "ambiguous BE14 radio")
             local radio = status[name] or {}
-            local row = { name = radio_names[code], radio = code, up = radio.up == true }
+            local row = { name = radio_names[code], radio = code, up = radio.up == true,
+                ifname = dev.main_ifname, applied_htmode = (radio.config or {}).htmode }
             radios[code] = row
             local main = radio.up and call("iwinfo", "info", {device=dev.main_ifname}) or {}
             row.channel, row.tx_power = main.channel, main.txpower
-            local width = (radio.config or {}).htmode or ""
-            row.ht = tonumber(width:match("(%d+)"))
+            row.live_htmode = main.htmode
             local live = {}
-            local complete = true
             for _, v in ipairs(radio.interfaces or {}) do
                 if radio.up and v.ifname and v.ifname:match("^" .. dev.ext_ifname .. "%d+$") then
                     live[v.section] = v
@@ -93,6 +92,7 @@ local function snapshot()
                 local observed = iface and info.ssid and info.ssid ~= "" and info.ssid or nil
                 row.channel = row.channel or info.channel
                 row.tx_power = row.tx_power or info.txpower
+                row.live_htmode = row.live_htmode or info.htmode
                 if owned[section] then
                     assert(c.mldgroup == "0" and not defs.disabled(c.mlo) and not defs.disabled(c.disabled),
                         "bind an enabled independent test AP with mldgroup 0")
@@ -111,20 +111,18 @@ local function snapshot()
                 end
                 if observed and info.bssid then
                     local ap = {section=section, name=iface, radio=code, radio_name=row.name,
-                        essid=observed, bssid=info.bssid:lower(), channel=info.channel, up=true}
+                        essid=observed, bssid=info.bssid:lower(), channel=info.channel,
+                        tx_power=info.txpower or row.tx_power, up=true}
                     local stations = call("iwinfo", "assoclist", {device=iface}).results
                     if type(stations) == "table" then
                         if #stations > 0 and not hosts then hosts = call("luci", "getHostHints") end
                         ap.sta_table = station_table(stations, hosts or {}, ap)
-                        ap.num_sta = #ap.sta_table
-                        row.num_sta = (row.num_sta or 0) + ap.num_sta
-                    else
-                        complete = false
                     end
                     aps[#aps+1] = ap
+                elseif iface then
+                    row.incomplete_associations = true
                 end
             end)
-            if not complete then row.num_sta = nil end
         end
     end
     assert(radios.ng and radios.na and radios["6e"], "BE14 tri-band L1 profile required")

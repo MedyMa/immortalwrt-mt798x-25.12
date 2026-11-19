@@ -1,6 +1,6 @@
 # BPI-R4 BE14 接入 UniFi Network
 
-`be14-ucg` 在 R4 上向指定控制器的 `/inform` 发起连接。协议使用三频 U7 Pro 的型号与版本字段，设备名和管理 MAC 来自 R4。UCG 可能将它显示为 U7 Pro。软件包随 WEXT 固件安装，首次启用需要指定控制器地址。
+`be14-ucg` 在 R4 上向指定控制器的 `/inform` 发起连接。UCG 通过 E7 的型号代码 `UAPA697` 和系统 ID `a697` 识别这台三频 AP。设备名和管理 MAC 来自 R4。设备页的版本字段用于协议兼容，R4 的固件由 ImmortalWrt 更新。软件包随 WEXT 固件安装，首次启用需要指定控制器地址。
 
 ## 启用采用
 
@@ -15,9 +15,15 @@ config agent 'main'
 
 执行 `/etc/init.d/be14-ucg enable` 和 `/etc/init.d/be14-ucg restart`。在 UniFi Network 的设备列表中选择这台 R4 的 MAC 并采用。控制器如果要求通过 SSH 采用，请使用高级采用和 R4 已有的 SSH 管理凭据。自定义 SSH 端口可填入 `option sshd_port`。首次采用应在受信任的管理网络进行。更改控制器 IP 前需在维护窗口重新配对。采用密钥保存在 R4 的 `/etc/be14-ucg/state.json`，服务重启和保留配置升级都会沿用它。
 
+已按 U7 Pro 采用的 R4 可以在原设备记录上升级代理。UniFi Network 10.6.109 实测会更新射频和客户端数据，但保留首次采用时的型号。需要重建为 E7 时，可在维护窗口停止代理，在 UCG 移除旧设备，然后在 R4 本地备份并移开配对文件。再次启动代理后，按原来的管理 MAC 重新采用。UCG 会创建新的设备记录。
+
 ## 在 UniFi 查看 Wi-Fi 客户端
 
 在 UniFi 的「设置 → WiFi」中，将与 R4 实际 SSID 同名的 WLAN 分配给这台 AP，并选择对应频段。例如，查看连接 `ImmortalWrt-5G` 的终端时，使用 5 GHz。UCG 下发配置后，代理按频段和完整 SSID 匹配 WLAN 编号，再通过 `iwinfo assoclist` 逐个 BSSID 上报关联终端。这个过程只读取 R4 的无线配置。页面可以显示终端 MAC、信号和速率。R4 能解析主机信息时还会上报 IP 和主机名。
+
+代理上报每个活动 BSSID 的运行信道、带宽和无线接口累计收发字节。UniFi 根据连续两次读数计算流量速率。对于 6 GHz，代理同时通告频段支持及各射频的 SAE 和 OWE 能力。要在 UCG 看到使用该频段的终端，请把同名的 6 GHz WLAN 分配给这台 AP，并选择与 R4 一致的 WPA3 个人或增强开放式加密。
+
+要在 UCG 查看每台终端使用的应用，可以把一个测试 SSID 在 R4 上桥接到独立 VLAN，在上联网口放行该标签，并由 UCG 提供 DHCP 和默认网关。R4 对这个 VLAN 保留终端源地址，UCG 的「流量识别」即可分析经过网关的连接。在 UCG 按测试手机的 IP 核对应用和流量。R4 上的代理隧道若把流量封装到外部节点，UCG 在这条路径上看到的是隧道端点。[UniFi 流量识别说明](https://help.ui.com/hc/en-us/articles/12570783535383-UniFi-Gateway-Traffic-and-Device-Identification)
 
 ## 绑定测试 WLAN
 
