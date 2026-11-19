@@ -15,9 +15,13 @@ config agent 'main'
 
 执行 `/etc/init.d/be14-ucg enable` 和 `/etc/init.d/be14-ucg restart`。在 UniFi Network 的设备列表中选择这台 R4 的 MAC 并采用。控制器如果要求通过 SSH 采用，请使用高级采用和 R4 已有的 SSH 管理凭据。自定义 SSH 端口可填入 `option sshd_port`。首次采用应在受信任的管理网络进行。更改控制器 IP 前需在维护窗口重新配对。采用密钥保存在 R4 的 `/etc/be14-ucg/state.json`，服务重启和保留配置升级都会沿用它。
 
+## 在 UniFi 查看 Wi-Fi 客户端
+
+在 UniFi 的「设置 → WiFi」中，将与 R4 实际 SSID 同名的 WLAN 分配给这台 AP，并选择对应频段。例如，查看连接 `ImmortalWrt-5G` 的终端时，使用 5 GHz。UCG 下发配置后，代理按频段和完整 SSID 匹配 WLAN 编号，再通过 `iwinfo assoclist` 逐个 BSSID 上报关联终端。这个过程只读取 R4 的无线配置。页面可以显示终端 MAC、信号和速率。R4 能解析主机信息时还会上报 IP 和主机名。
+
 ## 绑定测试 WLAN
 
-在 UCG 创建一个普通、无 VLAN 标签的个人 WLAN，记录其 24 位十六进制 WLAN ID。在 R4 上选择已运行的独立测试 AP。其 UCI 节名须以 `be14_ucg_` 开头，`mode` 为 `ap`，`mldgroup` 显式为 `0`，并接到预定的测试网络。可用 `l1util list` 查看真实无线设备的 UCI 名称。例如 `be14_ucg_five` 可以绑定在已改名的 5 GHz 设备上。
+在 UCG 创建一个普通、无 VLAN 标签的个人 WLAN，使用控制器实际下发的 WLAN ID。控制器可能使用数字编号或 24 位十六进制 ObjectId。在 R4 上选择已运行的独立测试 AP。其 UCI 节名须以 `be14_ucg_` 开头，`mode` 为 `ap`，`mldgroup` 显式为 `0`，并接到预定的测试网络。可用 `l1util list` 查看真实无线设备的 UCI 名称。例如 `be14_ucg_five` 可以绑定在已改名的 5 GHz 设备上。
 
 在同一个 `config agent 'main'` 段加入实际的 WLAN ID 和测试 AP 的节名，然后重启服务。每个频段可以列一个节，同一 WLAN 在 UCG 上也要启用相应频段。
 

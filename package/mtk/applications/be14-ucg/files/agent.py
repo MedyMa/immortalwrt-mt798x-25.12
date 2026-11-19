@@ -13,11 +13,12 @@ import sys
 import tempfile
 import time
 import zlib
+from collections import Counter
 from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidTag
 from inform import FACTORY_KEY, HEADER, LIMIT, packet, unpack
-from wlan import flat, plan, sys_vaps
+from wlan import flat, plan, report_wlans, sys_vaps, valid_wlan_id
 
 STATE = Path("/etc/be14-ucg/state.json")
 LOCK = "/var/run/be14-ucg.lock"
@@ -118,11 +119,26 @@ def report(snapshot, state):
             {k: v for k, v in radio.items() if k in ("name", "channel", "tx_power", "up", "num_sta")}
             for radio in msg["radio_table"]]
         msg["vap_table"] = []
+        names = Counter((vap["radio"], vap["essid"]) for vap in snapshot["aps"])
+        learned = state.get("report_wlans", {})
         for vap in snapshot["aps"]:
-            bound = snapshot["bindings"].get(vap["radio"], {})
-            if bound.get("section") == vap["section"] and snapshot["wlan_id"]:
-                msg["vap_table"].append({**{k: v for k, v in vap.items() if k != "section"},
-                                         "id": snapshot["wlan_id"], "usage": "user"})
+            band, ssid = vap["radio"], vap["essid"]
+            bound = snapshot["bindings"].get(band, {})
+            if bound.get("section") == vap["section"]:
+                ident = snapshot["wlan_id"]
+            elif names[band, ssid] == 1:
+                ident = learned.get(band, {}).get(ssid)
+            else:
+                continue
+            if not ident:
+                continue
+            entry = {k: vap[k] for k in ("name", "radio", "radio_name", "essid", "bssid",
+                                         "channel", "up", "num_sta") if k in vap}
+            entry.update(id=ident, usage="user")
+            if "sta_table" in vap:
+                # lua-cjson encodes an empty Lua table as a JSON object.
+                entry["sta_table"] = vap["sta_table"] or []
+            msg["vap_table"].append(entry)
     return msg
 
 
@@ -239,16 +255,20 @@ def handle(msg, state, snap, authenticated=False):
     if wlan_id:
         if not authenticated:
             raise ValueError("WLAN provisioning requires GCM or verified HTTPS")
-        if not re.fullmatch(r"[0-9a-fA-F]{24}", wlan_id):
-            raise ValueError("invalid WLAN ObjectId")
+        if not valid_wlan_id(wlan_id):
+            raise ValueError("invalid WLAN ID")
         rows = sys_vaps(msg["system_cfg"], wlan_id) if "system_cfg" in msg else msg["vap_table"]
         changes, expected = plan(rows, snap, wlan_id)
     else:
         changes, expected = {}, {}
+    learned = report_wlans(msg) if authenticated else state.get("report_wlans")
+    mapping_changed = learned != state.get("report_wlans")
+    if mapping_changed:
+        state["report_wlans"] = learned
     if not changes:
         if expected and not active(snap["bindings"], expected):
             raise ValueError("WLAN live settings differ, revision withheld")
-        if state["cfgversion"] != version:
+        if state["cfgversion"] != version or mapping_changed:
             state["cfgversion"] = version
             save(state)
         return 5

@@ -37,6 +37,37 @@ def groups(values, prefix):
     return result
 
 
+def valid_wlan_id(value):
+    # Network can provision a site's numeric WLAN number or its ObjectId.
+    return isinstance(value, str) and re.fullmatch(r"(?:[0-9]{1,10}|[0-9a-fA-F]{24})", value) is not None
+
+
+def report_wlans(msg):
+    if "system_cfg" in msg:
+        rows = groups(flat(msg["system_cfg"]), "wireless").values()
+    else:
+        rows = msg["vap_table"]
+        if not isinstance(rows, list):
+            raise ValueError("invalid controller VAP table")
+    by_band = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        band = row.get("radio") or BANDS.get(row.get("parent") or row.get("radio_name"))
+        ssid = row.get("ssid") or row.get("essid")
+        ident = str(row.get("id", ""))
+        if (band not in BANDS.values() or not isinstance(ssid, str) or not 1 <= len(ssid.encode()) <= 32
+                or not valid_wlan_id(ident) or row.get("usage", "user") != "user"
+                or row.get("status") == "disabled" or row.get("enabled") in FALSE
+                or row.get("is_guest") in TRUE or row.get("guest_policy") in TRUE):
+            continue
+        names = by_band.setdefault(band, {})
+        # Distinct WLANs with an identical SSID on one band cannot be matched by name.
+        if names.setdefault(ssid, ident) != ident:
+            names[ssid] = None
+    return by_band
+
+
 def sys_vaps(text, wlan_id):
     values = flat(text)
     auths = groups(values, "aaa")
@@ -79,7 +110,7 @@ def plan(rows, snapshot, wlan_id):
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("invalid VAP entry")
-        if row.get("id") != wlan_id:
+        if str(row.get("id", "")) != wlan_id:
             continue
         code = row.get("radio") or BANDS.get(row.get("radio_name"))
         if code not in BANDS.values():

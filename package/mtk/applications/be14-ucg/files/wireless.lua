@@ -28,10 +28,42 @@ end
 local codes = { ["2g"] = "ng", ["5g"] = "na", ["6g"] = "6e" }
 local radio_names = { ng = "wifi0", na = "wifi1", ["6e"] = "wifi2" }
 
+local function dbm(value)
+    if type(value) ~= "number" then return end
+    -- rpcd serializes dBm in a 32-bit ubus integer.
+    if value >= 2^31 then value = value - 2^32 end
+    if value < 0 and value >= -127 then return value end
+end
+
+local function station_table(stations, hosts, ap)
+    local rows, seen = {}, {}
+    for _, sta in ipairs(stations) do
+        local mac = type(sta.mac) == "string" and sta.mac:lower() or ""
+        if mac:match("^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$") and mac ~= "00:00:00:00:00:00"
+            and tonumber(mac:sub(1, 2), 16) % 2 == 0 and not seen[mac] then
+            seen[mac] = true
+            local host = hosts[mac] or hosts[mac:upper()] or {}
+            local row = {mac=mac, vap_name=ap.name, radio=ap.radio, channel=ap.channel,
+                uptime=sta.connected_time, signal=dbm(sta.signal), noise=dbm(sta.noise),
+                ip=(host.ipaddrs or {})[1], hostname=host.name}
+            if row.signal and row.noise then row.rssi = row.signal - row.noise end
+            for _, dir in ipairs({"rx", "tx"}) do
+                local stats = sta[dir] or {}
+                for _, key in ipairs({"rate", "bytes", "packets"}) do
+                    row[dir .. "_" .. key] = stats[key]
+                end
+            end
+            rows[#rows+1] = row
+        end
+    end
+    return rows
+end
+
 local function snapshot()
     local profile = assert(l1.load_l1_profile(l1.L1_DAT_PATH))
     local status = call("network.wireless", "status")
     local radios, aps, bindings = {}, {}, {}
+    local hosts
     local owned = selected()
     for name, dev in pairs(profile.devname_ridx) do
         local band = l1.device_band(dev)
@@ -46,6 +78,7 @@ local function snapshot()
             local width = (radio.config or {}).htmode or ""
             row.ht = tonumber(width:match("(%d+)"))
             local live = {}
+            local complete = true
             for _, v in ipairs(radio.interfaces or {}) do
                 if radio.up and v.ifname and v.ifname:match("^" .. dev.ext_ifname .. "%d+$") then
                     live[v.section] = v
@@ -77,13 +110,21 @@ local function snapshot()
                     owned[section] = nil
                 end
                 if observed and info.bssid then
+                    local ap = {section=section, name=iface, radio=code, radio_name=row.name,
+                        essid=observed, bssid=info.bssid:lower(), channel=info.channel, up=true}
                     local stations = call("iwinfo", "assoclist", {device=iface}).results
-                    if type(stations) == "table" then row.num_sta = (row.num_sta or 0) + #stations end
-                    aps[#aps+1] = {section=section, name=iface, radio=code, radio_name=row.name,
-                        essid=observed, bssid=info.bssid, channel=info.channel, up=true,
-                        num_sta=type(stations) == "table" and #stations or nil}
+                    if type(stations) == "table" then
+                        if #stations > 0 and not hosts then hosts = call("luci", "getHostHints") end
+                        ap.sta_table = station_table(stations, hosts or {}, ap)
+                        ap.num_sta = #ap.sta_table
+                        row.num_sta = (row.num_sta or 0) + ap.num_sta
+                    else
+                        complete = false
+                    end
+                    aps[#aps+1] = ap
                 end
             end)
+            if not complete then row.num_sta = nil end
         end
     end
     assert(radios.ng and radios.na and radios["6e"], "BE14 tri-band L1 profile required")
