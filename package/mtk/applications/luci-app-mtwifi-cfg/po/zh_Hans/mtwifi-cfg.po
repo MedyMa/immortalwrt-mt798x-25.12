@@ -438,3 +438,87 @@ msgstr "请选择第二段信道"
 
 msgid "Select two permitted, non-adjacent 80 MHz channel segments."
 msgstr "请选择两个合法且互不相邻的 80 MHz 信道段。"
+
+msgid "This country code is unavailable in the driver."
+msgstr "驱动不支持此国家或地区代码。"
+
+msgid "The selected band does not match this radio."
+msgstr "所选频段与此射频设备不匹配。"
+
+msgid "Invalid primary channel for the selected bandwidth."
+msgstr "所选主信道不支持此频宽。"
+
+msgid "The selected channel is unavailable for this country or region."
+msgstr "所选信道在此国家或地区不可用。"
+
+msgid "320 MHz (320-1)"
+msgstr "320 MHz（320-1）"
+
+msgid "320 MHz (320-2)"
+msgstr "320 MHz（320-2）"
+
+msgid "Allowed primary channels"
+msgstr "允许的主信道"
+
+msgid "Automatic selection uses these channels or ranges such as 36-48. Leave empty to use the radio channel list."
+msgstr "自动选频仅使用此处列出的信道或范围（如 36-48）。留空则使用射频设备的信道列表。"
+
+msgid "Excluded channels"
+msgstr "排除的信道"
+
+msgid "Exclude DFS channels from automatic selection"
+msgstr "自动选频时跳过 DFS 信道"
+
+msgid "MAC repeater"
+msgstr "MAC 中继"
+
+msgid "Additional MAC address list file"
+msgstr "附加 MAC 地址列表文件"
+
+msgid "Path on the router. Use one MAC address per line."
+msgstr "路由器上的路径。每行填写一个 MAC 地址。"
+
+msgid "Enter an absolute file path."
+msgstr "请输入绝对文件路径。"
+
+msgid "Generate random key"
+msgstr "生成随机密钥"
+
+msgid "Wireless key"
+msgstr "无线密钥"
+
+msgid "Show Wi-Fi QR code"
+msgstr "显示 Wi-Fi 二维码"
+
+msgid "Enter a valid network name."
+msgstr "请输入有效的网络名称。"
+
+msgid "Enter a valid wireless key."
+msgstr "请输入有效的无线密钥。"
+
+msgid "This encryption cannot be shared by QR code."
+msgstr "此加密方式无法通过二维码分享。"
+
+msgid "The selected cipher is unavailable for this encryption."
+msgstr "此加密方式不支持所选密码套件。"
+
+msgid "Force GCMP-128 (AES)"
+msgstr "强制使用 GCMP-128（AES）"
+
+msgid "Force CCMP-256 (AES)"
+msgstr "强制使用 CCMP-256（AES）"
+
+msgid "Use a passphrase of 8–63 bytes. WPA-PSK also accepts a 64-digit hexadecimal key."
+msgstr "请输入 8–63 字节的口令。WPA-PSK 也支持 64 位十六进制密钥。"
+
+msgid "WPA3 and OWE require management frame protection."
+msgstr "WPA3 和 OWE 必须启用管理帧保护。"
+
+msgid "WPA3 transition mode requires at least optional management frame protection."
+msgstr "WPA3 过渡模式至少需要将管理帧保护设为可选。"
+
+msgid "Management frame protection requires an AES cipher."
+msgstr "管理帧保护需要使用 AES 密码套件。"
+
+msgid "This network uses an encryption or mode the MTK driver cannot join."
+msgstr "MTK 驱动不支持连接此网络所用的加密方式或模式。"

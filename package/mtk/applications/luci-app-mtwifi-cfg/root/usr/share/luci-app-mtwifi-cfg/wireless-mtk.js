@@ -10,6 +10,7 @@
 'require network';
 'require firewall';
 'require tools.widgets as widgets';
+'require uqr';
 
 var isReadonlyView = !L.hasViewPermission();
 
@@ -789,7 +790,9 @@ function mtkMldGroup(config) {
 function mtkMloSecurity(config) {
 	var enc2dat = {
 		none: ['OPEN', 'NONE'],
-		sae: ['WPA3PSK', 'AES'], 'sae+gcmp256': ['WPA3PSK', 'GCMP256'],
+		sae: ['WPA3PSK', 'AES'], 'sae+ccmp': ['WPA3PSK', 'AES'],
+		'sae+gcmp': ['WPA3PSK', 'GCMP128'], 'sae+ccmp256': ['WPA3PSK', 'CCMP256'],
+		'sae+gcmp256': ['WPA3PSK', 'GCMP256'], 'sae-mixed+ccmp': ['WPA2PSKWPA3PSK', 'AES'],
 		'sae-mixed': ['WPA2PSKWPA3PSK', 'AES'],
 		'psk2+tkip+ccmp': ['WPA2PSK', 'TKIPAES'], 'psk2+tkip+aes': ['WPA2PSK', 'TKIPAES'],
 		'psk2+tkip': ['WPA2PSK', 'TKIP'], 'psk2+ccmp': ['WPA2PSK', 'AES'],
@@ -802,20 +805,58 @@ function mtkMloSecurity(config) {
 		'psk-mixed+tkip': ['WPAPSKWPA2PSK', 'TKIP'],
 		'psk-mixed+ccmp': ['WPAPSKWPA2PSK', 'AES'],
 		'psk-mixed+aes': ['WPAPSKWPA2PSK', 'AES'],
-		'psk-mixed': ['WPAPSKWPA2PSK', 'AES'], owe: ['OWE', 'AES']
+		'psk-mixed': ['WPAPSKWPA2PSK', 'AES'], owe: ['OWE', 'AES'], 'owe+ccmp': ['OWE', 'AES']
 	}, enc = enc2dat[String(config.encryption || 'none')],
 	    authmode = enc ? enc[0] : String(config.encryption || ''),
 	    cipher = enc ? enc[1] : '',
-	    pmf = authmode === 'OWE' || authmode === 'WPA3PSK' ? ['1', '1', '0'] :
-		(authmode === 'WPA2PSKWPA3PSK' ? ['1', '0', '0'] : ['0', '0', '0']);
+	    pmf = authmode === 'OWE' || authmode === 'WPA3PSK' ? '2' :
+		(authmode === 'WPA2PSKWPA3PSK' ? String(config.ieee80211w || '1') :
+		(['WPA2PSK', 'WPAPSKWPA2PSK'].includes(authmode) ? String(config.ieee80211w || '0') : '0'));
 
-	// The writer maps encryption through mtwifi_defs.enc2dat, empties an
-	// omitted key, resets PMF/802.1X to defaults, and does not write the
-	// remaining hostapd-only authentication options.
 	return JSON.stringify([
 		String(config.ssid == null ? '' : config.ssid), authmode, cipher,
-		String(config.key || ''), pmf[0], pmf[1], pmf[2], '0'
+		authmode == 'OPEN' || authmode == 'OWE' ? '' : String(config.key || ''), pmf
 	]);
+}
+
+function mtwifi_key_valid(encryption, key) {
+	if (typeof key != 'string' || /[\x00-\x1f\x7f]/.test(key)) return false;
+	var length = new TextEncoder().encode(key).length;
+	return (length >= 8 && length <= 63) ||
+		(/^psk(?:2|-mixed)?$/.test(encryption) && /^[0-9a-f]{64}$/i.test(key));
+}
+
+function mtwifi_scan_encryption(bss, band) {
+	var enc = bss.encryption || {};
+	var auth = L.toArray(enc.authentication).map(function(value) { return String(value).toLowerCase(); });
+	var wpa = L.toArray(enc.wpa).map(Number);
+	if (bss.mode == 'Ad-Hoc') return null;
+	if (auth.includes('sae')) return 'sae';
+	if (auth.includes('owe')) return 'owe';
+	if (band == '6g') return null;
+	if (auth.includes('psk')) return wpa.includes(2) ? 'psk2' : wpa.includes(1) ? 'psk' : null;
+	return enc.enabled || wpa.length || L.toArray(enc.wep).length ? null : 'none';
+}
+
+function mtwifi_wifi_qr(encryption, ssid, key, hidden) {
+	if (!ssid || new TextEncoder().encode(ssid).length > 32 || /[\x00-\x1f\x7f]/.test(ssid))
+		throw new Error(_('Enter a valid network name.'));
+	var password = /^(?:psk2?|psk-mixed|sae|sae-mixed)$/.test(encryption);
+	if (password && !mtwifi_key_valid(encryption, key))
+		throw new Error(_('Enter a valid wireless key.'));
+	if (!password && encryption != 'none' && encryption != 'owe')
+		throw new Error(_('This encryption cannot be shared by QR code.'));
+
+	var escape = function(value) {
+		return new TextEncoder().encode(value).reduce(function(out, byte) {
+			return out + (byte >= 0x20 && byte <= 0x7e && byte != 0x3b && byte != 0x25
+				? String.fromCharCode(byte) : '%' + byte.toString(16).toUpperCase().padStart(2, '0'));
+		}, '');
+	};
+	return 'WIFI:' + (password ? 'T:WPA;' : '') +
+		(encryption == 'sae' ? 'R:0;' : encryption == 'owe' ? 'R:3;' : '') +
+		'S:' + escape(ssid) + ';' + (hidden ? 'H:true;' : '') +
+		(password ? 'P:' + escape(key) + ';' : '') + ';';
 }
 
 function mtkMloDisabled(value) {
@@ -1319,6 +1360,8 @@ function add_dep_be_feature(o) {
 	o.depends({'_freq': 'EHT80', '!contains': true});
 	o.depends({'_freq': 'EHT160', '!contains': true});
 	o.depends({'_freq': 'EHT320', '!contains': true});
+	o.depends({'_freq': 'EHT320-1', '!contains': true});
+	o.depends({'_freq': 'EHT320-2', '!contains': true});
 }
 
 function add_dep_eht_ap_feature(o) {
@@ -1337,7 +1380,7 @@ function add_dep_eht_ap_feature(o) {
 }
 
 function add_dep_eht_radio_feature(o) {
-	[ 'EHT20', 'EHT40', 'EHT80', 'EHT80_80', 'EHT160', 'EHT320' ].forEach(function(mode) {
+	[ 'EHT20', 'EHT40', 'EHT80', 'EHT160', 'EHT320', 'EHT320-1', 'EHT320-2' ].forEach(function(mode) {
 		o.depends({ '_freq': mode, '!contains': true });
 	});
 }
@@ -1384,7 +1427,8 @@ function validate_mtwifi_frequency(section_id, value, channels) {
 		!(band == '2g' && +mode[2] > 40) && !(band != '6g' && +mode[2] > 160) &&
 		!(band == '6g' && ['HE', 'EHT'].indexOf(mode[1]) < 0) &&
 		!(+mode[2] == 320 && mode[1] != 'EHT') &&
-		(!mode[3] || (+mode[2] == 40 && ['+', '-'].indexOf(mode[3]) >= 0));
+		(!mode[3] || (+mode[2] == 40 && ['+', '-'].indexOf(mode[3]) >= 0) ||
+		 (mode[1] == 'EHT' && +mode[2] == 320 && /^-[12]$/.test(mode[3])));
 	if (!valid || (value[2] != 'auto' && +value[2] > (band == '2g' ? 14 : band == '5g' ? 196 : 233)))
 		return _('Invalid wireless band, mode or bandwidth.');
 	if (split) {
@@ -1394,6 +1438,22 @@ function validate_mtwifi_frequency(section_id, value, channels) {
 			return _('Select two permitted, non-adjacent 80 MHz channel segments.');
 	}
 	return true;
+}
+
+function mtwifi_radio_info(section_id) {
+	return fs.exec('/sbin/l1util', [ 'radio', section_id ]).then(function(result) {
+		return result.code == 0 ? JSON.parse(result.stdout) : {};
+	}).catch(function() { return {}; });
+}
+
+function mtwifi_320_primary(channel, layout) {
+	for (var i = 0; i < 6; i++) {
+		var first = 1 + i * 32;
+		if ((!layout || layout == i % 2 + 1) && channel >= first &&
+		    channel <= first + 60 && (channel - first) % 4 == 0)
+			return true;
+	}
+	return false;
 }
 
 var CBIWifiFrequencyValue = form.Value.extend({
@@ -1408,8 +1468,12 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		this.mtwifi = uci.get('wireless', section_id, 'type') == 'mtwifi';
 		return Promise.all([
 			network.getWifiDevice(section_id),
-			this.callFrequencyList(section_id)
+			this.callFrequencyList(section_id).catch(function() { return []; }),
+			this.radio || (this.mtwifi ? mtwifi_radio_info(section_id) : null)
 		]).then(L.bind(function(data) {
+			this.radio = data[2];
+			this.sectionId = section_id;
+			this.country = uci.get('wireless', section_id, 'country') || '';
 			this.channels = {
 				'2g': [ 'auto', 'auto', true ],
 				'5g': [ 'auto', 'auto', true ],
@@ -1438,9 +1502,14 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				);
 			}
 
+			var boundBand = this.radio && this.radio.band;
+			if (boundBand) {
+				this.liveChannels = this.channels[boundBand];
+				this.updateMtkChannels();
+			}
 			var hasBand = {};
 			Object.keys(this.channels).forEach(function(band) {
-				hasBand[band] = this.mtwifi ? this.channels[band].some(function(value, index) {
+				hasBand[band] = boundBand ? band == boundBand : this.mtwifi ? this.channels[band].some(function(value, index) {
 					return index % 3 == 0 && value != 'auto';
 				}) : this.channels[band].length > (band == '60g' ? 0 : 3);
 			}, this);
@@ -1451,7 +1520,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 			var htmodelist = L.toArray(data[0] ? data[0].getHTModes() : null)
 				.reduce(function(o, v) { o[v] = true; return o }, {});
 
-			var deviceBand = uci.get('wireless', section_id, 'band') ||
+			var deviceBand = boundBand || uci.get('wireless', section_id, 'band') ||
 				(hasBand['6g'] ? '6g' :
 					hasBand['5g'] ? '5g' :
 					hasBand['2g'] ? '2g' :
@@ -1459,7 +1528,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				/* EHT320 is exclusive to 6 GHz; derive band from htmode when
 				 * UCI band option is absent and the channel list is empty
 				 * (radio disabled / iwinfo not probed yet). */
-				(uci.get('wireless', section_id, 'htmode') === 'EHT320' ? '6g' : null);
+				(/^EHT320(?:-[12])?$/.test(uci.get('wireless', section_id, 'htmode')) ? '6g' : null);
 
 			if (uci.get('wireless', section_id, 'type') == 'mtwifi' && deviceBand) {
 				Object.assign(hwmodelist, getMtkFallbackWifiHwModes(deviceBand));
@@ -1502,6 +1571,10 @@ var CBIWifiFrequencyValue = form.Value.extend({
 					'EHT20', '20 MHz',  htmodelist.EHT20
 				]
 			};
+
+			if (this.mtwifi && htmodelist.EHT320)
+				this.htmodes.be.unshift('EHT320-1', _('320 MHz (320-1)'), true,
+					'EHT320-2', _('320 MHz (320-2)'), true);
 
 			var configured = String(uci.get('wireless', section_id, 'htmode') || '').match(/^(HT|VHT|HE|EHT)40[+-]$/);
 			if (this.mtwifi && configured && htmodelist[configured[1] + '40']) {
@@ -1554,6 +1627,39 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		sel.vals = vals;
 	},
 
+	updateMtkChannels: function() {
+		var radio = this.radio, band = radio && radio.band;
+		if (!band) return;
+
+		if (this.liveChannels && this.liveChannels.length > 3 &&
+		    (!this.country || this.country == radio.country)) {
+			this.channels[band] = this.liveChannels;
+			return;
+		}
+		var region = this.country ? radio.countries?.[this.country] : radio.region;
+		var list = radio.channels?.[region] || [];
+		var channels = [ 'auto', 'auto', true ];
+		list.forEach(function(ch) {
+			var mhz = band == '2g' ? (ch == 14 ? 2484 : 2407 + ch * 5) :
+				(band == '5g' ? 5000 : 5950) + ch * 5;
+			channels.push(ch, '%d (%d MHz)'.format(ch, mhz), true);
+		});
+		/* Retain a configured value if the profile lacks an offline table. */
+		if (!list.length) {
+			var channel = uci.get('wireless', this.sectionId, 'channel');
+			if (/^[1-9][0-9]*$/.test(String(channel || '')))
+				channels.push(+channel, channel, true);
+		}
+		this.channels[band] = channels;
+	},
+
+	changeMtkCountry: function(country) {
+		this.country = country;
+		this.updateMtkChannels();
+		var node = this.map.findElement('data-field', this.cbid(this.sectionId));
+		if (node) this.toggleWifiChannel(node);
+	},
+
 	toggleWifiMode: function(elem) {
 		if (this.mtwifi) return this.toggleWifiBand(elem);
 		this.toggleWifiHTMode(elem);
@@ -1585,6 +1691,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		var band = elem.querySelector('.band');
 
 		this.setValues(band, this.bands[mode.value]);
+		if (this.radio?.band) band.parentNode.style.display = '';
 		if (this.mtwifi) this.toggleWifiHTMode(elem);
 		this.toggleWifiChannel(elem);
 
@@ -1620,11 +1727,14 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		var chan = elem.querySelector('.channel');
 
 		var values = this.channels[band.value], previous = chan.value;
-		var split = this.mtwifi && /^(VHT|HE)80_80$/.test(elem.querySelector('.htmode').value);
-		if (split) {
+		var width = elem.querySelector('.htmode').value;
+		var split = this.mtwifi && /^(VHT|HE)80_80$/.test(width);
+		var eht320 = this.mtwifi && /^EHT320(?:-[12])?$/.test(width);
+		if (split || eht320) {
 			var filtered = [];
 			for (var i = 0; values && i < values.length; i += 3)
-				if (mtwifi_segment_available(this.channels, band.value, values[i]))
+				if (split ? mtwifi_segment_available(this.channels, band.value, values[i]) :
+				    values[i] == 'auto' || mtwifi_320_primary(+values[i], +width.slice(7)))
 					filtered.push(values[i], values[i+1], values[i+2]);
 			values = filtered;
 		}
@@ -1642,7 +1752,10 @@ var CBIWifiFrequencyValue = form.Value.extend({
 		    htval = uci.get('wireless', section_id, 'htmode'),
 		    hwval = uci.get('wireless', section_id, 'hwmode'),
 		    chval = uci.get('wireless', section_id, 'channel'),
-		    bandval = uci.get('wireless', section_id, 'band');
+		    bandval = (this.radio && this.radio.band) || uci.get('wireless', section_id, 'band');
+
+		if (this.radio?.band && (!htval || (bandval == '6g' && htval == 'NOHT')))
+			htval = { '2g': 'EHT40', '5g': 'EHT160', '6g': 'EHT160' }[bandval];
 
 		this.setValues(mode, this.modes);
 
@@ -1757,12 +1870,24 @@ var CBIWifiFrequencyValue = form.Value.extend({
 	},
 
 	validate: function(section_id, value) {
-		return validate_mtwifi_frequency(section_id, value, this.channels);
+		var valid = validate_mtwifi_frequency(section_id, value, this.channels);
+		if (valid !== true || !this.mtwifi) return valid;
+		if (this.radio?.band && value[1] != this.radio.band)
+			return _('The selected band does not match this radio.');
+		if (/^EHT320(?:-[12])?$/.test(value[0]) && value[2] != 'auto' &&
+		    !mtwifi_320_primary(+value[2], +String(value[0]).slice(7)))
+			return _('Invalid primary channel for the selected bandwidth.');
+		if (this.radio?.band && value[2] != 'auto' &&
+		    !this.channels[value[1]].some(function(channel, i, values) {
+			    return i % 3 == 0 && channel == value[2] && values[i + 2];
+		    }))
+			return _('The selected channel is unavailable for this country or region.');
+		return true;
 	},
 
 	write: function(section_id, value) {
 		if (uci.get('wireless', section_id, 'type') == 'mtwifi') {
-			var valid = validate_mtwifi_frequency(section_id, value, this.channels);
+			var valid = this.validate(section_id, value);
 			if (valid !== true) throw new Error(valid);
 			uci.set('wireless', section_id, 'htmode', value[0]);
 			uci.set('wireless', section_id, 'band', value[1]);
@@ -1827,8 +1952,15 @@ var CBIWifiCountryValue = form.Value.extend({
 	}),
 
 	load: function(section_id) {
-		return this.callCountryList(section_id).then(L.bind(function(countrylist) {
-			if (Array.isArray(countrylist) && countrylist.length > 0) {
+		return this.callCountryList(section_id).catch(function() { return []; }).then(L.bind(function(countrylist) {
+			var supported = this.radio?.countries;
+			if (supported) {
+				this.value('', _('driver default'));
+				Object.keys(supported).sort().forEach(function(code) {
+					var info = countrylist.find(function(country) { return country.iso3166 == code; });
+					this.value(code, info ? '%s - %s'.format(code, info.country) : code);
+				}, this);
+			} else if (Array.isArray(countrylist) && countrylist.length > 0) {
 				this.value('', _('driver default'));
 
 				for (var i = 0; i < countrylist.length; i++)
@@ -1840,6 +1972,8 @@ var CBIWifiCountryValue = form.Value.extend({
 	},
 
 	validate: function(section_id, formvalue) {
+		if (formvalue && this.radio?.countries && !Object.hasOwn(this.radio.countries, formvalue))
+			return _('This country code is unavailable in the driver.');
 		if (formvalue != null && formvalue != '' && !/^[A-Z0-9][A-Z0-9]$/.test(formvalue))
 			return _('Use ISO/IEC 3166 alpha2 country codes.');
 
@@ -2148,8 +2282,12 @@ return view.extend({
 
 		s.addModalOptions = function(s) {
 			return network.getWifiNetwork(s.section).then(function(radioNet) {
+				var id = radioNet.getWifiDeviceName();
+				return Promise.all([radioNet, uci.get('wireless', id, 'type') == 'mtwifi' ? mtwifi_radio_info(id) : {}]);
+			}).then(function(data) {
+				var radioNet = data[0], radioInfo = data[1];
 				var hwtype = uci.get('wireless', radioNet.getWifiDeviceName(), 'type');
-				var band = uci.get('wireless', radioNet.getWifiDeviceName(), 'band');
+				var band = radioInfo.band || uci.get('wireless', radioNet.getWifiDeviceName(), 'band');
 				var ifmode = radioNet.getMode();
 				var o, ss;
 
@@ -2174,9 +2312,10 @@ return view.extend({
 				o.inputtitle = isDisabled ? _('Enable') : _('Disable');
 				o.onclick = ui.createHandlerFn(s, network_updown, s.section, s.map);
 
-				if (!isDisabled) {
+				if (hwtype == 'mtwifi' || !isDisabled) {
 					o = ss.taboption('general', CBIWifiFrequencyValue, '_freq', '<br />' + _('Operating frequency'));
 					o.ucisection = s.section;
+					if (hwtype == 'mtwifi') o.radio = radioInfo;
 				}
 
 				if (hwtype == 'mac80211') {
@@ -2222,8 +2361,28 @@ return view.extend({
 					o.rmempty = true;
 				}
 				else if (hwtype == 'mtwifi') {
-					o = ss.taboption('advanced', CBIWifiCountryValue, 'country', _('Country Code'));
+					var frequency = ss.children.find(function(option) { return option.option == '_freq'; });
+					o = ss.taboption('general', CBIWifiCountryValue, 'country', _('Country Code'));
 					o.wifiNetwork = radioNet;
+					o.radio = radioInfo;
+					o.onchange = function(ev, section_id, value) { frequency.changeMtkCountry(value); };
+
+					o = ss.taboption('advanced', form.DynamicList, 'chanlist', _('Allowed primary channels'),
+						_('Automatic selection uses these channels or ranges such as 36-48. Leave empty to use the radio channel list.'));
+					o.datatype = 'or(range(1,233),match("^[0-9]+-[0-9]+$"))';
+					o.depends({ '_freq': 'auto', '!contains': true });
+					o.retain = true;
+
+					o = ss.taboption('advanced', form.DynamicList, 'acs_skiplist', _('Excluded channels'));
+					o.datatype = 'range(1,233)';
+					o.depends({ '_freq': 'auto', '!contains': true });
+					o.retain = true;
+
+					if (band == '5g') {
+						o = ss.taboption('advanced', form.Flag, 'acs_exclude_dfs', _('Exclude DFS channels from automatic selection'));
+						o.depends({ '_freq': 'auto', '!contains': true });
+						o.retain = true;
+					}
 
 					if (!isDisabled) {
 						if (band == '5g') {
@@ -2584,6 +2743,10 @@ return view.extend({
 					var bssid = ss.children[5];
 					bssid.depends('mode', 'sta');
 
+					o = ss.taboption('advanced', form.Flag, 'mac_repeater', _('MAC repeater'));
+					o.depends('mode', 'sta');
+					o.default = o.disabled;
+
 					o = ss.taboption('macfilter', form.ListValue, 'macfilter', _('MAC Address Filter'));
 					o.depends('mode', 'ap');
 					o.value('', _('disable'));
@@ -2604,6 +2767,15 @@ return view.extend({
 							return form.DynamicList.prototype.load.apply(this, [section_id]);
 						}, this));
 					};
+
+					o = ss.taboption('macfilter', form.Value, 'macfile', _('Additional MAC address list file'),
+						_('Path on the router. Use one MAC address per line.'));
+					o.depends('macfilter', 'allow');
+					o.depends('macfilter', 'deny');
+					o.validate = function(section_id, value) {
+						return !value || value.charAt(0) == '/' || _('Enter an absolute file path.');
+					};
+					o.retain = true;
 
 					o = ss.taboption('general', form.Flag, 'hidden', _('Hide <abbr title="Extended Service Set Identifier">ESSID</abbr>'), _('Where the ESSID is hidden, clients may fail to roam and airtime efficiency may be significantly reduced.'));
 					o.depends('mode', 'ap');
@@ -2706,6 +2878,7 @@ return view.extend({
 
 				o.cfgvalue = function(section_id) {
 					var v = String(uci.get('wireless', section_id, 'encryption'));
+					if (hwtype == 'mtwifi' && (v == 'undefined' || v == 'null')) return 'none';
 					if (v == 'wep')
 						return 'wep-open';
 					else if (v.match(/\+/))
@@ -2720,7 +2893,14 @@ return view.extend({
 					if (value == 'wpa' || value == 'wpa2' || value == 'wpa3' || value == 'wpa3-mixed')
 						uci.unset('wireless', section_id, 'key');
 
-					if (co.isActive(section_id) && e && (c == 'tkip' || c == 'ccmp' || c == 'tkip+ccmp'))
+					if (hwtype == 'mtwifi') {
+						if (e == 'none' || e == 'owe') uci.unset('wireless', section_id, 'key');
+						if (co.isActive(section_id) && c && c != 'auto') {
+							var valid = co.validate(section_id, c);
+							if (valid !== true) throw new Error(valid);
+							e += '+' + c;
+						}
+					} else if (co.isActive(section_id) && e && (c == 'tkip' || c == 'ccmp' || c == 'tkip+ccmp'))
 						e += '+' + c;
 
 					uci.set('wireless', section_id, 'encryption', e);
@@ -2741,12 +2921,23 @@ return view.extend({
 				o.value('auto', _('auto'));
 				o.value('ccmp', _('Force CCMP (AES)'));
 				o.value('gcmp256', _('Force GCMP-256 (AES)'));
+				if (hwtype == 'mtwifi') {
+					o.value('gcmp', _('Force GCMP-128 (AES)'));
+					o.value('ccmp256', _('Force CCMP-256 (AES)'));
+					o.validate = function(section_id, cipher) {
+						var enc = encr.formvalue(section_id);
+						var allowed = enc == 'sae' ? ['auto', 'ccmp', 'ccmp256', 'gcmp', 'gcmp256'] :
+							['auto', 'ccmp', 'tkip', 'tkip+ccmp'];
+						return allowed.includes(cipher) || _('The selected cipher is unavailable for this encryption.');
+					};
+				}
 				o.value('tkip', _('Force TKIP'));
 				o.value('tkip+ccmp', _('Force TKIP and CCMP (AES)'));
 				o.write = ss.children.filter(function(o) { return o.option == 'encryption' })[0].write;
 
 				o.cfgvalue = function(section_id) {
 					var v = String(uci.get('wireless', section_id, 'encryption'));
+					if (hwtype == 'mtwifi' && !v.includes('+')) return 'auto';
 					if (v.match(/\+/)) {
 						v = v.replace(/^[^+]+\+/, '');
 						if (v == 'aes')
@@ -2893,9 +3084,10 @@ return view.extend({
 				}
 				else if (hwtype == 'mtwifi') {
 					crypto_modes.push(['sae', 'WPA3-SAE', 31]);
-					crypto_modes.push(['owe', 'OWE', 1]);
+					crypto_modes.push(['owe', 'OWE', 30]);
 					if (band != '6g') {
 						crypto_modes.push(['psk2', 'WPA2-PSK', 35]);
+						crypto_modes.push(['sae-mixed', 'WPA2-PSK/WPA3-SAE Mixed Mode', 30]);
 						crypto_modes.push(['psk', 'WPA-PSK', 12]);
 						if (ifmode == 'ap') {
 							crypto_modes.push(['psk-mixed', 'WPA-PSK/WPA2-PSK Mixed Mode', 22]);
@@ -2903,7 +3095,8 @@ return view.extend({
 					}
 				}
 
-				crypto_modes.push(['none',       _('No Encryption'),   0]);
+				if (hwtype != 'mtwifi' || band != '6g')
+					crypto_modes.push(['none', _('No Encryption'), 0]);
 
 				crypto_modes.sort(function(a, b) { return b[2] - a[2] });
 
@@ -2972,6 +3165,13 @@ return view.extend({
 				o.datatype = 'wpakey';
 				o.rmempty = true;
 				o.password = true;
+				if (hwtype == 'mtwifi') {
+					o.rmempty = false;
+					o.validate = function(section_id, value) {
+						return mtwifi_key_valid(encr.formvalue(section_id), value) ||
+							_('Use a passphrase of 8–63 bytes. WPA-PSK also accepts a 64-digit hexadecimal key.');
+					};
+				}
 
 				o.cfgvalue = function(section_id) {
 					var key = uci.get('wireless', section_id, 'key');
@@ -2985,6 +3185,58 @@ return view.extend({
 					uci.unset('wireless', section_id, 'key3');
 					uci.unset('wireless', section_id, 'key4');
 				};
+
+				if (hwtype == 'mtwifi') {
+					o = ss.taboption('encryption', form.Button, '_generate_key', _('Wireless key'));
+					o.inputtitle = _('Generate random key');
+					['psk', 'psk2', 'psk-mixed', 'sae', 'sae-mixed'].forEach(function(enc) { o.depends('encryption', enc); });
+					o.onclick = function(ev, section_id) {
+						var random = crypto.getRandomValues(new Uint8Array(24));
+						var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+						var key = Array.from(random, function(n) { return alphabet[n & 63]; }).join('');
+						this.section.getUIElement(section_id, '_wpa_key').setValue(key);
+					};
+
+					o = ss.taboption('encryption', form.DummyValue, '_wifi_qr', _('QR Code'));
+					o.depends('mode', 'ap');
+					o.renderWidget = function(section_id) {
+						var section = this.section;
+						var preview = E('div', { 'style': 'max-width:16rem' });
+						return E('div', [
+							E('button', {
+								'type': 'button',
+								'class': 'cbi-button cbi-button-button',
+								'click': ui.createHandlerFn(this, function() {
+									var code = mtwifi_wifi_qr(section.formvalue(section_id, 'encryption'),
+										section.formvalue(section_id, 'ssid'), section.formvalue(section_id, '_wpa_key'),
+										section.formvalue(section_id, 'hidden') == '1');
+									var svg = E(uqr.renderSVG(code, { pixelSize: 4, ecc: 'M' }));
+									svg.setAttribute('style', 'max-width:100%;height:auto');
+									dom.content(preview, svg);
+								})
+							}, _('Show Wi-Fi QR code')),
+							preview
+						]);
+					};
+
+					o = ss.taboption('encryption', form.ListValue, 'ieee80211w', _('802.11w Management Frame Protection'));
+					o.value('', _('Automatic'));
+					o.value('0', _('Disabled'));
+					o.value('1', _('Optional'));
+					o.value('2', _('Required'));
+					['psk2', 'psk-mixed', 'sae-mixed', 'sae', 'owe'].forEach(function(enc) { o.depends('encryption', enc); });
+					o.validate = function(section_id, value) {
+						var enc = encr.formvalue(section_id);
+						if (!value) return true;
+						if (enc == 'sae' || enc == 'owe')
+							return value == '2' || _('WPA3 and OWE require management frame protection.');
+						if (enc == 'sae-mixed' && value == '0')
+							return _('WPA3 transition mode requires at least optional management frame protection.');
+						var cipher = this.section.formvalue(section_id, 'cipher');
+						return value == '0' || !/^tkip/.test(cipher) ||
+							_('Management frame protection requires an AES cipher.');
+					};
+				}
 
 
 				o = ss.taboption('encryption', form.ListValue, '_wep_key', _('Used Key Slot'));
@@ -3500,6 +3752,11 @@ return view.extend({
 			    is_psk = (enc && Array.isArray(enc.wpa) && L.toArray(enc.authentication).filter(function(a) { return a == 'psk' }).length > 0),
 			    is_sae = (enc && Array.isArray(enc.wpa) && L.toArray(enc.authentication).filter(function(a) { return a == 'sae' }).length > 0);
 
+			var hwtype = radioDev.get('type');
+			var mtkSecurity = hwtype == 'mtwifi' &&
+				mtwifi_scan_encryption(bss, uci.get('wireless', radioDev.getName(), 'band'));
+			if (hwtype == 'mtwifi' && !mtkSecurity)
+				throw new Error(_('This network uses an encryption or mode the MTK driver cannot join.'));
 			if (nameval == null || (passopt && passval == null))
 				return;
 
@@ -3507,7 +3764,6 @@ return view.extend({
 
 			return this.map.save(function() {
 				var wifi_sections = uci.sections('wireless', 'wifi-iface');
-				var hwtype = radioDev.get('type');
 
 				if (replopt.formvalue('_new_') == '1') {
 					for (var i = 0; i < wifi_sections.length; i++)
@@ -3541,6 +3797,10 @@ return view.extend({
 				}
 				uci.set('wireless', section_id, 'network', nameval);
 
+				if (hwtype == 'mtwifi') {
+					uci.unset('wireless', section_id, 'bssid');
+					uci.unset('wireless', section_id, 'ieee80211w');
+				}
 				if (bss.ssid != null) {
 					uci.set('wireless', section_id, 'ssid', bss.ssid);
 
@@ -3554,7 +3814,12 @@ return view.extend({
 				if (ssidval != null)
 					uci.set('wireless', section_id, 'ssid', ssidval);
 
-				if (is_sae) {
+				if (hwtype == 'mtwifi') {
+					uci.set('wireless', section_id, 'encryption', mtkSecurity);
+					if (passval) uci.set('wireless', section_id, 'key', passval);
+					else uci.unset('wireless', section_id, 'key');
+				}
+				else if (is_sae) {
 					uci.set('wireless', section_id, 'encryption', 'sae');
 					uci.set('wireless', section_id, 'key', passval);
 				}
@@ -3601,14 +3866,23 @@ return view.extend({
 		};
 
 		s.handleJoin = function(radioDev, bss, ev) {
+			var hwtype = radioDev.get('type');
+			var mtkSecurity = hwtype == 'mtwifi' &&
+				mtwifi_scan_encryption(bss, uci.get('wireless', radioDev.getName(), 'band'));
+			if (hwtype == 'mtwifi' && !mtkSecurity)
+				throw new Error(_('This network uses an encryption or mode the MTK driver cannot join.'));
 			poll.remove(this.pollFn);
 
 			var m2 = new form.Map('wireless'),
 			    s2 = m2.section(form.NamedSection, '_new_'),
 			    enc = L.isObject(bss.encryption) ? bss.encryption : null,
 			    is_wep = (enc && Array.isArray(enc.wep)),
-			    is_psk = (enc && Array.isArray(enc.wpa) && L.toArray(enc.authentication).filter(function(a) { return a == 'psk' || a == 'sae' })),
+			    is_psk = (enc && Array.isArray(enc.wpa) && L.toArray(enc.authentication).some(function(a) { return a == 'psk' || a == 'sae' })),
 			    replace, passphrase, name, bssid, zone;
+			if (mtkSecurity) {
+				is_wep = false;
+				is_psk = /^(psk2?|sae)$/.test(mtkSecurity);
+			}
 
 			var nameUsed = function(name) {
 				var s = uci.get('network', name);
@@ -3652,6 +3926,9 @@ return view.extend({
 				passphrase.datatype = is_wep ? 'wepkey' : 'wpakey';
 				passphrase.password = true;
 				passphrase.rmempty = false;
+				if (mtkSecurity) passphrase.validate = function(section_id, key) {
+					return mtwifi_key_valid(mtkSecurity, key) || _('Enter a valid wireless key.');
+				};
 			}
 
 			if (bss.ssid != null) {
@@ -3713,7 +3990,8 @@ return view.extend({
 			uci.set('wireless', section_id, 'device', radioDev.getName());
 			uci.set('wireless', section_id, 'mode', 'ap');
 			uci.set('wireless', section_id, 'ssid', 'ImmortalWrt');
-			uci.set('wireless', section_id, 'encryption', 'none');
+			uci.set('wireless', section_id, 'encryption',
+				hwtype == 'mtwifi' && uci.get('wireless', radioDev.getName(), 'band') == '6g' ? 'owe' : 'none');
 
 			this.addedSection = section_id;
 			return this.renderMoreOptionsModal(section_id);

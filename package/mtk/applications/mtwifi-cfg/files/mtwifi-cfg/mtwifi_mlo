@@ -61,10 +61,7 @@ end
 
 local function eht_mode(htmode)
 	local modes = { EHT20 = true, EHT40 = true, EHT80 = true,
-		EHT80_80 = true, EHT160 = true, EHT320 = true }
-	if fs.stat("/usr/share/ucode/mtwifi/cfg.uc") then
-		modes["EHT320-1"], modes["EHT320-2"] = true, true
-	end
+		EHT80_80 = true, EHT160 = true, EHT320 = true, ["EHT320-1"] = true, ["EHT320-2"] = true }
 	return modes[htmode] == true
 end
 
@@ -442,27 +439,9 @@ local function security_signature(iface)
 		values[#values + 1] = disabled(iface.ft_over_ds) and "1" or "0"
 		return table.concat(values, "\0")
 	end
-	local enc = defs.enc2dat[iface.encryption or "none"]
-	if not enc then return nil end
-	local authmode, cipher = enc[1], enc[2]
-	local allowed_auth = authmode == "WPA3PSK" or authmode == "OWE"
-	local allowed_cipher = { AES = true, CCMP128 = true, CCMP256 = true, GCMP128 = true, GCMP256 = true }
-	if not allowed_auth or not allowed_cipher[cipher] then return nil end
-	local pmf_mfpc = tostring(defs.vif_cfgs.PMFMFPC or "0")
-	local pmf_mfpr = tostring(defs.vif_cfgs.PMFMFPR or "0")
-	local pmf_sha256 = tostring(defs.vif_cfgs.PMFSHA256 or "0")
-	if authmode == "OWE" or authmode == "WPA3PSK" then
-		pmf_mfpc, pmf_mfpr, pmf_sha256 = "1", "1", "0"
-	elseif authmode == "WPA2PSKWPA3PSK" then
-		pmf_mfpc, pmf_mfpr, pmf_sha256 = "1", "0", "0"
-	end
-	-- This branch's AP writer uses shared profile defaults for 802.1X and
-	-- maps only auth mode, cipher, PSK and the PMF values above.
-	local values = {
-		authmode, cipher, tostring(iface.key or ""), pmf_mfpc, pmf_mfpr,
-		pmf_sha256, scalar(defs.vif_cfgs.IEEE8021X) or "0"
-	}
-	return table.concat(values, "\0")
+	local security = defs.security(iface)
+	if not security or (security.auth ~= "WPA3PSK" and security.auth ~= "OWE") then return nil end
+	return table.concat(defs.security_signature(security), "\0")
 end
 
 local function selected_aps(c, selected, allow_owned, state)

@@ -114,8 +114,12 @@ mtwifi_defs.enc2dat = {
     -- enc = AuthMode, EncrypType
     ["none"] = {"OPEN", "NONE"},
     ["sae"] = {"WPA3PSK", "AES"},
+    ["sae+ccmp"] = {"WPA3PSK", "AES"},
+    ["sae+gcmp"] = {"WPA3PSK", "GCMP128"},
+    ["sae+ccmp256"] = {"WPA3PSK", "CCMP256"},
     ["sae+gcmp256"] = {"WPA3PSK", "GCMP256"},
     ["sae-mixed"] = {"WPA2PSKWPA3PSK", "AES"},
+    ["sae-mixed+ccmp"] = {"WPA2PSKWPA3PSK", "AES"},
     ["psk2+tkip+ccmp"] = {"WPA2PSK", "TKIPAES"},
     ["psk2+tkip+aes"] = {"WPA2PSK", "TKIPAES"},
     ["psk2+tkip"] = {"WPA2PSK", "TKIP"},
@@ -135,7 +139,54 @@ mtwifi_defs.enc2dat = {
     ["psk-mixed+aes"] = {"WPAPSKWPA2PSK", "AES"},
     ["psk-mixed"] = {"WPAPSKWPA2PSK", "AES"},
     ["owe"] = {"OWE", "AES"},
+    ["owe+ccmp"] = {"OWE", "AES"},
 }
+
+function mtwifi_defs.disabled(value)
+    return value == true or value == 1 or value == "1"
+end
+
+function mtwifi_defs.security(config)
+    local encryption = config.encryption or "none"
+    local enc = mtwifi_defs.enc2dat[encryption]
+    if not enc then return nil, "UNSUPPORTED_ENCRYPTION" end
+
+    local auth, cipher = enc[1], enc[2]
+    local pmf = tonumber(config.ieee80211w or "")
+    if config.ieee80211w ~= nil and config.ieee80211w ~= "" and
+        (not pmf or pmf < 0 or pmf > 2 or pmf % 1 ~= 0) then
+        return nil, "INVALID_PMF"
+    end
+    if auth == "WPA3PSK" or auth == "OWE" then
+        if pmf and pmf ~= 2 then return nil, "WPA3_REQUIRES_PMF" end
+        pmf = 2
+    elseif auth == "WPA2PSKWPA3PSK" then
+        if pmf == 0 then return nil, "SAE_TRANSITION_REQUIRES_PMF" end
+        pmf = pmf or 1
+    elseif auth ~= "WPA2PSK" and auth ~= "WPAPSKWPA2PSK" then
+        pmf = 0
+    end
+    if cipher == "TKIP" or cipher == "TKIPAES" then
+        if pmf and pmf > 0 then return nil, "PMF_REQUIRES_CCMP" end
+    end
+
+    local key = ""
+    if auth ~= "OPEN" and auth ~= "OWE" then
+        key = config.key
+        local allow_hex = auth ~= "WPA3PSK" and auth ~= "WPA2PSKWPA3PSK"
+        if type(key) ~= "string" or key:find("%c") or #key < 8 or
+            (#key > 63 and not (allow_hex and #key == 64 and key:match("^%x+$"))) then
+            return nil, "INVALID_PASSPHRASE"
+        end
+    end
+
+    pmf = pmf or 0
+    return { auth = auth, cipher = cipher, key = key, pmf = pmf }
+end
+
+function mtwifi_defs.security_signature(security)
+    return { security.auth, security.cipher, security.key, tostring(security.pmf) }
+end
 
 mtwifi_defs.countryRegions = {
     -- CountryCode = 2g region, 5g region
@@ -241,5 +292,23 @@ mtwifi_defs.countryRegions = {
     ["ZA"] = { 1, 1 },
     ["ZW"] = { 1, 0 },
 }
+
+-- The 6 GHz region has its own numbering in the MediaTek channel tables.
+-- Match the 6 GHz entries in mtwifi-scripts' countryRegions.
+local full_band_6g = {
+    AU = true, BR = true, CA = true, CO = true, CR = true, DB = true,
+    DO = true, GB = true, GT = true, HN = true, HR = true, JP = true,
+    KP = true, KR = true, KW = true, LB = true, MX = true, PE = true,
+    PR = true, QA = true, SA = true, US = true,
+}
+
+function mtwifi_defs.country_region(country, band)
+    local regions = mtwifi_defs.countryRegions[country]
+    if country == "00" then regions = { 0, 0 } end
+    if not regions then return nil end
+    if band == "2g" then return regions[1] end
+    if band == "5g" then return country == "US" and 26 or regions[2] end
+    if band == "6g" then return (country == "00" or full_band_6g[country]) and 0 or 1 end
+end
 
 return mtwifi_defs

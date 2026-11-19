@@ -121,6 +121,15 @@ function l1dat_parser.add_default_value(l1cfg)
     return l1cfg
 end
 
+function l1dat_parser.device_band(dev)
+    if dev.band == "2.4g" then return "2g" end
+    if dev.band == "2g" or dev.band == "5g" or dev.band == "6g" then return dev.band end
+    if dev.INDEX ~= "MT7990" then return nil end
+    if dev.main_ifname == "ra0" then return "2g" end
+    if dev.main_ifname == "rai0" then return "5g" end
+    if dev.main_ifname == "rax0" then return "6g" end
+end
+
 function l1dat_parser.get_value_by_idx(devidx, mainidx, subidx, key)
     --print("Enter l1dat_parser.get_value_by_idx("..devidx..","..mainidx..", "..subidx..", "..key..")<br>")
     if not devidx or not mainidx or not key then return end
@@ -341,17 +350,21 @@ function l1dat_parser.load_l1_profile(path)
     if ok then
         local cursor = uci.cursor()
         local physical = devs[dridx]
-        local names, ambiguous, mapped = {}, {}, {}
+        local names, canonical, ambiguous, mapped = {}, {}, {}, {}
         cursor:foreach("wireless", "wifi-device", function(section)
             local dev = section.type == "mtwifi" and physical[section.devname or section[".name"]]
             if dev then
                 if names[dev] and names[dev] ~= section[".name"] then ambiguous[dev] = true end
                 names[dev] = section[".name"]
+                if physical[section[".name"]] == dev then canonical[dev] = section[".name"] end
             end
         end)
         cursor:close()
         for name, dev in pairs(physical) do
-            mapped[not ambiguous[dev] and names[dev] or name] = dev
+            local owner = canonical[dev] or (not ambiguous[dev] and (names[dev] or name))
+            -- Conflicting aliases without a canonical owner must not create
+            -- a new default AP beside the saved configuration.
+            if owner then mapped[owner] = dev end
         end
         devs[dridx] = setmetatable(mapped, { __index = physical })
     end
