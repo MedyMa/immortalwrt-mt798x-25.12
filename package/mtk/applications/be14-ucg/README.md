@@ -21,7 +21,9 @@ config agent 'main'
 
 在 UniFi 的「设置 → WiFi」中，将与 R4 实际 SSID 同名的 WLAN 分配给这台 AP，并选择对应频段。例如，查看连接 `ImmortalWrt-5G` 的终端时，使用 5 GHz。UCG 下发配置后，代理按频段和完整 SSID 匹配 WLAN 编号，再通过 `iwinfo assoclist` 逐个 BSSID 上报关联终端。这个过程只读取 R4 的无线配置。页面可以显示终端 MAC、信号和速率。R4 能解析主机信息时还会上报 IP 和主机名。
 
-代理上报每个活动 BSSID 的运行信道、带宽和无线接口累计收发字节。UniFi 根据连续两次读数计算流量速率。对于 6 GHz，代理同时通告频段支持及各射频的 SAE 和 OWE 能力。要在 UCG 看到使用该频段的终端，请把同名的 6 GHz WLAN 分配给这台 AP，并选择与 R4 一致的 WPA3 个人或增强开放式加密。
+在 R4 执行 `be14-ucg-status` 可以核对匹配结果。每行显示本机 SSID、关联终端数和 WLAN 匹配状态。`no matching assignment` 表示已收到控制器的配置，但在该频段没有与本机 SSID 同名的可用 WLAN。把同名 WLAN 分配给这台 E7，保存后再次检查，状态应变为 `matched`。若显示 `awaiting controller WLAN settings`，代理还在等待已配对控制器的 WLAN 配置。
+
+代理上报每个活动 BSSID 的运行信道、可读取的运行带宽和无线接口累计收发字节。状态里的 `netifd` 显示已应用的带宽配置，`operating MHz` 显示驱动读数，`?` 表示暂时无法读取。UniFi 根据连续两次字节读数计算流量速率。对于 6 GHz，要在 UCG 看到该频段的终端，请把同名的 6 GHz WLAN 分配给这台 AP，并选择与 R4 一致的 WPA3 个人或增强开放式加密。
 
 要在 UCG 查看每台终端使用的应用，可以把一个测试 SSID 在 R4 上桥接到独立 VLAN，在上联网口放行该标签，并由 UCG 提供 DHCP 和默认网关。R4 对这个 VLAN 保留终端源地址，UCG 的「流量识别」即可分析经过网关的连接。在 UCG 按测试手机的 IP 核对应用和流量。R4 上的代理隧道若把流量封装到外部节点，UCG 在这条路径上看到的是隧道端点。[UniFi 流量识别说明](https://help.ui.com/hc/en-us/articles/12570783535383-UniFi-Gateway-Traffic-and-Device-Identification)
 

@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=be14-ucg
 PKG_VERSION:=1.0
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 PKG_LICENSE:=GPL-2.0-or-later
 
 include $(INCLUDE_DIR)/package.mk
@@ -27,6 +27,7 @@ define Package/be14-ucg/install
 	$(INSTALL_DATA) ./files/*.py $(1)/usr/lib/be14-ucg/
 	$(INSTALL_BIN) ./files/wireless.lua $(1)/usr/lib/be14-ucg/
 	$(INSTALL_BIN) ./files/syswrapper.sh $(1)/usr/bin/
+	$(INSTALL_BIN) ./files/be14-ucg-status $(1)/usr/bin/
 	$(INSTALL_CONF) ./files/config $(1)/etc/config/be14_ucg
 	$(INSTALL_BIN) ./files/init $(1)/etc/init.d/be14-ucg
 	$(INSTALL_DATA) ./files/keep $(1)/lib/upgrade/keep.d/be14-ucg
