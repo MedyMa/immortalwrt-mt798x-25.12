@@ -24,6 +24,16 @@ STATE = Path("/etc/be14-ucg/state.json")
 LOCK = "/var/run/be14-ucg.lock"
 BRIDGE = "/usr/lib/be14-ucg/wireless.lua"
 MODEL = "E7"
+DEFAULT_VERSION = "8.8.14.20179"
+LAST_INFORM = Path("/var/run/be14-ucg.last-inform")
+
+
+def firmware_version(value):
+    if value in (None, ""):
+        return DEFAULT_VERSION
+    if not isinstance(value, str) or not re.fullmatch(r"(?:0|[1-9][0-9]{0,5})(?:\.(?:0|[1-9][0-9]{0,5})){2,3}", value):
+        raise ValueError("invalid reported firmware version")
+    return value
 
 
 def endpoint(url):
@@ -109,7 +119,7 @@ def report(snapshot, state):
     ipaddress.IPv4Address(snapshot["ip"])
     adopted = state["key"] != FACTORY_KEY
     # The E7 inform shortname and board ID resolve to UAPA697 in the UniFi catalog.
-    msg = dict(type="uap", model=MODEL, sysid=0xA697, model_display="BPI-R4 BE14", version="8.6.11.18870",
+    msg = dict(type="uap", model=MODEL, sysid=0xA697, model_display="BPI-R4 BE14", version=firmware_version(snapshot.get("firmware_version")),
                hostname=socket.gethostname(), serial=mac.replace(":", "").upper(), mac=mac,
                ip=snapshot["ip"], inform_url=state["url"], x_authkey=state["key"],
                default=not adopted, _default_key=not adopted, state=4 if adopted else 1,
@@ -279,6 +289,14 @@ def tick():
     if reply is None:
         return 5 if state["key"] == FACTORY_KEY else 15
     msg = unpack(reply, mac, state["key"], state["gcm"])
+    if state["key"] != FACTORY_KEY:
+        # tmpfs only. A saved adoption can outlive a reachable controller.
+        try:
+            with tempfile.NamedTemporaryFile(dir=LAST_INFORM.parent, delete=False, mode="w") as marker:
+                json.dump([state["url"], payload["mac"], payload["version"], int(time.time())], marker)
+            os.replace(marker.name, LAST_INFORM)
+        except OSError:
+            pass
     # An authenticated GCM reply can itself negotiate the switch from CBC.
     if int.from_bytes(reply[14:16], "big") & 8 and state["key"] != FACTORY_KEY and not state["gcm"]:
         state["gcm"] = True

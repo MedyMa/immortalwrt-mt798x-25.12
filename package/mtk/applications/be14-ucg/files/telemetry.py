@@ -154,11 +154,35 @@ def wireless_report(snapshot, learned):
         if widths[band] is not None:
             entry["bw"] = widths[band]
         if "sta_table" in ap:
-            entry["sta_table"] = ap["sta_table"] or []  # lua-cjson represents an empty array as {}.
+            entry["sta_table"] = []
+            for station in ap["sta_table"] or []:  # lua-cjson represents an empty array as {}.
+                station = station.copy()
+                station.pop("model_source", None)
+                model = station.get("device_name")
+                if model:
+                    # Network indexes the AP station's hostname for its client list.
+                    # Keep the actual host name alongside an independently known model.
+                    host = station.get("hostname")
+                    if not host:
+                        station["hostname"] = model
+                    elif model.casefold() not in host.casefold():
+                        station["hostname"] = f"{host} ({model})"
+                entry["sta_table"].append(station)
             entry["num_sta"] = len(entry["sta_table"])
         entry.update(counters.get(ap["name"], {}))
         vaps.append(entry)
     report = dict(radio_table=radios, radio_table_stats=stats, vap_table=vaps)
+    # Network consumes identification separately from the VAP's association row.
+    # Publish only advertised or explicitly configured models.
+    models = {}
+    for ap in vaps:
+        for sta in ap.get("sta_table", []):
+            if sta.get("device_name"):
+                models[sta["mac"]] = sta["device_name"]
+    if models:
+        report["fingerprints"] = {"hosts": [
+            {"mac": mac, "custom": {"device_name": model, "product_model": model}}
+            for mac, model in sorted(models.items())], "version": {"custom": "be14-1"}}
     if not incomplete:
         report["num_sta"] = len(set().union(*clients.values()))
     return report
