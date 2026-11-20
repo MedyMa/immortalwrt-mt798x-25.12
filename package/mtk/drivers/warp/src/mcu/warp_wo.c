@@ -321,11 +321,16 @@ static void bus_ring_init(struct woif_bus *bus)
 
 static void bus_ring_exit(struct woif_bus *bus)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 	struct page *page;
+#endif
 
 	tx_ring_exit(bus, &bus->tx_ring);
 	rx_ring_exit(bus, &bus->rx_ring);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	page_frag_cache_drain(&bus->woif_tx_page);
+#else
 	if (bus->woif_tx_page.va) {
 		page = virt_to_page(bus->woif_tx_page.va);
 #if (KERNEL_VERSION(4, 10, 0) <= LINUX_VERSION_CODE)
@@ -336,6 +341,10 @@ static void bus_ring_exit(struct woif_bus *bus)
 #endif
 		memset(&bus->woif_tx_page, 0, sizeof(bus->woif_tx_page));
 	}
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	page_frag_cache_drain(&bus->woif_rx_page);
+#else
 	if (bus->woif_rx_page.va) {
 		page = virt_to_page(bus->woif_rx_page.va);
 #if (KERNEL_VERSION(4, 10, 0) <= LINUX_VERSION_CODE)
@@ -346,6 +355,7 @@ static void bus_ring_exit(struct woif_bus *bus)
 #endif
 		memset(&bus->woif_rx_page, 0, sizeof(bus->woif_rx_page));
 	}
+#endif
 
 }
 

@@ -240,12 +240,16 @@ wed_rx_page_bm_ring_exit(
 		wed_rx_page_bm_dma_cb_exit(wed, bm, i, &ring->cell[i]);
 
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	page_frag_cache_drain(&bm->rx_page);
+#else
 	if (bm->rx_page.va) {
 		struct page *page;
 		page = virt_to_page(bm->rx_page.va);
 		rx_page_bm_page_frag_cache_drain(page, bm->rx_page.pagecnt_bias);
 		memset(&bm->rx_page, 0, sizeof(bm->rx_page));
 	}
+#endif
 
 	vfree(ring->cell);
 	warp_dma_buf_free(wed->pdev, desc);

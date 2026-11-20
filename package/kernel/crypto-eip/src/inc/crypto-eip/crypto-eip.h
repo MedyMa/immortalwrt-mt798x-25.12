@@ -188,15 +188,27 @@ u32 mtk_crypto_ppe_get_num(struct net_device *dev);
 
 /* xfrm callback functions */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+int mtk_xfrm_offload_state_add(struct net_device *dev, struct xfrm_state *xs, struct netlink_ext_ack *extack);
+#else
 int mtk_xfrm_offload_state_add(struct xfrm_state *xs, struct netlink_ext_ack *extack);
+#endif
 int mtk_xfrm_offload_policy_add(struct xfrm_policy *xp, struct netlink_ext_ack *extack);
 #else
 int mtk_xfrm_offload_state_add(struct xfrm_state *xs);
 int mtk_xfrm_offload_policy_add(struct xfrm_policy *xp);
 #endif /* KERNEL 6.3.0 */
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+void mtk_xfrm_offload_state_delete(struct net_device *dev, struct xfrm_state *xs);
+#else
 void mtk_xfrm_offload_state_delete(struct xfrm_state *xs);
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+void mtk_xfrm_offload_state_free(struct net_device *dev, struct xfrm_state *xs);
+#else
 void mtk_xfrm_offload_state_free(struct xfrm_state *xs);
+#endif
 void mtk_xfrm_offload_state_tear_down(void);
 void mtk_xfrm_offload_policy_delete(struct xfrm_policy *xp);
 void mtk_xfrm_offload_policy_free(struct xfrm_policy *xp);

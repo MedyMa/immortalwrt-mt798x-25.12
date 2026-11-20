@@ -1,0 +1,158 @@
+--- a/wlan_hwifi/bus/en_npu.c
++++ b/wlan_hwifi/bus/en_npu.c
+@@ -121,7 +121,7 @@
+ 	int done = 0, cur;
+ 	struct pci_rx_queue *rq;
+ 
+-	trans = container_of(napi->dev, struct pci_trans, napi_dev);
++	trans = napi_to_pci_trans(napi);
+ 	q = container_of(napi, struct pci_queue, napi);
+ 	rq = (struct pci_rx_queue *)q;
+ 
+@@ -261,7 +261,7 @@
+ 	q->vec_id = vec_id;
+ 	q->resource_idx = res_id;
+ 	trans->isr_map[q->isr_map_idx][map_id] = &q->napi;
+-	netif_napi_add(&trans->napi_dev, &q->napi, cb, NAPI_POLL_WEIGHT);
++	netif_napi_add_weight(pci_napi_dev(trans), &q->napi, cb, NAPI_POLL_WEIGHT);
+ 	napi_enable(&q->napi);
+ 	/* avoid schedule loss */
+ 	napi_schedule(trans->isr_map[q->isr_map_idx][map_id]);
+--- a/wlan_hwifi/bus/mtk_pci_dma.c
++++ b/wlan_hwifi/bus/mtk_pci_dma.c
+@@ -843,6 +843,9 @@
+ static void
+ pci_rx_queue_page_drain(struct pci_rx_queue *rq)
+ {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++	page_frag_cache_drain(&rq->rx_page);
++#else
+ 	if (rq->rx_page.va) {
+ 		struct page *page;
+ 
+@@ -856,6 +859,7 @@
+ 	}
+ 
+ 	memset(&rq->rx_page, 0x00, sizeof(rq->rx_page));
++#endif
+ }
+ 
+ static void
+@@ -1161,7 +1165,7 @@
+ 	struct pci_irq_vector_data *vec_data;
+ 	int done;
+ 
+-	trans = container_of(napi->dev, struct pci_trans, napi_dev);
++	trans = napi_to_pci_trans(napi);
+ 	q = container_of(napi, struct pci_queue, napi);
+ 	vec_data = &trans->vec_data[q->vec_id];
+ 
+@@ -1220,7 +1224,7 @@
+ 	struct pci_irq_vector_data *vec_data;
+ 	u32 swi_sta = 0, swi_ena_wdt = 0;
+ 
+-	trans = container_of(napi->dev, struct pci_trans, napi_dev);
++	trans = napi_to_pci_trans(napi);
+ 	bus_trans = to_bus_trans(trans);
+ 	dev = to_hw_dev(trans);
+ 	vec_data = &trans->vec_data[trans->mcu2host_sw_int_vec_id];
+@@ -1779,7 +1783,7 @@
+ 	int done = 0, cur;
+ 	struct pci_rx_queue *rq;
+ 
+-	trans = container_of(napi->dev, struct pci_trans, napi_dev);
++	trans = napi_to_pci_trans(napi);
+ 	q = container_of(napi, struct pci_queue, napi);
+ 	vec_data = &trans->vec_data[q->vec_id];
+ 	rq = (struct pci_rx_queue *)q;
+@@ -1842,7 +1846,7 @@
+ 	q->vec_id = vec_id;
+ 	q->resource_idx = res_id;
+ 	trans->isr_map[q->isr_map_idx][map_id] = &q->napi;
+-	netif_napi_add_weight(&trans->napi_dev, &q->napi, cb, NAPI_POLL_WEIGHT);
++	netif_napi_add_weight(pci_napi_dev(trans), &q->napi, cb, NAPI_POLL_WEIGHT);
+ 	napi_enable(&q->napi);
+ 	return 0;
+ }
+@@ -1944,7 +1948,7 @@
+ 
+ 	trans->mcu2host_sw_int_vec_id = vec_id;
+ 	trans->isr_map[isr_map_idx][map_id] = &trans->swi_napi;
+-	netif_napi_add_weight(&trans->napi_dev, &trans->swi_napi,
++	netif_napi_add_weight(pci_napi_dev(trans), &trans->swi_napi,
+ 			pci_dma_swi_handler, NAPI_POLL_WEIGHT);
+ 	napi_enable(&trans->swi_napi);
+ 	return 0;
+@@ -2162,12 +2166,33 @@
+ 	return ret;
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++static void pci_dma_free_napi_dev(void *dev)
++{
++	free_netdev(dev);
++}
++#endif
++
+ static int
+ pci_dma_sw_init_device(struct pci_trans *trans)
+ {
+ 	int ret;
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++	if (!trans->napi_dev) {
++		struct net_device *dev = alloc_netdev_dummy(sizeof(trans));
++
++		if (!dev)
++			return -ENOMEM;
++		*(struct pci_trans **)netdev_priv(dev) = trans;
++		ret = devm_add_action_or_reset(to_device(trans), pci_dma_free_napi_dev, dev);
++		if (ret)
++			return ret;
++		trans->napi_dev = dev;
++	}
++#else
+ 	mt_init_dummy_netdev(&trans->napi_dev);
++#endif
+ 
+ 	ret = pci_dma_sw_init_tx_queue(trans);
+ 	if (ret) {
+--- a/wlan_hwifi/bus/mtk_pci_dma.h
++++ b/wlan_hwifi/bus/mtk_pci_dma.h
+@@ -508,7 +508,11 @@
+  */
+ struct pci_trans {
+ 	struct mtk_bus_trans parent;
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++	struct net_device *napi_dev;
++#else
+ 	struct net_device napi_dev;
++#endif
+ 	struct pci_dev *pdev;
+ 	struct pci_irq_vector_data vec_data[MAX_VEC_NUM];
+ 	struct pci_int_mask_map int_mask_map[MAX_MAP_IDX];
+@@ -553,6 +557,24 @@
+ 	enum pcie_link_width pci_lane;
+ };
+ 
++static inline struct pci_trans *napi_to_pci_trans(struct napi_struct *napi)
++{
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++	return *(struct pci_trans **)netdev_priv(napi->dev);
++#else
++	return container_of(napi->dev, struct pci_trans, napi_dev);
++#endif
++}
++
++static inline struct net_device *pci_napi_dev(struct pci_trans *trans)
++{
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++	return trans->napi_dev;
++#else
++	return &trans->napi_dev;
++#endif
++}
++
+ struct pci_rxq_ops {
+ 	int (*get_data)(struct pci_trans *trans,
+ 	struct pci_queue *q, u32 idx, struct mtk_bus_rx_info *rx_info);

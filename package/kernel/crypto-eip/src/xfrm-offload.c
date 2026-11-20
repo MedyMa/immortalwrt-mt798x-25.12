@@ -270,7 +270,11 @@ err_out:
 	return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+int mtk_xfrm_offload_state_add(struct net_device *dev, struct xfrm_state *xs, struct netlink_ext_ack *extack)
+#else
 int mtk_xfrm_offload_state_add(struct xfrm_state *xs, struct netlink_ext_ack *extack)
+#endif
 {
         struct mtk_xfrm_params *params, *other;
         bool inbound = xs->xso.dir == XFRM_DEV_OFFLOAD_IN;
@@ -355,7 +359,11 @@ err:
         return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+void mtk_xfrm_offload_state_delete(struct net_device *dev, struct xfrm_state *xs)
+#else
 void mtk_xfrm_offload_state_delete(struct xfrm_state *xs)
+#endif
 {
         struct mtk_xfrm_params *params;
 
@@ -397,7 +405,11 @@ quarantine:
         CRYPTO_ERR("SA retirement failed; context quarantined until reboot\n");
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+void mtk_xfrm_offload_state_free(struct net_device *dev, struct xfrm_state *xs)
+#else
 void mtk_xfrm_offload_state_free(struct xfrm_state *xs)
+#endif
 {
         struct mtk_xfrm_params *params;
 

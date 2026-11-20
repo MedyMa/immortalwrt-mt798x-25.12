@@ -449,7 +449,7 @@ static inline void mcu_state_trans_start(void)
 
 static inline void mcu_state_trans_end(void)
 {
-	del_timer_sync(&mcu.mcu_ctrl_timer);
+	timer_delete_sync(&mcu.mcu_ctrl_timer);
 }
 
 static inline void mcu_state_trans_err(void)
@@ -1509,7 +1509,7 @@ int mtk_npu_mcu_bring_up(struct platform_device *pdev)
 err_stop_mcu_ctrl_thread:
 	mtk_npu_mcu_stop_recovery();
 	kthread_stop(mcu.mcu_ctrl_thread);
-	del_timer_sync(&mcu.mcu_ctrl_timer);
+	timer_delete_sync(&mcu.mcu_ctrl_timer);
 	mcu_power_off();
 	mtk_npu_fw_clean_up();
 
@@ -1531,7 +1531,7 @@ void mtk_npu_mcu_tear_down(struct platform_device *pdev)
 		NPU_WARN("MCU shutdown failed: %d; stopping host engines\n", ret);
 
 	kthread_stop(mcu.mcu_ctrl_thread);
-	del_timer_sync(&mcu.mcu_ctrl_timer);
+	timer_delete_sync(&mcu.mcu_ctrl_timer);
 
 	if (mcu.powered) {
 		mtk_pce_disable();

@@ -649,8 +649,12 @@ schedule:
 
 static void rmnet_map_tx_aggregate_init(struct rmnet_port *port)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+	hrtimer_setup(&port->hrtimer, rmnet_map_flush_tx_packet_queue, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+#else
 	hrtimer_init(&port->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	port->hrtimer.function = rmnet_map_flush_tx_packet_queue;
+#endif
 	port->egress_agg_params.agg_size = 8192;
 	port->egress_agg_params.agg_count = 20;
 	port->egress_agg_params.agg_time = 3000000;

@@ -270,11 +270,15 @@ bm_deinit_all(struct wed_entry *wed, struct wed_buf_res *res)
 	}
 #endif	/* WED_DYNAMIC_TXBM_SUPPORT */
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	page_frag_cache_drain(&res->tx_page);
+#else
 	if (res->tx_page.va) {
 		page = virt_to_page(res->tx_page.va);
 		tx_page_frag_cache_drain(page, res->tx_page.pagecnt_bias);
 		memset(&res->tx_page, 0, sizeof(res->tx_page));
 	}
+#endif
 
 	warp_dma_buf_free(pdev, &res->des_buf);
 	warp_dma_buf_free(pdev, &res->fbuf);

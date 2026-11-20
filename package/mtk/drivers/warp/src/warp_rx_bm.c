@@ -72,12 +72,16 @@ wed_rx_bm_ring_exit(
 	}
 
 	for (i = 0; i < 2; i++) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+		page_frag_cache_drain(&res->rx_page[i]);
+#else
 		if (res->rx_page[i].va) {
 			struct page *page;
 			page = virt_to_page(res->rx_page[i].va);
 			rx_bm_page_frag_cache_drain(page, res->rx_page[i].pagecnt_bias);
 			memset(&res->rx_page[i], 0, sizeof(res->rx_page[i]));
 		}
+#endif
 	}
 
 	vfree(ring->cell);
@@ -847,6 +851,9 @@ wed_rx_bm_exit(struct wed_entry *wed)
 			}
 
 			for (i = 0; i < 2; i++) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+				page_frag_cache_drain(&res->rx_page[i]);
+#else
 				if (res->rx_page[i].va) {
 					struct page *page;
 #ifdef WED_MEM_LEAK_DBG
@@ -856,6 +863,7 @@ wed_rx_bm_exit(struct wed_entry *wed)
 					rx_bm_page_frag_cache_drain(page, res->rx_page[i].pagecnt_bias);
 					memset(&res->rx_page[i], 0, sizeof(res->rx_page[i]));
 				}
+#endif
 			}
 
 			/*free wed rx ring*/

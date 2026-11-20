@@ -1,0 +1,487 @@
+Subject: [PATCH] Keep R4 SFP recovery and module handling
+
+Retain the board opt-in for warm recovery, I2C presence detection and the deployed transceiver quirks on the 6.18 SFP state machine.
+
+--- a/drivers/net/phy/marvell.c
++++ b/drivers/net/phy/marvell.c
+@@ -3752,7 +3752,7 @@
+ 		.phy_id = MARVELL_PHY_ID_88E1111,
+ 		.phy_id_mask = MARVELL_PHY_ID_MASK,
+ 		.name = "Marvell 88E1111",
+-		/* PHY_GBIT_FEATURES */
++		.features = PHY_GBIT_FEATURES,
+ 		.flags = PHY_POLL_CABLE_TEST,
+ 		.probe = marvell_probe,
+ 		.inband_caps = m88e1111_inband_caps,
+--- a/drivers/net/phy/sfp-bus.c
++++ b/drivers/net/phy/sfp-bus.c
+@@ -327,6 +327,9 @@
+ 
+ 	if (quirk && quirk->support)
+ 		quirk->support(id, &bus->caps);
++
++	dev_info(bus->sfp_dev, "sfp: support mode %*pb\n",
++		 __ETHTOOL_LINK_MODE_MASK_NBITS, bus->caps.link_modes);
+ }
+ 
+ /**
+--- a/drivers/net/phy/sfp.c
++++ b/drivers/net/phy/sfp.c
+@@ -156,7 +156,7 @@
+ };
+ 
+ static const enum gpiod_flags gpio_flags[] = {
+-	GPIOD_IN,
++	GPIOD_IN | GPIOD_FLAGS_BIT_NONEXCLUSIVE,
+ 	GPIOD_IN,
+ 	GPIOD_IN,
+ 	GPIOD_ASIS,
+@@ -374,6 +374,28 @@
+ 	    !memcmp(id->base.vendor_pn, "UF-INSTANT      ", 16))
+ 		return true;
+ 
++	/* SFP RollBall module JESS-LINK P60000BBC001-1 Instant has in its
++	 * EEPROM stored phys id SFF_8472 instead of SFP. Therefore mark this
++	 * module explicitly as supported based on vendor name and pn match.
++	 */
++	if (id->base.phys_id == SFF8024_ID_SFF_8472 &&
++	    id->base.phys_ext_id == SFP_PHYS_EXT_ID_SFP &&
++	    !memcmp(id->base.vendor_name, "JESS-LINK       ", 16) &&
++	    !memcmp(id->base.vendor_pn, "P60000BBC001-1  ", 16))
++		return true;
++
++	/* SFP GPON module SK-LINK SFP-GE-LX20 SM1310 and SM1550 Instant
++	 * has in its EEPROM stored phys id UNK instead of SFP. Therefore
++	 * mark this module explicitly as supported based on vendor name
++	 * and pn match.
++	 */
++	if (id->base.phys_id == SFF8024_ID_UNK &&
++	    id->base.phys_ext_id == SFP_PHYS_EXT_ID_SFP &&
++	    !memcmp(id->base.vendor_name, "SK-LINK         ", 16) &&
++	    (!memcmp(id->base.vendor_pn, "SFP-GE-LX20-SM13", 16) ||
++	     !memcmp(id->base.vendor_pn, "SFP-GE-LX-SM1550", 16)))
++		return true;
++
+ 	return false;
+ }
+ 
+@@ -580,6 +602,7 @@
+ 	// Fiberstore SFP-2.5G-T and SFP-10GM-T uses Rollball protocol to talk
+ 	// to the PHY and needs 4 sec wait before probing the PHY.
+ 	SFP_QUIRK_F("FS", "SFP-2.5G-T", sfp_fixup_rollball_wait4s),
++	SFP_QUIRK_F("FS", "SFP-2.5G-T-I", sfp_fixup_rollball_wait4s),
+ 	SFP_QUIRK_F("FS", "SFP-10GM-T", sfp_fixup_rollball_wait4s),
+ 
+ 	// Fiberstore GPON-ONU-34-20BI can operate at 2500base-X, but report 1.2GBd
+@@ -646,6 +669,7 @@
+ 	// OEM SFP-GE-T is a 1000Base-T module with broken TX_FAULT indicator
+ 	SFP_QUIRK_F("OEM", "SFP-GE-T", sfp_fixup_ignore_tx_fault),
+ 
++	SFP_QUIRK_F("ETU", "ESP-T5-R", sfp_fixup_rollball_cc),
+ 	SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc),
+ 	SFP_QUIRK_S("OEM", "SFP-2.5G-T", sfp_quirk_oem_2_5g),
+ 	SFP_QUIRK_S("OEM", "SFP-2.5G-BX10-D", sfp_quirk_2500basex),
+@@ -665,6 +689,8 @@
+ 	// garbage past the legitimate string instead of space padding, so
+ 	// match the part as a prefix.
+ 	SFP_QUIRK_F_PREFIX("OEM", "XGSPONST2001", sfp_fixup_potron),
++	SFP_QUIRK_F("OEM", "TNBYV02-C0X-C3", sfp_fixup_rollball_cc),
++	SFP_QUIRK_F("JESS-LINK", "P60000BBC001-1", sfp_fixup_rollball),
+ 
+ 	SFP_QUIRK_F("QINIYEK", "BJ-SFP-10G-T", sfp_fixup_fs_10gt),
+ 	SFP_QUIRK_F("Turris", "RTSFP-2.5G", sfp_fixup_rollball),
+@@ -702,7 +728,7 @@
+ 	return !strncmp(qs, str, qs_len);
+ }
+ 
+-static const struct sfp_quirk *sfp_lookup_quirk(const struct sfp_eeprom_id *id)
++static const struct sfp_quirk *sfp_lookup_quirk(struct sfp *sfp, const struct sfp_eeprom_id *id)
+ {
+ 	const struct sfp_quirk *q;
+ 	unsigned int i;
+@@ -714,8 +740,14 @@
+ 	for (i = 0, q = sfp_quirks; i < ARRAY_SIZE(sfp_quirks); i++, q++)
+ 		if (sfp_match(q->vendor, id->base.vendor_name, vs, false) &&
+ 		    sfp_match(q->part, id->base.vendor_pn, ps,
+-			      q->part_prefix_match))
++			      q->part_prefix_match)) {
++			dev_info(sfp->dev,
++				 "module %.*s %.*s rev %.*s has been found in the quirk list\n",
++				 (int)sizeof(id->base.vendor_name), id->base.vendor_name,
++				 (int)sizeof(id->base.vendor_pn), id->base.vendor_pn,
++				 (int)sizeof(id->base.vendor_rev), id->base.vendor_rev);
+ 			return q;
++	}
+ 
+ 	return NULL;
+ }
+@@ -725,7 +757,7 @@
+ 	unsigned int i, state, v;
+ 
+ 	for (i = state = 0; i < GPIO_MAX; i++) {
+-		if (gpio_flags[i] != GPIOD_IN || !sfp->gpio[i])
++		if ((gpio_flags[i] & GPIOD_IN) != GPIOD_IN || !sfp->gpio[i])
+ 			continue;
+ 
+ 		v = gpiod_get_value_cansleep(sfp->gpio[i]);
+@@ -1852,8 +1884,11 @@
+ 	}
+ 
+ 	err = sfp_read(sfp, true, 0, &sfp->diag, sizeof(sfp->diag));
+-	if (err < 0) {
+-		if (sfp->hwmon_tries--) {
++	if (err != sizeof(sfp->diag)) {
++		if (err >= 0)
++			err = -EIO;
++		if (sfp->hwmon_tries) {
++			sfp->hwmon_tries--;
+ 			mod_delayed_work(system_percpu_wq, &sfp->hwmon_probe,
+ 					 T_PROBE_RETRY_SLOW);
+ 		} else {
+@@ -1866,6 +1901,7 @@
+ 	sfp->hwmon_name = hwmon_sanitize_name(dev_name(sfp->dev));
+ 	if (IS_ERR(sfp->hwmon_name)) {
+ 		dev_err(sfp->dev, "out of memory for hwmon name\n");
++		sfp->hwmon_name = NULL;
+ 		return;
+ 	}
+ 
+@@ -1873,29 +1909,33 @@
+ 							 sfp->hwmon_name, sfp,
+ 							 &sfp_hwmon_chip_info,
+ 							 NULL);
+-	if (IS_ERR(sfp->hwmon_dev))
++	if (IS_ERR(sfp->hwmon_dev)) {
+ 		dev_err(sfp->dev, "failed to register hwmon device: %ld\n",
+ 			PTR_ERR(sfp->hwmon_dev));
+-}
+-
+-static int sfp_hwmon_insert(struct sfp *sfp)
+-{
+-	if (sfp->have_a2 && sfp->id.ext.diagmon & SFP_DIAGMON_DDM) {
+-		mod_delayed_work(system_percpu_wq, &sfp->hwmon_probe, 1);
+-		sfp->hwmon_tries = R_PROBE_RETRY_SLOW;
+-	}
+-
+-	return 0;
+-}
+-
+-static void sfp_hwmon_remove(struct sfp *sfp)
+-{
+-	cancel_delayed_work_sync(&sfp->hwmon_probe);
+-	if (!IS_ERR_OR_NULL(sfp->hwmon_dev)) {
+-		hwmon_device_unregister(sfp->hwmon_dev);
+ 		sfp->hwmon_dev = NULL;
+ 		kfree(sfp->hwmon_name);
+-	}
++		sfp->hwmon_name = NULL;
++	}
++}
++
++static int sfp_hwmon_insert(struct sfp *sfp)
++{
++	if (sfp->have_a2 && sfp->id.ext.diagmon & SFP_DIAGMON_DDM) {
++		sfp->hwmon_tries = R_PROBE_RETRY_SLOW;
++		mod_delayed_work(system_percpu_wq, &sfp->hwmon_probe, 1);
++	}
++
++	return 0;
++}
++
++static void sfp_hwmon_remove(struct sfp *sfp)
++{
++	cancel_delayed_work_sync(&sfp->hwmon_probe);
++	if (!IS_ERR_OR_NULL(sfp->hwmon_dev))
++		hwmon_device_unregister(sfp->hwmon_dev);
++	sfp->hwmon_dev = NULL;
++	kfree(sfp->hwmon_name);
++	sfp->hwmon_name = NULL;
+ }
+ 
+ static int sfp_hwmon_init(struct sfp *sfp)
+@@ -1907,7 +1947,7 @@
+ 
+ static void sfp_hwmon_exit(struct sfp *sfp)
+ {
+-	cancel_delayed_work_sync(&sfp->hwmon_probe);
++	sfp_hwmon_remove(sfp);
+ }
+ #else
+ static int sfp_hwmon_insert(struct sfp *sfp)
+@@ -1932,14 +1972,14 @@
+ /* Helpers */
+ static void sfp_module_tx_disable(struct sfp *sfp)
+ {
+-	dev_dbg(sfp->dev, "tx disable %u -> %u\n",
++	dev_info(sfp->dev, "tx disable %u -> %u\n",
+ 		sfp->state & SFP_F_TX_DISABLE ? 1 : 0, 1);
+ 	sfp_mod_state(sfp, SFP_F_TX_DISABLE, SFP_F_TX_DISABLE);
+ }
+ 
+ static void sfp_module_tx_enable(struct sfp *sfp)
+ {
+-	dev_dbg(sfp->dev, "tx disable %u -> %u\n",
++	dev_info(sfp->dev, "tx disable %u -> %u\n",
+ 		sfp->state & SFP_F_TX_DISABLE ? 1 : 0, 0);
+ 	sfp_mod_state(sfp, SFP_F_TX_DISABLE, 0);
+ }
+@@ -2048,7 +2088,8 @@
+ static int sfp_sm_probe_phy(struct sfp *sfp, int addr, bool is_c45)
+ {
+ 	struct phy_device *phy;
+-	int err;
++	int err, i;
++	u32 id;
+ 
+ 	phy = get_phy_device(sfp->i2c_mii, addr, is_c45);
+ 	if (phy == ERR_PTR(-ENODEV))
+@@ -2068,6 +2109,30 @@
+ 			ERR_PTR(err));
+ 		return err;
+ 	}
++
++	if (phy->is_c45) {
++		for (i = 0; i < ARRAY_SIZE(phy->c45_ids.device_ids); i++) {
++			id = phy->c45_ids.device_ids[i];
++			if (id == 0xffffffff)
++				continue;
++
++			dev_info(sfp->dev,
++				 "CL45 PHY device [0x%04x:0x%04x] found!\n",
++				 (id >> 16) & 0xffff, id & 0xffff);
++		}
++	} else {
++		id = phy->phy_id;
++		dev_info(sfp->dev,
++			 "CL22 PHY device [0x%04x:0x%04x] found!\n",
++			 (id >> 16) & 0xffff, id & 0xffff);
++	}
++
++	dev_info(sfp->dev, "CL%s PHY driver [%s] found!\n",
++		 phy->is_c45 ? "45" : "22",
++		 phy->drv ? phy->drv->name : "not");
++
++	dev_info(sfp->dev, "phy: support mode %*pb\n",
++		 __ETHTOOL_LINK_MODE_MASK_NBITS, phy->supported);
+ 
+ 	err = sfp_add_phy(sfp->sfp_bus, phy);
+ 	if (err) {
+@@ -2155,6 +2220,9 @@
+ 
+ static int sfp_sm_add_mdio_bus(struct sfp *sfp)
+ {
++	dev_info(sfp->dev, "probing phy device through the [%s] protocol\n",
++		 mdio_i2c_proto_type(sfp->mdio_protocol));
++
+ 	if (sfp->mdio_protocol != MDIO_I2C_NONE)
+ 		return sfp_i2c_mdiobus_create(sfp);
+ 
+@@ -2398,6 +2466,13 @@
+ 	return true;
+ }
+ 
++/* A blank base has a valid zero checksum but is not a module identity. */
++static bool sfp_id_is_unready(const struct sfp_eeprom_base *id)
++{
++	return !memchr_inv(id, 0, sizeof(*id)) ||
++	       !memchr_inv(id, 0xff, sizeof(*id));
++}
++
+ static int sfp_cotsworks_fixup_check(struct sfp *sfp, struct sfp_eeprom_id *id)
+ {
+ 	u8 check;
+@@ -2449,10 +2524,10 @@
+ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+ {
+ 	/* SFP module inserted - read I2C data */
+-	struct sfp_eeprom_id id;
++	struct sfp_eeprom_id id = {};
+ 	bool cotsworks_sfbg;
+ 	unsigned int mask;
+-	bool cotsworks;
++	bool cotsworks, jesslink, sklink;
+ 	u8 check;
+ 	int ret;
+ 
+@@ -2478,10 +2553,6 @@
+ 	 * is really required and we have no other option.
+ 	 */
+ 	if (sfp_id_needs_byte_io(sfp, &id.base, sizeof(id.base))) {
+-		dev_info(sfp->dev,
+-			 "Detected broken RTL8672/RTL9601C emulated EEPROM\n");
+-		dev_info(sfp->dev,
+-			 "Switching to reading EEPROM to one byte at a time\n");
+ 		sfp->i2c_block_size = 1;
+ 
+ 		ret = sfp_read(sfp, false, 0, &id.base, sizeof(id.base));
+@@ -2498,7 +2569,16 @@
+ 				ERR_PTR(ret));
+ 			return -EAGAIN;
+ 		}
+-	}
++		if (sfp_id_is_unready(&id.base))
++			goto unready;
++		dev_info(sfp->dev,
++			 "Detected broken RTL8672/RTL9601C emulated EEPROM\n");
++		dev_info(sfp->dev,
++			 "Switching to reading EEPROM to one byte at a time\n");
++	}
++
++	if (sfp_id_is_unready(&id.base))
++		goto unready;
+ 
+ 	/* Cotsworks do not seem to update the checksums when they
+ 	 * do the final programming with the final module part number,
+@@ -2506,6 +2586,18 @@
+ 	 */
+ 	cotsworks = !memcmp(id.base.vendor_name, "COTSWORKS       ", 16);
+ 	cotsworks_sfbg = !memcmp(id.base.vendor_pn, "SFBG", 4);
++
++	/* JESS-LINK do not seem to update the checksums when they
++	 * do the final programming with the final module part number,
++	 * serial number and date code.
++	 */
++	jesslink = !memcmp(id.base.vendor_name, "JESS-LINK       ", 16);
++
++	/* SK-LINK do not seem to update the checksums when they
++	 * do the final programming with the final module part number,
++	 * serial number and date code.
++	 */
++	sklink = !memcmp(id.base.vendor_name, "SK-LINK         ", 16);
+ 
+ 	/* Cotsworks SFF module EEPROM do not always have valid phys_id,
+ 	 * phys_ext_id, and connector bytes.  Rewrite SFF EEPROM bytes if
+@@ -2520,17 +2612,19 @@
+ 	/* Validate the checksum over the base structure */
+ 	check = sfp_check(&id.base, sizeof(id.base) - 1);
+ 	if (check != id.base.cc_base) {
+-		if (cotsworks) {
++		if (cotsworks || jesslink || sklink) {
+ 			dev_warn(sfp->dev,
+ 				 "EEPROM base structure checksum failure (0x%02x != 0x%02x)\n",
+ 				 check, id.base.cc_base);
+ 		} else {
+-			dev_err(sfp->dev,
+-				"EEPROM base structure checksum failure: 0x%02x != 0x%02x\n",
+-				check, id.base.cc_base);
+-			print_hex_dump(KERN_ERR, "sfp EE: ", DUMP_PREFIX_OFFSET,
+-				       16, 1, &id, sizeof(id), true);
+-			return -EINVAL;
++			if (report) {
++				dev_err(sfp->dev,
++					"EEPROM base structure checksum failure: 0x%02x != 0x%02x\n",
++					check, id.base.cc_base);
++				print_hex_dump(KERN_ERR, "sfp EE: ", DUMP_PREFIX_OFFSET,
++					       16, 1, &id.base, sizeof(id.base), true);
++			}
++			return -EAGAIN;
+ 		}
+ 	}
+ 
+@@ -2621,7 +2715,7 @@
+ 	else
+ 		sfp->mdio_protocol = MDIO_I2C_NONE;
+ 
+-	sfp->quirk = sfp_lookup_quirk(&id);
++	sfp->quirk = sfp_lookup_quirk(sfp, &id);
+ 
+ 	mutex_lock(&sfp->st_mutex);
+ 	/* Initialise state bits to use from hardware */
+@@ -2637,6 +2731,11 @@
+ 	mutex_unlock(&sfp->st_mutex);
+ 
+ 	return 0;
++
++unready:
++	if (report)
++		dev_err(sfp->dev, "EEPROM base is blank or erased; module identity unavailable\n");
++	return -EAGAIN;
+ }
+ 
+ static void sfp_sm_mod_remove(struct sfp *sfp)
+@@ -2902,11 +3001,11 @@
+ 		 * clear.  Probe for the PHY and check the LOS state.
+ 		 */
+ 		ret = sfp_sm_probe_for_phy(sfp);
+-		if (ret == -ENODEV) {
++		if (ret == -ENODEV || ret == -EINVAL) {
+ 			if (--sfp->sm_phy_retries) {
+ 				sfp_sm_next(sfp, SFP_S_INIT_PHY,
+ 					    sfp->phy_t_retry);
+-				dev_dbg(sfp->dev,
++				dev_info(sfp->dev,
+ 					"no PHY detected, %u tries left\n",
+ 					sfp->sm_phy_retries);
+ 				break;
+@@ -3070,7 +3169,7 @@
+ 
+ static void __sfp_sm_event(struct sfp *sfp, unsigned int event)
+ {
+-	dev_dbg(sfp->dev, "SM: enter %s:%s:%s event %s\n",
++	dev_info(sfp->dev, "SM: enter %s:%s:%s event %s\n",
+ 		mod_state_to_str(sfp->sm_mod_state),
+ 		dev_state_to_str(sfp->sm_dev_state),
+ 		sm_state_to_str(sfp->sm_state),
+@@ -3080,7 +3179,7 @@
+ 	sfp_sm_module(sfp, event);
+ 	sfp_sm_main(sfp, event);
+ 
+-	dev_dbg(sfp->dev, "SM: exit %s:%s:%s\n",
++	dev_info(sfp->dev, "SM: exit %s:%s:%s\n",
+ 		mod_state_to_str(sfp->sm_mod_state),
+ 		dev_state_to_str(sfp->sm_dev_state),
+ 		sm_state_to_str(sfp->sm_state));
+@@ -3309,10 +3408,9 @@
+ {
+ 	struct sfp *sfp = data;
+ 
+-	sfp_hwmon_exit(sfp);
+-
+ 	cancel_delayed_work_sync(&sfp->poll);
+ 	cancel_delayed_work_sync(&sfp->timeout);
++	sfp_hwmon_exit(sfp);
+ 	if (sfp->i2c_mii) {
+ 		mdiobus_unregister(sfp->i2c_mii);
+ 		mdiobus_free(sfp->i2c_mii);
+@@ -3447,7 +3545,7 @@
+ 	}
+ 
+ 	for (i = 0; i < GPIO_MAX; i++) {
+-		if (gpio_flags[i] != GPIOD_IN || !sfp->gpio[i])
++		if ((gpio_flags[i] & GPIOD_IN) != GPIOD_IN || !sfp->gpio[i])
+ 			continue;
+ 
+ 		sfp->gpio_irq[i] = gpiod_to_irq(sfp->gpio[i]);
+@@ -3532,6 +3630,7 @@
+ 
+ 	cancel_delayed_work_sync(&sfp->poll);
+ 	cancel_delayed_work_sync(&sfp->timeout);
++	sfp_hwmon_remove(sfp);
+ }
+ 
+ static struct platform_driver sfp_driver = {
+--- a/include/linux/mdio/mdio-i2c.h
++++ b/include/linux/mdio/mdio-i2c.h
+@@ -18,6 +18,22 @@
+ 	MDIO_I2C_ROLLBALL,
+ };
+ 
++static inline const char *mdio_i2c_proto_type(int type)
++{
++	switch (type) {
++	case MDIO_I2C_NONE:
++		return "MDIO_I2C_NONE";
++	case MDIO_I2C_MARVELL_C22:
++		return "MDIO_I2C_MARVELL_C22";
++	case MDIO_I2C_C45:
++		return "MDIO_I2C_C45";
++	case MDIO_I2C_ROLLBALL:
++		return "MDIO_I2C_ROLLBALL";
++	default:
++		return "UNKNOWN";
++	}
++}
++
+ struct mii_bus *mdio_i2c_alloc(struct device *parent, struct i2c_adapter *i2c,
+ 			       enum mdio_i2c_proto protocol);
+ 

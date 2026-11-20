@@ -1,0 +1,96 @@
+--- a/qmi_wwan_q.c
++++ b/qmi_wwan_q.c
+@@ -184,7 +184,11 @@
+ #if defined(QUECTEL_UL_DATA_AGG)
+ 	struct tx_agg_ctx tx_ctx;
+ 	struct tasklet_struct	txq;
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++	work_func_t usbnet_bh;
++#else
+ 	struct tasklet_struct usbnet_bh;
++#endif
+ #endif
+ 
+ #ifdef QUECTEL_BRIDGE_MODE
+@@ -685,13 +689,15 @@
+ 	if (!pQmapDev || !pQmapDev->use_rmnet_usb)
+ 		return;
+ 
++	rcu_read_lock();
+ 	for (i = 0; i < pQmapDev->qmap_mode; i++) {
+-		struct net_device *qmap_net = pQmapDev->mpQmapNetDev[i];
++		struct net_device *qmap_net = READ_ONCE(pQmapDev->mpQmapNetDev[i]);
+ 
+ 		if (qmap_net && netif_carrier_ok(qmap_net) && netif_queue_stopped(qmap_net)) {
+ 			netif_wake_queue(qmap_net);
+ 		}
+ 	}
++	rcu_read_unlock();
+ }
+ 
+ static struct sk_buff * add_qhdr(struct sk_buff *skb, u8 mux_id, int *hdr_data, int ip_offset) {
+@@ -891,6 +897,18 @@
+ #endif
+ 
+ #if defined(QUECTEL_UL_DATA_AGG)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++static void qmap_usbnet_bh_work(struct work_struct *work)
++{
++	struct usbnet *dev = container_of(work, struct usbnet, bh_work);
++	struct qmi_wwan_state *info = (void *)&dev->data;
++	sQmiWwanQmap *qmap = (void *)info->unused;
++
++	qmap->usbnet_bh(work);
++	if (!netif_queue_stopped(dev->net))
++		qmap_wake_queue(qmap);
++}
++#else
+ static void usbnet_bh(unsigned long data) {
+ 	sQmiWwanQmap *pQmapDev = (sQmiWwanQmap *)data;
+ 	struct tasklet_struct *t = &pQmapDev->usbnet_bh;
+@@ -909,6 +927,7 @@
+ 		qmap_wake_queue((sQmiWwanQmap *)data);
+ 	}
+ }
++#endif
+ 
+ static void rmnet_usb_tx_wake_queue(unsigned long data) {
+ 	qmap_wake_queue((sQmiWwanQmap *)data);
+@@ -1368,8 +1387,12 @@
+ #endif
+ 	priv->agg_skb = NULL;
+ 	priv->agg_count = 0;
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
++	hrtimer_setup(&priv->agg_hrtimer, rmnet_usb_tx_agg_timer_cb, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++#else
+ 	hrtimer_init(&priv->agg_hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 	priv->agg_hrtimer.function = rmnet_usb_tx_agg_timer_cb;
++#endif
+ 	INIT_WORK(&priv->agg_wq, rmnet_usb_tx_agg_work);
+ 	ktime_get_ts64(&priv->agg_time);
+ 	spin_lock_init(&priv->agg_lock);
+@@ -1427,7 +1450,8 @@
+ 		unsigned long flags;
+ 
+ 		pr_info("qmap_unregister_device(%s)\n", qmap_net->name);
+-		pDev->mpQmapNetDev[offset_id] = NULL;
++		WRITE_ONCE(pDev->mpQmapNetDev[offset_id], NULL);
++		synchronize_net();
+ 		netif_carrier_off( qmap_net );
+ 		netif_stop_queue( qmap_net );
+ 
+@@ -2266,8 +2290,14 @@
+ 				}
+ 
+ 				if (pQmapDev->use_rmnet_usb && !one_card_mode) {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++					/* Bind runs before USB networking starts using this work. */
++					pQmapDev->usbnet_bh = dev->bh_work.func;
++					INIT_WORK(&dev->bh_work, qmap_usbnet_bh_work);
++#else
+ 					pQmapDev->usbnet_bh = dev->bh;
+ 					tasklet_init(&dev->bh, usbnet_bh, (unsigned long)pQmapDev);
++#endif
+ 				}
+ 			}
+ 		}

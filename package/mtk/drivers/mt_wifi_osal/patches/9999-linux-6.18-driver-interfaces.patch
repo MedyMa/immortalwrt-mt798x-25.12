@@ -1,0 +1,65 @@
+--- a/Makefile
++++ b/Makefile
+@@ -5,7 +5,7 @@
+ CONFIG_FUZZ_SUPPORT?=n
+ 
+ ccflags-y += -I$(src)/inc
+-GLOBAL_INCLUDES_NL80211 = include/uapi/linux/mtk_nl80211_inc
++GLOBAL_INCLUDES_NL80211 = $(srctree)/include/uapi/linux/mtk_nl80211_inc
+ ccflags-y += -I$(GLOBAL_INCLUDES_NL80211) -Werror
+ 
+ ifeq ($(CONFIG_FUZZ_SUPPORT),y)
+--- a/mt_osal_diag.c
++++ b/mt_osal_diag.c
+@@ -591,6 +591,14 @@
+ 	struct path path;
+ 	int err;
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++	dentry = start_creating_path(AT_FDCWD, name, &path, LOOKUP_DIRECTORY);
++	if (IS_ERR(dentry))
++		return PTR_ERR(dentry);
++	dentry = vfs_mkdir(mnt_idmap(path.mnt), d_inode(path.dentry), dentry, mode);
++	err = PTR_ERR_OR_ZERO(dentry);
++	end_creating_path(&path, dentry);
++#else
+ 	dentry = kern_path_create(AT_FDCWD, name, &path, LOOKUP_DIRECTORY);
+ 	if (IS_ERR(dentry)) {
+ 		MT_DEBUG_TRACE("Error create!\n");
+@@ -607,6 +615,7 @@
+ 	if (!err)
+ 		MT_DEBUG_TRACE("create %s OK!\n", name);
+ 	done_path_create(&path, dentry);
++#endif
+ 	return err;
+ }
+ 
+--- a/mt_osal_net.c
++++ b/mt_osal_net.c
+@@ -759,6 +759,7 @@
+ EXPORT_SYMBOL(mt_os_net_dev_get_iw_stats_size);
+ 
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
+ int mt_init_dummy_netdev(struct net_device *dev)
+ {
+ #if (KERNEL_VERSION(6, 12, 0) <= LINUX_VERSION_CODE)
+@@ -769,6 +770,7 @@
+ #endif
+ }
+ EXPORT_SYMBOL(mt_init_dummy_netdev);
++#endif
+ 
+ DECLARE_SUB_MODULE_INIT(mt_osal_net_init)
+ {
+--- a/mt_osal_timer.c
++++ b/mt_osal_timer.c
+@@ -95,7 +95,7 @@
+ 	unsigned char *pCancelled)
+ {
+ 	/* A running callback is not necessarily timer_pending(). */
+-	del_timer_sync(pTimer);
++	timer_delete_sync(pTimer);
+ 	if (pCancelled)
+ 		*pCancelled = true;
+ }

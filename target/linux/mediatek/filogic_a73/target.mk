@@ -1,5 +1,6 @@
 ARCH:=aarch64
 SUBTARGET:=filogic_a73
+KERNEL_PATCHVER:=6.18
 BOARDNAME:=Filogic 8x0 (MT798x - A73)
 CPU_TYPE:=generic
 CPU_SUBTYPE:=cortex-a73

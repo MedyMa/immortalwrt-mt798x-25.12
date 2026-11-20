@@ -1,0 +1,17 @@
+Subject: [PATCH] Honor legacy compiler flags for external SDK modules
+
+The out-of-tree SDK subdirectories still pass include paths and configuration flags using EXTRA_CFLAGS. Limit compatibility to external module builds.
+
+--- a/scripts/Makefile.build
++++ b/scripts/Makefile.build
+@@ -35,6 +35,10 @@
+ include $(srctree)/scripts/Kbuild.include
+ include $(srctree)/scripts/Makefile.compiler
+ include $(kbuild-file)
++
++ifneq ($(KBUILD_EXTMOD),)
++ccflags-y += $(EXTRA_CFLAGS)
++endif
+ include $(srctree)/scripts/Makefile.lib
+ 
+ # flags that take effect in current and sub directories

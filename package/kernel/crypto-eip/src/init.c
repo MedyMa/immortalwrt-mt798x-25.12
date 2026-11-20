@@ -332,4 +332,8 @@ module_exit(mtk_crypto_eip_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("MediaTek EIP-197 inline XFRM driver");
 MODULE_AUTHOR("MediaTek Inc.; MedyMa");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("CRYPTO_INTERNAL");
+#else
 MODULE_IMPORT_NS(CRYPTO_INTERNAL);
+#endif

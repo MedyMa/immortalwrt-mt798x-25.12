@@ -446,12 +446,12 @@ void (*mtk_crypto_interrupt_handler[])(void) = {
 
 void mtk_crypto_req_expired_timer(struct timer_list *t)
 {
-	struct mtk_crypto_cipher_ctx *ctx = from_timer(ctx, t, poll_timer);
+	struct mtk_crypto_cipher_ctx *ctx = container_of(t, typeof(*ctx), poll_timer);
 	PEC_NotifyFunction_t CBFunc;
 	int ring = ctx->base.ring;
 	int rc;
 
-	del_timer(&ctx->poll_timer);
+	timer_delete(&ctx->poll_timer);
 	ctx->poll_timer.expires = 0;
 
 	CBFunc = mtk_crypto_interrupt_handler[ring];
@@ -912,7 +912,7 @@ int mtk_crypto_basic_cipher(struct crypto_async_request *async,
 	}
 
 	if ((atomic_inc_return(&ctx->base.req_count) % REQ_PKT_NUM) == 0) {
-		del_timer(&ctx->poll_timer);
+		timer_delete(&ctx->poll_timer);
 		ctx->poll_timer.expires = 0;
 		rc = PEC_ResultNotify_Request(ring, CBFunc, 1);
 		if (rc != PEC_STATUS_OK) {

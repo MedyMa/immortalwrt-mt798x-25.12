@@ -1,0 +1,48 @@
+--- a/mt_wifi/include/rtmp_timer.h
++++ b/mt_wifi/include/rtmp_timer.h
+@@ -124,7 +124,7 @@
+ #define BUILD_TIMER_FUNCTION(_func) \
+ 	void rtmp_timer_##_func(struct timer_list *_timer) \
+ 	{ \
+-		PRALINK_TIMER_STRUCT _pTimer = from_timer(_pTimer, _timer, _timer); \
++		PRALINK_TIMER_STRUCT _pTimer = container_of(_timer, typeof(*_pTimer), _timer); \
+ 		RTMP_TIMER_TASK_ENTRY *_pQNode; \
+ 		RTMP_ADAPTER *_pAd; \
+ 		\
+@@ -187,7 +187,7 @@
+ #define BUILD_TIMER_FUNCTION(_func)										\
+ void rtmp_timer_##_func(struct timer_list *_timer)										\
+ {																			\
+-	PRALINK_TIMER_STRUCT	pTimer = from_timer(pTimer,_timer,TimerObj);				\
++	PRALINK_TIMER_STRUCT	pTimer = container_of(_timer, typeof(*pTimer), TimerObj);				\
+ 																			\
+ 	_func(NULL, (PVOID) pTimer->cookie, NULL, pTimer); 							\
+ 	if (pTimer->Repeat)														\
+--- a/mt_wifi/os/linux/mt_linux.c
++++ b/mt_wifi/os/linux/mt_linux.c
+@@ -208,12 +208,14 @@
+ EXPORT_SYMBOL(mt_devm_kzalloc);
+ 
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
+ int mt_init_dummy_netdev(struct net_device *dev)
+ {
+ 	init_dummy_netdev(dev);
+ 	return 0;
+ }
+ EXPORT_SYMBOL(mt_init_dummy_netdev);
++#endif
+ 
+ 
+ int mt_firmware_request_nowarn(const struct firmware **firmware, const char *name,
+--- a/mt_wifi/os/linux/rt_linux.c
++++ b/mt_wifi/os/linux/rt_linux.c
+@@ -344,7 +344,7 @@
+ 	OUT BOOLEAN *pCancelled)
+ {
+ 	if (timer_pending(pTimer))
+-		*pCancelled = del_timer_sync(pTimer);
++		*pCancelled = timer_delete_sync(pTimer);
+ 	else
+ 		*pCancelled = TRUE;
+ }
