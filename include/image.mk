@@ -958,8 +958,15 @@ define Device
   $(call Device/Default,$(1))
   $(call Device/$(1),$(1))
   $(call Device/Check,$(1))
-  $(call Device/$(if $(DUMP),Dump,Build),$(1))
+  $(if $(DUMP),$(call Device/Dump,$(1)),$(call Device/BuildSelected,$(1)))
 
+endef
+
+# ImageBuilder needs the inputs for every profile it can offer.
+define Device/BuildSelected
+  ifneq ($(CONFIG_IB)$$(_PROFILE_SET),)
+$(call Device/Build,$(1))
+  endif
 endef
 
 define BuildImage

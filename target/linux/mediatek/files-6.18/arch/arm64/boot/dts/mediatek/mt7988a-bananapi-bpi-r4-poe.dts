@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+
+#include "mt7988a-bananapi-bpi-r4-2g5.dts"
+
+/ {
+	model = "Banana Pi BPI-R4 2.5GE PoE";
+	compatible = "bananapi,bpi-r4-poe", "bananapi,bpi-r4-2g5",
+		     "bananapi,bpi-r4", "mediatek,mt7988a";
+};
+
+/* The A73 board defaults put eth1 in the LAN bridge. */
+&gmac1 {
+	/delete-property/ openwrt,netdev-name;
+};
