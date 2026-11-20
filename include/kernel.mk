@@ -148,16 +148,25 @@ PKG_EXTMOD_SUBDIRS ?= .
 
 PKG_SYMVERS_DIR = $(KERNEL_BUILD_DIR)/symvers
 
+# Kbuild uses either the build path or the name from modules.order in Module.symvers.
 define collect_module_symvers
+	set -e; \
+	realdir=$$$$(readlink -f "$(PKG_BUILD_DIR)"); \
+	tmp="$(PKG_BUILD_DIR)/Module.symvers.tmp"; \
+	: > "$$$$tmp"; \
 	for subdir in $(PKG_EXTMOD_SUBDIRS); do \
-		realdir=$$$$(readlink -f $(PKG_BUILD_DIR)); \
-		grep -F $(PKG_BUILD_DIR) $(PKG_BUILD_DIR)/$$$$subdir/Module.symvers >> $(PKG_BUILD_DIR)/Module.symvers.tmp; \
-		[ "$(PKG_BUILD_DIR)" = "$$$$realdir" ] || \
-			grep -F $$$$realdir $(PKG_BUILD_DIR)/$$$$subdir/Module.symvers >> $(PKG_BUILD_DIR)/Module.symvers.tmp; \
+		dir="$(PKG_BUILD_DIR)/$$$$subdir"; \
+		[ -f "$$$$dir/Module.symvers" ] || continue; \
+		order="$$$$dir/modules.order"; \
+		[ -f "$$$$order" ] || order=/dev/null; \
+		awk -F '\t' -v path="$(PKG_BUILD_DIR)/" -v real="$$$$realdir/" \
+			'FILENAME == ARGV[1] { sub(/\.k?o$$$$/, ""); modules[$$$$0] = 1; next } \
+			 ($$$$3 in modules) || index($$$$3, path) == 1 || index($$$$3, real) == 1' \
+			"$$$$order" "$$$$dir/Module.symvers" >> "$$$$tmp"; \
 	done; \
-	sort -u $(PKG_BUILD_DIR)/Module.symvers.tmp > $(PKG_BUILD_DIR)/Module.symvers; \
-	mkdir -p $(PKG_SYMVERS_DIR); \
-	mv $(PKG_BUILD_DIR)/Module.symvers $(PKG_SYMVERS_DIR)/$(PKG_NAME).symvers
+	mkdir -p "$(PKG_SYMVERS_DIR)"; \
+	LC_ALL=C sort -u -o "$$$$tmp" "$$$$tmp"; \
+	mv "$$$$tmp" "$(PKG_SYMVERS_DIR)/$(PKG_NAME).symvers"
 endef
 
 define KernelPackage/hooks

@@ -9,7 +9,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=crypto-eip
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 PKG_FILE_DEPENDS:=$(CURDIR)/src/ $(CURDIR)/firmware/
 PKG_BUILD_DEPENDS:=pce
 PKG_CONFIG_DEPENDS:= \

@@ -4,6 +4,8 @@ ccflags-y += -I$(src)/../../inc/crypto-eip/ddk/configs/ksupport
 ccflags-y += -I$(src)/../../inc/crypto-eip/ddk/configs/ksupport/shdevxs
 ccflags-y += -I$(src)/../../inc/crypto-eip/ddk/configs/ksupport/umdevxs
 
+include $(src)/../shared.mk
+
 $(info not that bad!!!)
 $(info ccflags: $(ccflags-y))
 
@@ -26,7 +28,7 @@ crypto-eip-ddk-ksupport-y += ../../device/shdevxs/shdevxs_prng.o
 
 crypto-eip-ddk-ksupport-y += ../../slad/lkm/adapter_interrupts.o
 crypto-eip-ddk-ksupport-y += ../../kit/log/log.o
-crypto-eip-ddk-ksupport-y += ../../kit/eip197/eip201.o
-crypto-eip-ddk-ksupport-y += ../../device/device_generic.o
+crypto-eip-ddk-ksupport-y += shared/kit/eip197/eip201.o
+crypto-eip-ddk-ksupport-y += shared/device/device_generic.o
 crypto-eip-ddk-ksupport-y += ../../device/lkm/of/lkm.o
-crypto-eip-ddk-ksupport-y += ../../device/lkm/of/device_lkm.o
+crypto-eip-ddk-ksupport-y += shared/device/lkm/of/device_lkm.o
