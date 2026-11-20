@@ -16,7 +16,13 @@ detect_mtwifi() {
 			# Newer wifi-scripts do not preload the UCI shell cache.
 			# Only initialize missing devices; retain every existing section.
 			uci -q get "wireless.${dev}" >/dev/null || {
-				ifname="$(l1util get ${dev} main_ifname)"
+				ifname="$(l1util get "$dev" main_ifname)"
+				# The MT7990 profile lists all three bands as soon as the module loads.
+				# Publish a new radio only after its netdevice can accept setup.
+				case "$dev:$ifname" in
+					MT7990_*:ra0|MT7990_*:rai0|MT7990_*:rax0)
+						[ -d "/sys/class/net/$ifname" ] || continue ;;
+				esac
 
 				idx="$(l1util get ${dev} subidx)"
 				[ "$idx" = "1" ] && dbdc_main="1" || dbdc_main="0"
