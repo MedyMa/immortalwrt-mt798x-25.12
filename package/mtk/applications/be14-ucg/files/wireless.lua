@@ -201,7 +201,7 @@ local function snapshot()
     local addr = (iface["ipv4-address"] or {})[1]
     local mac = dev and fs.readfile("/sys/class/net/" .. dev .. "/address")
     return {radios=radios, aps=aps, bindings=bindings, mac=mac and mac:match("%S+"),
-        ip=addr and addr.address, url=config.inform_url, wlan_id=config.wlan_id or "",
+        management_device=dev, ip=addr and addr.address, url=config.inform_url, wlan_id=config.wlan_id or "",
         firmware_version=config.firmware_version, candidates=candidates, sshd_port=tonumber(config.sshd_port or 22)}
 end
 

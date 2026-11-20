@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from cryptography.exceptions import InvalidTag
 from inform import FACTORY_KEY, HEADER, LIMIT, packet, unpack
 from telemetry import wireless_report
+from wired import uplink_report
 from wlan import flat, plan, report_wlans, sys_vaps, valid_wlan_id
 
 STATE = Path("/etc/be14-ucg/state.json")
@@ -128,6 +129,7 @@ def report(snapshot, state):
                uptime=int(float(Path("/proc/uptime").read_text().split()[0])), time=int(time.time()))
     if adopted:
         msg.update(wireless_report(snapshot, state.get("report_wlans", {})))
+        msg.update(uplink_report(snapshot))
         # An adopted U7 record may have acknowledged a WLAN configuration
         # that omitted 6 GHz. Request a fresh one with the E7 capabilities.
         if state.get("wlan_model") != MODEL and (state["gcm"] or state["url"].startswith("https://")):

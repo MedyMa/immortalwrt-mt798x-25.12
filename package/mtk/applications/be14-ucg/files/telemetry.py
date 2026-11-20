@@ -90,7 +90,7 @@ def interface_counters(ifnames):
     try:
         lines = Path("/proc/net/dev").read_text().splitlines()
     except OSError:
-        return counters
+        lines = []
     for line in lines:
         name, _, values = line.rpartition(":")
         name = name.strip()
@@ -102,6 +102,19 @@ def interface_counters(ifnames):
         counters[name] = {f"{direction}_{field}": int(values[offset + i])
                           for direction, offset in (("rx", 0), ("tx", 8))
                           for i, field in enumerate(("bytes", "packets", "errors", "dropped"))}
+    for name in ifnames - counters.keys():
+        if not re.fullmatch(r"[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,14}", name):
+            continue
+        stats = Path("/sys/class/net") / name / "statistics"
+        for direction in ("rx", "tx"):
+            for field in ("bytes", "packets", "errors", "dropped"):
+                key = f"{direction}_{field}"
+                try:
+                    value = (stats / key).read_text().strip()
+                except OSError:
+                    continue
+                if value.isdecimal():
+                    counters.setdefault(name, {})[key] = int(value)
     return counters
 
 
